@@ -1,0 +1,127 @@
+<script lang="ts">
+  import { onMount } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
+  import FirstRun from "./FirstRun.svelte";
+  import Chat from "./Chat.svelte";
+  import { loadConfig, updateConfig } from "../config";
+  import { getActiveManifest } from "../providers";
+  import { resolveModel } from "../manifest";
+  import { runCleanup } from "../model-lifecycle";
+  import type { HardwareProfile, Mode } from "../types";
+
+  type View = "loading" | "first-run" | "chat";
+
+  let view = $state<View>("loading");
+  let hardware = $state<HardwareProfile | null>(null);
+  let activeModel = $state("");
+  let activeMode = $state<Mode>("text");
+  let error = $state("");
+
+  onMount(async () => {
+    try {
+      const [hw, config] = await Promise.all([
+        invoke<HardwareProfile>("detect_hardware"),
+        loadConfig(),
+      ]);
+      hardware = hw;
+      activeMode = config.active_mode;
+
+      // Background cleanup of stale models
+      runCleanup().catch(() => {});
+
+      const manifest = await getActiveManifest();
+      activeModel = resolveModel(hw, manifest, activeMode, config.mode_overrides);
+
+      const ollamaInstalled = await invoke<boolean>("ollama_installed");
+      if (!ollamaInstalled) {
+        view = "first-run";
+      } else {
+        // Check if the model needs pulling
+        const pulled = await invoke<Array<{ name: string }>> ("ollama_list_models");
+        const hasCurrent = pulled.some((m) => m.name === activeModel);
+        if (!hasCurrent) {
+          view = "first-run";
+        } else {
+          await invoke("ollama_ensure_running");
+          view = "chat";
+        }
+      }
+    } catch (e) {
+      error = String(e);
+      view = "chat"; // Show chat anyway with whatever we have
+    }
+  });
+
+  async function onFirstRunComplete() {
+    await invoke("ollama_ensure_running");
+    view = "chat";
+  }
+
+  async function onModeChange(mode: Mode) {
+    activeMode = mode;
+    if (!hardware) return;
+    const [config, manifest] = await Promise.all([loadConfig(), getActiveManifest()]);
+    activeModel = resolveModel(hardware, manifest, mode, config.mode_overrides);
+
+    await updateConfig({ active_mode: mode });
+  }
+
+  async function onProviderChange() {
+    if (!hardware) return;
+    const [config, manifest] = await Promise.all([loadConfig(), getActiveManifest()]);
+    activeModel = resolveModel(hardware, manifest, activeMode, config.mode_overrides);
+  }
+</script>
+
+<div class="app">
+  {#if view === "loading"}
+    <div class="splash">
+      <div class="spinner"></div>
+      <p>Detecting hardware…</p>
+    </div>
+  {:else if view === "first-run"}
+    <FirstRun
+      {hardware}
+      {activeModel}
+      onComplete={onFirstRunComplete}
+    />
+  {:else}
+    <Chat
+      {activeModel}
+      {activeMode}
+      {hardware}
+      onModeChange={onModeChange}
+      onProviderChange={onProviderChange}
+    />
+  {/if}
+</div>
+
+<style>
+  :global(*, *::before, *::after) { box-sizing: border-box; margin: 0; padding: 0; }
+  :global(body) {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #0f0f0f;
+    color: #e8e8e8;
+    height: 100vh;
+    overflow: hidden;
+  }
+  .app { height: 100vh; display: flex; flex-direction: column; }
+  .splash {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    color: #888;
+  }
+  .spinner {
+    width: 28px; height: 28px;
+    border: 3px solid #333;
+    border-top-color: #6e6ef7;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
