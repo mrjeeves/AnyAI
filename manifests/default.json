@@ -1,0 +1,43 @@
+{
+  "name": "AnyAI Default",
+  "version": "1",
+  "ttl_minutes": 360,
+  "default_mode": "text",
+  "modes": {
+    "text": {
+      "label": "Text",
+      "tiers": [
+        { "min_vram_gb": 24, "min_ram_gb": 48, "model": "qwen2.5:32b",  "fallback": "qwen2.5:14b" },
+        { "min_vram_gb": 12, "min_ram_gb": 24, "model": "qwen2.5:14b",  "fallback": "qwen2.5:7b"  },
+        { "min_vram_gb": 6,  "min_ram_gb": 12, "model": "qwen2.5:7b",   "fallback": "qwen2.5:3b"  },
+        { "min_vram_gb": 3,  "min_ram_gb": 6,  "model": "qwen2.5:3b",   "fallback": "tinyllama"   },
+        { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "tinyllama",    "fallback": "tinyllama"   }
+      ]
+    },
+    "vision": {
+      "label": "Vision",
+      "tiers": [
+        { "min_vram_gb": 12, "min_ram_gb": 16, "model": "qwen2.5vl:7b",  "fallback": "llava:7b" },
+        { "min_vram_gb": 6,  "min_ram_gb": 8,  "model": "qwen2.5vl:3b",  "fallback": "llava:7b" },
+        { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "llava:7b",      "fallback": "llava:7b" }
+      ]
+    },
+    "code": {
+      "label": "Code",
+      "tiers": [
+        { "min_vram_gb": 12, "min_ram_gb": 24, "model": "qwen2.5-coder:14b", "fallback": "qwen2.5-coder:7b" },
+        { "min_vram_gb": 6,  "min_ram_gb": 12, "model": "qwen2.5-coder:7b",  "fallback": "qwen2.5-coder:3b" },
+        { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "qwen2.5-coder:3b",  "fallback": "qwen2.5-coder:3b" }
+      ]
+    },
+    "transcribe": {
+      "label": "Transcribe",
+      "input": "audio",
+      "tiers": [
+        { "min_vram_gb": 8,  "min_ram_gb": 16, "model": "whisper:large",  "fallback": "whisper:medium" },
+        { "min_vram_gb": 4,  "min_ram_gb": 8,  "model": "whisper:medium", "fallback": "whisper:base"   },
+        { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "whisper:base",   "fallback": "whisper:base"   }
+      ]
+    }
+  }
+}
