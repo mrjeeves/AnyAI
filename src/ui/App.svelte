@@ -1,14 +1,16 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { listen } from "@tauri-apps/api/event";
   import FirstRun from "./FirstRun.svelte";
   import Chat from "./Chat.svelte";
   import { loadConfig, updateConfig } from "../config";
   import { getActiveManifest } from "../providers";
   import { resolveModel } from "../manifest";
   import { runCleanup } from "../model-lifecycle";
+  import { onModeSwap } from "../watcher";
   import type { HardwareProfile, Mode } from "../types";
+
+  let unsubSwap: (() => void) | null = null;
 
   type View = "loading" | "first-run" | "chat";
 
@@ -38,7 +40,7 @@
         view = "first-run";
       } else {
         // Check if the model needs pulling
-        const pulled = await invoke<Array<{ name: string }>> ("ollama_list_models");
+        const pulled = await invoke<Array<{ name: string }>>("ollama_list_models");
         const hasCurrent = pulled.some((m) => m.name === activeModel);
         if (!hasCurrent) {
           view = "first-run";
@@ -47,10 +49,21 @@
           view = "chat";
         }
       }
+
+      unsubSwap = await onModeSwap(async (e) => {
+        if (!hardware) return;
+        if (e.mode !== activeMode) return;
+        const [config, manifest] = await Promise.all([loadConfig(), getActiveManifest()]);
+        activeModel = resolveModel(hardware, manifest, activeMode, config.mode_overrides);
+      });
     } catch (e) {
       error = String(e);
       view = "chat"; // Show chat anyway with whatever we have
     }
+  });
+
+  onDestroy(() => {
+    unsubSwap?.();
   });
 
   async function onFirstRunComplete() {

@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# AnyAI dev bootstrap: install Rust, Node, pnpm, Tauri CLI, and platform dev libs.
+# Idempotent — safe to re-run. Skips anything already present.
+
+set -euo pipefail
+
+CI_MODE=false
+for arg in "$@"; do
+  [[ "$arg" == "--ci" ]] && CI_MODE=true
+done
+
+log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m!!!\033[0m %s\n' "$*" >&2; }
+err()  { printf '\033[1;31mxxx\033[0m %s\n' "$*" >&2; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+OS="$(uname -s)"
+ARCH="$(uname -m)"
+
+if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
+  warn "WSL2 detected — Tauri GUI windows need an X server (WSLg or VcXsrv) to render."
+fi
+
+# ---------------------------------------------------------------------------
+# Platform packages
+# ---------------------------------------------------------------------------
+
+install_linux_deps() {
+  if [[ "$CI_MODE" == "true" ]]; then
+    log "CI mode: skipping apt step (provide deps via workflow)"
+    return
+  fi
+  if [[ -f /etc/os-release ]]; then
+    . /etc/os-release
+  fi
+
+  case "${ID:-}" in
+    ubuntu|debian|pop|linuxmint)
+      log "Installing Tauri build deps (apt)…"
+      sudo apt-get update -qq
+      sudo apt-get install -y --no-install-recommends \
+        libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+        librsvg2-dev libssl-dev curl wget file build-essential pkg-config
+      ;;
+    fedora|rhel|centos)
+      log "Installing Tauri build deps (dnf)…"
+      sudo dnf install -y \
+        webkit2gtk4.1-devel gtk3-devel libappindicator-gtk3-devel \
+        librsvg2-devel openssl-devel curl wget file gcc gcc-c++ make pkgconf-pkg-config
+      ;;
+    arch|manjaro)
+      log "Installing Tauri build deps (pacman)…"
+      sudo pacman -S --needed --noconfirm \
+        webkit2gtk-4.1 gtk3 libayatana-appindicator librsvg openssl curl wget file base-devel
+      ;;
+    *)
+      warn "Unrecognised Linux distro (${ID:-?}). Install Tauri deps manually:"
+      warn "  https://tauri.app/start/prerequisites/#linux"
+      ;;
+  esac
+}
+
+install_macos_deps() {
+  if ! xcode-select -p >/dev/null 2>&1; then
+    log "Installing Xcode Command Line Tools (you may be prompted)…"
+    xcode-select --install || true
+  fi
+  if ! have brew; then
+    warn "Homebrew not found. Install from https://brew.sh and re-run."
+  fi
+}
+
+case "$OS" in
+  Linux)  install_linux_deps ;;
+  Darwin) install_macos_deps ;;
+  *)      warn "Unsupported OS: $OS — proceeding anyway." ;;
+esac
+
+# ---------------------------------------------------------------------------
+# Rust
+# ---------------------------------------------------------------------------
+
+if ! have rustup && ! have cargo; then
+  log "Installing rustup…"
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.77.2
+  # shellcheck disable=SC1090
+  . "$HOME/.cargo/env"
+elif have rustup; then
+  log "Ensuring Rust 1.77.2 is installed…"
+  rustup toolchain install 1.77.2 -c clippy,rustfmt --profile minimal
+fi
+
+# ---------------------------------------------------------------------------
+# Node + pnpm
+# ---------------------------------------------------------------------------
+
+if ! have node; then
+  if [[ "$OS" == "Darwin" ]] && have brew; then
+    log "Installing Node via brew…"
+    brew install node
+  else
+    warn "Node.js not found. Install Node 20+ from https://nodejs.org or via fnm/nvm, then re-run."
+    exit 1
+  fi
+fi
+
+if ! have pnpm; then
+  log "Enabling pnpm via corepack…"
+  corepack enable || true
+  corepack prepare pnpm@latest --activate
+fi
+
+# ---------------------------------------------------------------------------
+# Tauri CLI v2 (cargo install ensures `cargo tauri` works headless too)
+# ---------------------------------------------------------------------------
+
+if ! cargo tauri --version >/dev/null 2>&1; then
+  log "Installing tauri-cli@^2…"
+  cargo install tauri-cli --version "^2" --locked
+fi
+
+# ---------------------------------------------------------------------------
+# just (used as our task runner)
+# ---------------------------------------------------------------------------
+
+if ! have just; then
+  log "Installing just…"
+  if [[ "$OS" == "Darwin" ]] && have brew; then
+    brew install just
+  elif have cargo; then
+    cargo install just --locked
+  else
+    warn "just not installed; skipping. Install from https://just.systems."
+  fi
+fi
+
+log "Done. Try: just dev | just build | just run | just serve | just preload text vision"

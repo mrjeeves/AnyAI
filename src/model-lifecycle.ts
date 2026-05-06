@@ -143,6 +143,16 @@ export async function setModeOverride(mode: Mode, modelTag: string | null): Prom
   await saveConfig(config);
 }
 
+/** Force a model into "evict on next runCleanup" by backdating its last_recommended. */
+export async function markEvictedNow(tag: string): Promise<void> {
+  const cache = await readStatusCache();
+  cache[tag] = {
+    recommended_by: [],
+    last_recommended: new Date(0).toISOString(),
+  };
+  await writeStatusCache(cache);
+}
+
 export async function getModelStatusWithMeta(): Promise<
   Array<{
     name: string;

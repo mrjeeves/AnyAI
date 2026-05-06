@@ -1,8 +1,15 @@
 node_modules/
 dist/
 src-tauri/target/
+target/
 .env
+.env.local
+.DS_Store
 *.deb
 *.AppImage
 *.dmg
 *.msi
+.idea/
+.vscode/
+!.vscode/extensions.json
+*.log

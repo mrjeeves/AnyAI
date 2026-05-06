@@ -1,10 +1,14 @@
 // Prevents additional console window on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod api;
+mod api_models;
+mod cli;
 mod hardware;
 mod ollama;
-mod cli;
-
+mod preload;
+mod resolver;
+mod watcher;
 
 #[tauri::command]
 async fn detect_hardware() -> Result<hardware::HardwareProfile, String> {
@@ -13,7 +17,9 @@ async fn detect_hardware() -> Result<hardware::HardwareProfile, String> {
 
 #[tauri::command]
 async fn ollama_pull(model: String, window: tauri::WebviewWindow) -> Result<(), String> {
-    ollama::pull(&model, &window).await.map_err(|e| e.to_string())
+    ollama::pull(&model, &window)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -46,6 +52,35 @@ async fn ollama_delete_model(name: String) -> Result<(), String> {
     ollama::delete_model(&name).await.map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn preload_modes(
+    modes: Vec<String>,
+    track: bool,
+    warm: bool,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
+    use tauri::Emitter;
+    preload::preload(&modes, track, warm, |evt| {
+        let _ = window.emit("anyai://preload-progress", &evt);
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn ensure_tracked_models(warm: bool) -> Result<Vec<String>, String> {
+    preload::ensure_tracked_models(warm)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn resolve_virtual_model(requested: String) -> Result<String, String> {
+    resolver::translate_virtual(&requested)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 fn main() {
     // If invoked from CLI with arguments, handle as CLI and exit before starting GUI.
     let args: Vec<String> = std::env::args().collect();
@@ -74,12 +109,41 @@ fn main() {
             ollama_stop,
             ollama_list_models,
             ollama_delete_model,
+            preload_modes,
+            ensure_tracked_models,
+            resolve_virtual_model,
         ])
         .setup(|app| {
-            // Ensure config dir exists on startup.
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let _ = ensure_config_dir(&app_handle);
+
+                // Start watcher so tracked modes stay current in the GUI session.
+                watcher::spawn_background();
+
+                // Optionally start the OpenAI-compat server alongside the GUI.
+                if let Ok(cfg) = resolver::load_config_value() {
+                    let enabled = cfg["api"]["enabled"].as_bool().unwrap_or(true);
+                    if !enabled {
+                        return;
+                    }
+                    let host_str = cfg["api"]["host"].as_str().unwrap_or("127.0.0.1");
+                    let host: std::net::IpAddr = match host_str.parse() {
+                        Ok(h) => h,
+                        Err(_) => "127.0.0.1".parse().unwrap(),
+                    };
+                    let port = cfg["api"]["port"].as_u64().unwrap_or(1473) as u16;
+                    let cors_all = cfg["api"]["cors_allow_all"].as_bool().unwrap_or(false);
+                    let bearer = cfg["api"]["bearer_token"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    tokio::spawn(async move {
+                        if let Err(e) = api::serve(host, port, cors_all, bearer).await {
+                            eprintln!("api server failed: {e}");
+                        }
+                    });
+                }
             });
             Ok(())
         })
@@ -88,7 +152,9 @@ fn main() {
         .run(|_app, event| {
             if let tauri::RunEvent::Exit = event {
                 let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-                rt.block_on(async { let _ = ollama::stop().await; });
+                rt.block_on(async {
+                    let _ = ollama::stop().await;
+                });
             }
         });
 }

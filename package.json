@@ -7,7 +7,9 @@
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "check": "svelte-check --tsconfig ./tsconfig.json"
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "lint:rs": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -W warnings",
+    "fmt:rs": "cargo fmt --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
