@@ -165,8 +165,10 @@ pub fn detect_install_kind() -> InstallKind {
         Ok(p) => p,
         Err(_) => return InstallKind::Raw,
     };
-    let path_str = exe.to_string_lossy();
+    detect_install_kind_from_path(&exe.to_string_lossy())
+}
 
+fn detect_install_kind_from_path(path_str: &str) -> InstallKind {
     // Homebrew on macOS / Linux.
     if path_str.contains("/Cellar/")
         || path_str.starts_with("/opt/homebrew/")
@@ -602,4 +604,210 @@ async fn print_status() -> Result<()> {
         println!("Pending         : none");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn compare_semver_orders_versions() {
+        assert_eq!(compare_semver("1.2.3", "1.2.3"), Ordering::Equal);
+        assert_eq!(compare_semver("1.2.3", "1.2.4"), Ordering::Less);
+        assert_eq!(compare_semver("1.3.0", "1.2.9"), Ordering::Greater);
+        assert_eq!(compare_semver("2.0.0", "1.99.99"), Ordering::Greater);
+    }
+
+    #[test]
+    fn compare_semver_strips_prerelease_suffix() {
+        assert_eq!(compare_semver("1.2.3-beta.1", "1.2.3"), Ordering::Equal);
+        assert_eq!(compare_semver("1.2.3-rc.1", "1.2.4"), Ordering::Less);
+    }
+
+    #[test]
+    fn compare_semver_treats_missing_components_as_zero() {
+        assert_eq!(compare_semver("1", "1.0.0"), Ordering::Equal);
+        assert_eq!(compare_semver("1.2", "1.2.0"), Ordering::Equal);
+        assert_eq!(compare_semver("", "0.0.0"), Ordering::Equal);
+    }
+
+    #[test]
+    fn apply_policy_parse_falls_back_to_patch() {
+        assert_eq!(ApplyPolicy::parse("patch"), ApplyPolicy::Patch);
+        assert_eq!(ApplyPolicy::parse("minor"), ApplyPolicy::Minor);
+        assert_eq!(ApplyPolicy::parse("all"), ApplyPolicy::All);
+        assert_eq!(ApplyPolicy::parse("none"), ApplyPolicy::None);
+        assert_eq!(ApplyPolicy::parse("garbage"), ApplyPolicy::Patch);
+        assert_eq!(ApplyPolicy::parse(""), ApplyPolicy::Patch);
+    }
+
+    #[test]
+    fn policy_none_blocks_everything() {
+        assert!(!policy_allows(ApplyPolicy::None, "1.0.0", "1.0.1"));
+        assert!(!policy_allows(ApplyPolicy::None, "1.0.0", "2.0.0"));
+    }
+
+    #[test]
+    fn policy_all_allows_everything() {
+        assert!(policy_allows(ApplyPolicy::All, "1.0.0", "2.0.0"));
+        assert!(policy_allows(ApplyPolicy::All, "1.0.0", "1.0.1"));
+    }
+
+    #[test]
+    fn policy_minor_requires_same_major() {
+        assert!(policy_allows(ApplyPolicy::Minor, "1.0.0", "1.5.0"));
+        assert!(policy_allows(ApplyPolicy::Minor, "1.0.0", "1.0.1"));
+        assert!(!policy_allows(ApplyPolicy::Minor, "1.0.0", "2.0.0"));
+    }
+
+    #[test]
+    fn policy_patch_requires_same_major_and_minor() {
+        assert!(policy_allows(ApplyPolicy::Patch, "1.2.0", "1.2.5"));
+        assert!(!policy_allows(ApplyPolicy::Patch, "1.2.0", "1.3.0"));
+        assert!(!policy_allows(ApplyPolicy::Patch, "1.2.0", "2.0.0"));
+    }
+
+    #[test]
+    fn expected_sha_finds_entry_in_sums_file() {
+        let sums = "\
+abc123  anyai-linux-x86_64.tar.gz
+def456 *anyai-macos-aarch64.tar.gz
+";
+        assert_eq!(
+            expected_sha_for(sums, "anyai-linux-x86_64.tar.gz"),
+            Some("abc123".into())
+        );
+        assert_eq!(
+            expected_sha_for(sums, "anyai-macos-aarch64.tar.gz"),
+            Some("def456".into())
+        );
+    }
+
+    #[test]
+    fn expected_sha_returns_none_for_missing_entry() {
+        let sums = "abc123  anyai-linux-x86_64.tar.gz\n";
+        assert_eq!(expected_sha_for(sums, "nope.tar.gz"), None);
+    }
+
+    #[test]
+    fn expected_sha_skips_blanks_and_comments() {
+        let sums = "\
+# header
+
+abc123  anyai-linux-x86_64.tar.gz
+";
+        assert_eq!(
+            expected_sha_for(sums, "anyai-linux-x86_64.tar.gz"),
+            Some("abc123".into())
+        );
+    }
+
+    #[test]
+    fn pick_asset_matches_current_platform() {
+        let needle = current_target_triple_hint();
+        let other = format!("anyai-other-{}.tar.gz", "platform");
+        let matching = format!("anyai-{needle}.tar.gz");
+        let assets = vec![
+            json!({ "name": other }),
+            json!({ "name": matching.clone() }),
+        ];
+        let picked = pick_asset(&assets).expect("expected platform match");
+        assert_eq!(picked["name"].as_str(), Some(matching.as_str()));
+    }
+
+    #[test]
+    fn pick_asset_returns_none_when_no_platform_match() {
+        let assets = vec![json!({"name": "anyai-mystery-platform.tar.gz"})];
+        assert!(pick_asset(&assets).is_none());
+    }
+
+    #[test]
+    fn pick_sha_asset_finds_sha256sums() {
+        let assets = vec![
+            json!({"name": "anyai-linux-x86_64.tar.gz"}),
+            json!({"name": "SHA256SUMS"}),
+        ];
+        let picked = pick_sha_asset(&assets).expect("expected SHA256SUMS");
+        assert_eq!(picked["name"], "SHA256SUMS");
+    }
+
+    #[test]
+    fn pick_sha_asset_finds_sidecar_suffix() {
+        let assets = vec![
+            json!({"name": "anyai.tar.gz"}),
+            json!({"name": "anyai.tar.gz.sha256"}),
+        ];
+        let picked = pick_sha_asset(&assets).expect("expected sidecar");
+        assert_eq!(picked["name"], "anyai.tar.gz.sha256");
+    }
+
+    #[test]
+    fn pick_sha_asset_returns_none_when_absent() {
+        let assets = vec![json!({"name": "anyai.tar.gz"})];
+        assert!(pick_sha_asset(&assets).is_none());
+    }
+
+    #[test]
+    fn detect_install_kind_flags_homebrew_paths() {
+        assert_eq!(
+            detect_install_kind_from_path("/opt/homebrew/bin/anyai"),
+            InstallKind::PackageManager
+        );
+        assert_eq!(
+            detect_install_kind_from_path("/usr/local/Cellar/anyai/0.1.0/bin/anyai"),
+            InstallKind::PackageManager
+        );
+        assert_eq!(
+            detect_install_kind_from_path("/home/linuxbrew/.linuxbrew/bin/anyai"),
+            InstallKind::PackageManager
+        );
+    }
+
+    #[test]
+    fn detect_install_kind_flags_user_install_as_raw() {
+        assert_eq!(
+            detect_install_kind_from_path("/home/alice/.local/bin/anyai"),
+            InstallKind::Raw
+        );
+        assert_eq!(
+            detect_install_kind_from_path("/usr/local/bin/anyai"),
+            InstallKind::Raw
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn detect_install_kind_flags_linux_system_paths() {
+        assert_eq!(
+            detect_install_kind_from_path("/usr/bin/anyai"),
+            InstallKind::PackageManager
+        );
+        assert_eq!(
+            detect_install_kind_from_path("/usr/sbin/anyai"),
+            InstallKind::PackageManager
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn detect_install_kind_flags_windows_package_paths() {
+        assert_eq!(
+            detect_install_kind_from_path(r"C:\Program Files\AnyAI\anyai.exe"),
+            InstallKind::PackageManager
+        );
+        assert_eq!(
+            detect_install_kind_from_path(r"C:\Program Files (x86)\AnyAI\anyai.exe"),
+            InstallKind::PackageManager
+        );
+        assert_eq!(
+            detect_install_kind_from_path(r"C:\ProgramData\chocolatey\lib\anyai\tools\anyai.exe"),
+            InstallKind::PackageManager
+        );
+        assert_eq!(
+            detect_install_kind_from_path(r"C:\Users\me\scoop\apps\anyai\current\anyai.exe"),
+            InstallKind::PackageManager
+        );
+    }
 }
