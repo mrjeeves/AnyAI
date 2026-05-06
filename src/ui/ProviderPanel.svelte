@@ -28,7 +28,7 @@
 
   // Source browse
   let browsingSource = $state<string | null>(null);
-  let browseCatalog = $state<Array<{ name: string; url: string; description?: string }>>([]);
+  let browseCatalog = $state<Array<{ name: string; url: string; description?: string; origin?: string }>>([]);
   let browseLoading = $state(false);
 
   onMount(load);
@@ -173,6 +173,9 @@
               <div class="item-info">
                 <span class="item-name-text">{entry.name}</span>
                 {#if entry.description}<span class="desc">{entry.description}</span>{/if}
+                {#if entry.origin && entry.origin !== browsingSource}
+                  <span class="desc">via {entry.origin}</span>
+                {/if}
               </div>
               {#if providers.find((p) => p.name === entry.name)}
                 <span class="added">Added</span>

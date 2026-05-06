@@ -1,15 +1,24 @@
 # AnyAI
 
-> Local AI that works on **your** hardware. One command. Zero decisions required.
+> A local API surface for local AI. Self-host the JSON, set it, forget it.
 
-AnyAI detects your GPU/RAM, selects the best model you can actually run, downloads it via [Ollama](https://ollama.com), and starts it. You never need to know what a quantization is.
+AnyAI is a single binary that exposes an OpenAI-compatible HTTP API on `127.0.0.1` and answers one question on every request: **"what model should this machine run for this mode?"** The answer comes from a JSON file at a URL you (or your team, or a publisher you trust) hosts. JSON files can `import` other JSON files, so a small organization or a community can compose merged catalogs without coordinating servers.
 
+```bash
+anyai serve
+# Listening on http://127.0.0.1:1473
+# Tracking: text → qwen2.5:14b   code → qwen2.5-coder:14b
 ```
-anyai run
-# Detecting hardware…  RTX 3060 12GB · 32GB RAM
-# Model: Qwen2.5 14B — Downloading (8.9 GB)…
-# > _
+
+```bash
+curl http://127.0.0.1:1473/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"anyai-text","messages":[{"role":"user","content":"hello"}]}'
 ```
+
+Point Cursor / Continue / Aider / your scripts at `http://127.0.0.1:1473/v1`. The model behind `anyai-text` (and `anyai-code`, `anyai-vision`, `anyai-transcribe`) auto-resolves to the best tag for your hardware and stays current as the upstream JSON changes — no client-side reconfiguration. AnyAI also auto-updates itself in the background, so once installed it keeps working.
+
+A GUI and a CLI ship in the same binary, but they are clients of the API surface like everything else.
 
 ---
 
@@ -17,7 +26,9 @@ anyai run
 
 - [How it works](#how-it-works)
 - [Installation](#installation)
+- [API server (the headline)](#api-server)
 - [CLI reference](#cli-reference)
+  - [Serve](#serve-openai-compatible-api)
   - [Run / Chat](#run--chat)
   - [Status](#status)
   - [Models](#models)
@@ -30,6 +41,8 @@ anyai run
   - [What is a Source?](#what-is-a-source)
   - [Publishing your own](#publishing-your-own)
 - [Manifest format](#manifest-format)
+- [Imports & merged catalogs](#imports--merged-catalogs)
+- [Auto-update (set it and forget it)](#auto-update-set-it-and-forget-it)
 - [Model lifecycle & cleanup](#model-lifecycle--cleanup)
   - [Three TTL layers](#three-ttl-layers)
   - [Model eviction](#model-eviction)
@@ -46,17 +59,17 @@ anyai run
 ## How it works
 
 ```
-anyai run
+anyai serve
   1. Detect GPU (nvidia-smi / rocm-smi / system_profiler) and RAM
-  2. Fetch active provider's manifest (JSON, cached with TTL)
+  2. Fetch active provider's manifest (JSON, cached with the manifest's own TTL)
   3. Walk tiers top-to-bottom → pick best model this hardware can run
   4. Check if Ollama is installed → auto-install if not
-  5. Check if model is pulled → pull if not (with progress)
+  5. Pull the resolved tag if not already on disk (with progress)
   6. Start ollama serve (managed child process)
-  7. Open chat (GUI or terminal depending on how you invoked it)
+  7. Listen on 127.0.0.1:1473, expose virtual model IDs (anyai-text, anyai-code, …)
 ```
 
-AnyAI manages Ollama silently. You never interact with Ollama directly. When AnyAI exits, it stops Ollama.
+Then on every request: re-resolve, hot-swap if upstream changed, return. A 5-minute background watcher keeps tracked modes warm and checks for self-updates so the binary itself stays current with no user intervention. You never interact with Ollama directly; AnyAI manages it as a child process.
 
 ---
 
@@ -94,14 +107,60 @@ just run          # or: just dev (hot-reload GUI)
 
 ---
 
+## API server
+
+`anyai serve` is the primary surface. It speaks OpenAI's wire format on `127.0.0.1:1473` so any tool that already speaks that wire format — Cursor, Continue, Aider, custom agents, your own scripts — works against it as a drop-in provider.
+
+```bash
+anyai serve                                       # 127.0.0.1:1473
+anyai serve --port 8080
+anyai serve --host 0.0.0.0 --bearer-token sk-…    # expose to LAN with auth
+anyai serve --no-ollama                           # don't auto-start ollama
+```
+
+**Endpoints**
+
+| Path | Behaviour |
+|------|----------|
+| `POST /v1/chat/completions` | OpenAI chat. Streams when `stream: true`. |
+| `POST /v1/completions`      | Legacy completions. |
+| `POST /v1/embeddings`       | Proxied to Ollama embeddings. |
+| `GET  /v1/models`           | Virtual model IDs + raw pulled tags. |
+| `GET  /healthz`             | 200 if Ollama reachable, else 503. |
+| `POST /v1/anyai/preload`    | Body `{"modes":[…], "track":bool}`; SSE progress. |
+| `GET  /v1/anyai/status`     | Current resolved tag per tracked mode. |
+
+**Virtual model IDs** resolve at request-time to the best model your manifest says you should run on this hardware. The underlying tag swaps automatically when upstream JSON changes, so client-side configuration stays stable forever:
+
+| Model ID            | Resolves to (example) |
+|---------------------|-----------------------|
+| `anyai-text`        | `qwen2.5:14b`         |
+| `anyai-vision`      | `qwen2.5vl:7b`        |
+| `anyai-code`        | `qwen2.5-coder:14b`   |
+| `anyai-transcribe`  | `whisper:large`       |
+
+Every response includes `X-AnyAI-Resolved-Model` so a client (or a log) can see what tag actually served the request. If a virtual model's tag isn't pulled yet, the server returns `503 + Retry-After: 10` with a JSON body describing pull progress; pass `?wait=true` (or header `X-AnyAI-Wait: true`) to hold the connection and stream pull progress as SSE keep-alives instead.
+
+**Use it from anywhere that speaks OpenAI** — point at:
+
+```
+Base URL: http://127.0.0.1:1473/v1
+Model:    anyai-code
+API key:  (any non-empty string, ignored unless --bearer-token is set)
+```
+
+The GUI also runs the API server on the same port by default, so you can use AnyAI as both a desktop chat app and a local OpenAI endpoint at the same time. Disable via `config.json` (`api.enabled: false`).
+
+---
+
 ## CLI reference
 
 Quick reference of subcommands:
 
 | Command            | Purpose                                                |
 |--------------------|--------------------------------------------------------|
+| `anyai serve`      | Start the OpenAI-compatible HTTP server (primary)      |
 | `anyai run`        | Chat in the terminal (auto-installs Ollama if missing) |
-| `anyai serve`      | Start the OpenAI-compatible HTTP server                |
 | `anyai preload`    | Pull and warm models for one or more modes             |
 | `anyai status`     | Show provider, mode, hardware, ollama state            |
 | `anyai stop`       | Stop the managed Ollama process                        |
@@ -110,6 +169,7 @@ Quick reference of subcommands:
 | `anyai sources`    | Manage source catalog URLs                             |
 | `anyai import`     | Import a config bundle                                 |
 | `anyai export`     | Export the current config                              |
+| `anyai update`     | Self-update: `status`, `check`, `apply`                |
 
 ### Run / Chat
 
@@ -476,8 +536,17 @@ A manifest is the JSON file a provider URL serves. It maps hardware tiers to mod
 {
   "name": "My Provider",         // display name
   "version": "1",               // schema version
-  "ttl_minutes": 360,           // how long AnyAI caches this before re-fetching (default: 360)
+  "ttl_minutes": 360,           // how long AnyAI caches THIS file before re-fetching (default: 360).
+                                // This is the file's own rate-limit signal: cheaper hosts can ask
+                                // for daily refreshes (1440), commercial hosts can ask for minutes.
   "default_mode": "text",       // fallback if requested mode isn't in manifest
+
+  "imports": [                  // optional: URLs to other manifests whose tiers/modes are merged in.
+    "https://example.com/base-tiers.json"
+  ],
+                                // Each imported manifest is fetched and cached against ITS OWN
+                                // ttl_minutes — imports do not inherit this file's TTL. The
+                                // importing file always wins on collision (mode label, tier order).
 
   "modes": {
     "text": {
@@ -528,9 +597,80 @@ A manifest is the JSON file a provider URL serves. It maps hardware tiers to mod
 - The last tier should always have `min_vram_gb: 0, min_ram_gb: 0` as a catch-all
 - `fallback` is tried if the primary model fails to pull
 - Unknown modes and unknown fields are ignored — manifests are forward-compatible
-- `ttl_minutes` controls how long AnyAI caches this manifest before re-fetching (default 360 = 6h)
+- `ttl_minutes` controls how long AnyAI caches **this file** before re-fetching (default 360 = 6h). It is the publisher's rate-limit signal; AnyAI honours it.
+- `imports` lets a manifest pull tiers from other manifests. Each imported file obeys its own TTL and is cached separately.
 
 **Model tags** are standard Ollama tags (e.g. `qwen2.5:14b`, `llama3.2:3b`). Any model in the [Ollama library](https://ollama.com/library) works.
+
+---
+
+## Imports & merged catalogs
+
+Both manifests and source catalogs accept an `imports` array of URLs to other files of the same kind:
+
+```jsonc
+// A source catalog at https://yourco.com/anyai/sources.json
+{
+  "name": "Your Org",
+  "ttl_minutes": 1440,
+  "imports": [
+    "https://anyai.run/sources/index.json",         // pulls the AnyAI default catalog in
+    "https://partner.com/anyai/sources.json"        // and a partner's catalog
+  ],
+  "providers": [
+    { "name": "Company LLM", "url": "https://yourco.com/anyai/manifest.json" }
+  ]
+}
+```
+
+**Resolution rules:**
+- Imports are walked recursively (depth-first) before the importing file's own entries are added.
+- **Cycles are detected** by URL and broken silently (the URL appears once and only once in the merge).
+- **Each imported file has its own `ttl_minutes` and its own cache entry.** The fetcher refreshes them independently. A daily top-level catalog importing an hourly catalog will see the hourly catalog refresh hourly without bumping the top-level fetch.
+- **Document order matters** — imports are merged first, then the importing file's entries. On name collision, the importing file wins (the closer-to-you publisher gets the last word).
+- Each imported entry is tagged in the cache with the URL it came from, so the GUI can show "from `partner.com`" / "from `yourco.com`" alongside the entry name.
+
+The same model applies to manifests: a small "tier scaffold" manifest can be imported by company-specific manifests that only override a few tiers.
+
+The "centralized" aspect of an org's AI setup is that one root JSON file. The decentralized aspect is that nothing forces it to be hosted in one place — federate by importing.
+
+---
+
+## Auto-update (set it and forget it)
+
+AnyAI is built to be installed once and never thought about again. A background updater runs alongside the watcher, checks the GitHub releases endpoint at most every `check_interval_hours` (default 6), and applies new releases according to the `auto_apply` policy:
+
+| Policy   | Behaviour                                                                                |
+|----------|------------------------------------------------------------------------------------------|
+| `patch`  | (default) Auto-apply patch releases (`0.4.x → 0.4.y`); notify on minor / major.          |
+| `minor`  | Auto-apply patch and minor; notify on major.                                             |
+| `all`    | Auto-apply everything.                                                                   |
+| `none`   | Just notify; never auto-apply.                                                           |
+
+The updater stages the new binary at `~/.anyai/updates/<version>/`, verifies the SHA256 from the release manifest, and atomically swaps it over the running binary on the next process restart (Windows uses the standard rename-on-boot dance). For long-running `anyai serve` daemons under systemd / launchd / a Windows service, the swap takes effect after the next service restart.
+
+**Package-manager installs are detected and skipped.** If AnyAI is installed via Homebrew, dpkg/apt, rpm, MSI, or Chocolatey, the updater logs a one-line note and lets the package manager handle versioning. This avoids fighting the system installer.
+
+**Disable** in any of these ways:
+
+```bash
+# Per-machine, persistent
+anyai providers   # any anyai command — config is read at startup
+# then edit ~/.anyai/config.json: "auto_update": { "enabled": false }
+
+# One-shot
+ANYAI_AUTOUPDATE=0 anyai serve
+```
+
+```jsonc
+// ~/.anyai/config.json (defaults shown)
+"auto_update": {
+  "enabled": true,
+  "channel": "stable",          // "stable" | "beta"
+  "auto_apply": "patch",        // "patch" | "minor" | "all" | "none"
+  "check_interval_hours": 6
+}
+```
 
 ---
 
@@ -549,6 +689,8 @@ There are three distinct concepts. They are independent and do not interact.
 | **Model cleanup** | Pulled Ollama models that are no longer recommended | User (in config, default 1 day) | Model is deleted from disk |
 
 The first two TTLs are about **freshness of remote data**. The third is about **disk cleanup**.
+
+**TTLs are per-file.** When a file `imports` other files, each imported file is cached independently against its own `ttl_minutes`. The publisher of any one file can choose whatever refresh cadence makes sense for their host — it is the only signal AnyAI uses to decide rate. Don't host on a free static CDN with a 5-minute TTL.
 
 ### Model eviction
 
@@ -684,12 +826,16 @@ AnyAI manages all its config files. You never need to open or edit them — use 
 
 ```
 ~/.anyai/
-├── config.json          # active provider, mode, cleanup settings, sources, providers
+├── config.json          # active provider, mode, cleanup, sources, providers, api, auto_update
+├── watcher.lock         # PID; cooperative process lock
+├── updates/             # staged self-update binaries (<version>/anyai)
 └── cache/
-    ├── sources/         # cached source catalogs  (<hash>.json + fetched_at)
-    ├── manifests/       # cached provider manifests (<hash>.json + fetched_at)
+    ├── sources/         # cached source catalogs    (<hash>.json + fetched_at, per-URL)
+    ├── manifests/       # cached provider manifests (<hash>.json + fetched_at, per-URL)
     └── model-status.json   # computed recommended-by set for all pulled models
 ```
+
+The `sources/` and `manifests/` caches store one entry per URL. When a file is reached via an `import`, it gets its own cache entry and obeys its own TTL — the importing file's TTL never overrides it.
 
 ### `~/.anyai/config.json`
 
@@ -702,6 +848,19 @@ AnyAI manages all its config files. You never need to open or edit them — use 
   "mode_overrides": {
     "code": "qwen2.5-coder:14b",    // force this model for Code mode
     "transcribe": null              // null = use provider recommendation
+  },
+  "api": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 1473,
+    "cors_allow_all": false,
+    "bearer_token": null
+  },
+  "auto_update": {
+    "enabled": true,
+    "channel": "stable",
+    "auto_apply": "patch",          // "patch" | "minor" | "all" | "none"
+    "check_interval_hours": 6
   },
   "sources": [
     { "name": "AnyAI",    "url": "https://anyai.run/sources/index.json" },

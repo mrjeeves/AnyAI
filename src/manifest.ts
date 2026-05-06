@@ -1,7 +1,7 @@
 import { fetch } from "@tauri-apps/plugin-http";
 import { readTextFile, writeTextFile, exists, mkdir } from "@tauri-apps/plugin-fs";
 import { homeDir } from "@tauri-apps/api/path";
-import type { Manifest, HardwareProfile, Mode } from "./types";
+import type { Manifest, ManifestMode, HardwareProfile, Mode } from "./types";
 import BUNDLED_MANIFEST_JSON from "../manifests/default.json";
 
 const DEFAULT_TTL_MINUTES = 360;
@@ -51,13 +51,14 @@ function isStale(cachedAt: string, ttlMinutes: number): boolean {
   return (Date.now() - new Date(cachedAt).getTime()) / 60_000 > ttlMinutes;
 }
 
-async function fetchManifest(url: string): Promise<Manifest> {
+async function fetchManifestRaw(url: string): Promise<Manifest> {
   const response = await fetch(url, { method: "GET", connectTimeout: 10000 });
   if (!response.ok) throw new Error(`HTTP ${response.status} fetching ${url}`);
   return response.json() as Promise<Manifest>;
 }
 
-export async function getManifest(url: string): Promise<Manifest> {
+/** Fetch a single manifest URL, honouring its own ttl_minutes. */
+async function fetchOne(url: string): Promise<Manifest> {
   if (url.startsWith("bundled://")) return BUNDLED_MANIFEST_JSON as unknown as Manifest;
 
   const cached = await readCache(url);
@@ -65,15 +66,69 @@ export async function getManifest(url: string): Promise<Manifest> {
     const ttl = cached.manifest.ttl_minutes ?? DEFAULT_TTL_MINUTES;
     if (!isStale(cached.fetched_at, ttl)) return cached.manifest;
   }
-
   try {
-    const manifest = await fetchManifest(url);
+    const manifest = await fetchManifestRaw(url);
     await writeCache(url, manifest);
     return manifest;
   } catch {
     if (cached) return cached.manifest;
     return BUNDLED_MANIFEST_JSON as unknown as Manifest;
   }
+}
+
+/**
+ * Fetch a manifest and recursively merge in any `imports`. Each imported file
+ * is fetched + cached against ITS OWN ttl_minutes — imports do not inherit
+ * the importing file's TTL. Cycles are detected by URL and broken silently.
+ *
+ * Merge semantics:
+ *   - Imports are merged first (depth-first, document order).
+ *   - The importing file's own modes/tiers are merged last and OVERRIDE any
+ *     conflicting mode key from imports (closer publisher wins).
+ *   - Top-level fields (`name`, `version`, `default_mode`, `ttl_minutes`)
+ *     always come from the importing file.
+ */
+export async function getManifest(url: string): Promise<Manifest> {
+  const visited = new Set<string>();
+  return walk(url, visited);
+}
+
+async function walk(url: string, visited: Set<string>): Promise<Manifest> {
+  if (visited.has(url)) {
+    return emptyManifest();
+  }
+  visited.add(url);
+
+  const raw = await fetchOne(url);
+  const mergedModes: Record<string, ManifestMode> = {};
+
+  for (const importUrl of raw.imports ?? []) {
+    let imported: Manifest;
+    try {
+      imported = await walk(importUrl, visited);
+    } catch {
+      continue;
+    }
+    for (const [key, mode] of Object.entries(imported.modes ?? {})) {
+      mergedModes[key] = mode;
+    }
+  }
+  // Importing file wins on mode-key collision.
+  for (const [key, mode] of Object.entries(raw.modes ?? {})) {
+    mergedModes[key] = mode;
+  }
+
+  return {
+    name: raw.name,
+    version: raw.version,
+    ttl_minutes: raw.ttl_minutes,
+    default_mode: raw.default_mode,
+    modes: mergedModes,
+  };
+}
+
+function emptyManifest(): Manifest {
+  return { name: "", version: "1", default_mode: "text", modes: {} };
 }
 
 export function resolveModel(

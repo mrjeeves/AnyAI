@@ -1,6 +1,6 @@
 import { readTextFile, writeTextFile, exists, mkdir } from "@tauri-apps/plugin-fs";
 import { homeDir } from "@tauri-apps/api/path";
-import type { Config, ApiConfig } from "./types";
+import type { Config, ApiConfig, AutoUpdateConfig } from "./types";
 
 async function configPath(): Promise<string> {
   const home = await homeDir();
@@ -15,6 +15,13 @@ const DEFAULT_API: ApiConfig = {
   bearer_token: null,
 };
 
+const DEFAULT_AUTO_UPDATE: AutoUpdateConfig = {
+  enabled: true,
+  channel: "stable",
+  auto_apply: "patch",
+  check_interval_hours: 6,
+};
+
 const DEFAULT_CONFIG: Config = {
   active_provider: "AnyAI Default",
   active_mode: "text",
@@ -23,6 +30,7 @@ const DEFAULT_CONFIG: Config = {
   mode_overrides: {},
   tracked_modes: ["text"],
   api: { ...DEFAULT_API },
+  auto_update: { ...DEFAULT_AUTO_UPDATE },
   sources: [{ name: "AnyAI", url: "https://anyai.run/sources/index.json" }],
   providers: [
     { name: "AnyAI Default", url: "https://anyai.run/manifest/default.json", source: "AnyAI" },
@@ -55,6 +63,7 @@ function mergeDefaults(raw: Partial<Config>): Config {
     ...DEFAULT_CONFIG,
     ...raw,
     api: { ...DEFAULT_API, ...(raw.api ?? {}) },
+    auto_update: { ...DEFAULT_AUTO_UPDATE, ...(raw.auto_update ?? {}) },
     mode_overrides: raw.mode_overrides ?? {},
     kept_models: raw.kept_models ?? [],
     tracked_modes: raw.tracked_modes ?? [],

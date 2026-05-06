@@ -52,6 +52,11 @@ async fn tick() -> Result<()> {
     let _ready = crate::preload::ensure_tracked_models(false).await?;
     // Touch model-status by recomputing recommendation set from disk.
     let _ = recompute_status_from_disk();
+    // Self-update is gated by its own check_interval_hours, so calling it on
+    // every 5-min tick is cheap when nothing is due.
+    if let Err(e) = crate::self_update::tick().await {
+        eprintln!("watcher: self-update tick error: {e}");
+    }
     Ok(())
 }
 

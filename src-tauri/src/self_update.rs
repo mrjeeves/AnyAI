@@ -1,0 +1,583 @@
+//! Self-update.
+//!
+//! Goals: AnyAI is set-it-and-forget-it. Once installed as a raw binary, the
+//! background watcher periodically checks the GitHub releases endpoint, and
+//! according to the user's `auto_apply` policy:
+//!   - Stages a verified copy of the new binary at ~/.anyai/updates/<version>/.
+//!   - Writes ~/.anyai/updates/pending.json so the next process start applies it.
+//!
+//! When a new process starts (`apply_pending_if_any`), it atomically renames
+//! the staged binary over the current binary and clears the pending marker.
+//! In-process restart of running daemons is intentionally NOT done here — that
+//! would yank the rug out from under in-flight requests. The model is
+//! "stage now, apply on next launch."
+//!
+//! Package-manager installs (Homebrew, dpkg/apt, rpm, MSI, Chocolatey) are
+//! detected and skipped — the OS package manager owns versioning there.
+
+use anyhow::{anyhow, Context, Result};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+const RELEASE_API_STABLE: &str = "https://api.github.com/repos/mrjeeves/AnyAI/releases/latest";
+const RELEASE_API_BETA: &str = "https://api.github.com/repos/mrjeeves/AnyAI/releases";
+const USER_AGENT: &str = concat!("anyai-self-update/", env!("CARGO_PKG_VERSION"));
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallKind {
+    /// Raw binary (curl install, manual placement). Eligible for self-update.
+    Raw,
+    /// Homebrew, dpkg/apt, rpm, MSI, Chocolatey. We never self-update these.
+    PackageManager,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyPolicy {
+    Patch,
+    Minor,
+    All,
+    None,
+}
+
+impl ApplyPolicy {
+    fn parse(s: &str) -> Self {
+        match s {
+            "minor" => Self::Minor,
+            "all" => Self::All,
+            "none" => Self::None,
+            _ => Self::Patch,
+        }
+    }
+}
+
+/// Apply any staged update for the current process before it starts doing real
+/// work. Idempotent. Errors are logged and swallowed: an update problem must
+/// not prevent the binary from starting.
+pub fn apply_pending_if_any() {
+    if let Err(e) = apply_pending() {
+        eprintln!("self-update: apply skipped: {e}");
+    }
+}
+
+fn apply_pending() -> Result<()> {
+    let dir = crate::anyai_dir()?.join("updates");
+    let pending = dir.join("pending.json");
+    if !pending.exists() {
+        return Ok(());
+    }
+    let pending_doc: Value = serde_json::from_str(&std::fs::read_to_string(&pending)?)?;
+    let staged_path = pending_doc["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("pending.json missing path"))?;
+    let target_version = pending_doc["version"].as_str().unwrap_or("?");
+
+    if target_version == env!("CARGO_PKG_VERSION") {
+        // Already running this version. Clear the marker.
+        let _ = std::fs::remove_file(&pending);
+        return Ok(());
+    }
+
+    let staged = PathBuf::from(staged_path);
+    if !staged.exists() {
+        let _ = std::fs::remove_file(&pending);
+        return Err(anyhow!("staged binary {staged:?} missing — clearing marker"));
+    }
+
+    let current_exe = std::env::current_exe().context("current_exe")?;
+    atomic_replace(&staged, &current_exe)?;
+    let _ = std::fs::remove_file(&pending);
+    eprintln!("self-update: applied {target_version}");
+    Ok(())
+}
+
+/// One tick of the update check, intended to be called from the watcher loop.
+/// Cheap when nothing is due (gated by `check_interval_hours`).
+pub async fn tick() -> Result<()> {
+    let cfg = crate::resolver::load_config_value()?;
+    let au = &cfg["auto_update"];
+    if !au["enabled"].as_bool().unwrap_or(true) {
+        return Ok(());
+    }
+    if std::env::var("ANYAI_AUTOUPDATE")
+        .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    if detect_install_kind() == InstallKind::PackageManager {
+        // Log once per process at most by stamping a marker.
+        let marker = crate::anyai_dir()?.join("updates/pm-detected.flag");
+        if !marker.exists() {
+            let _ = std::fs::create_dir_all(marker.parent().unwrap());
+            let _ = std::fs::write(&marker, "skip");
+            eprintln!(
+                "self-update: package-manager install detected; deferring to system updater."
+            );
+        }
+        return Ok(());
+    }
+
+    let interval_hours = au["check_interval_hours"].as_f64().unwrap_or(6.0);
+    if !is_due(interval_hours)? {
+        return Ok(());
+    }
+    stamp_check_now()?;
+
+    let channel = au["channel"].as_str().unwrap_or("stable");
+    let policy = ApplyPolicy::parse(au["auto_apply"].as_str().unwrap_or("patch"));
+    let release = fetch_release(channel).await?;
+
+    let latest_version = release["tag_name"]
+        .as_str()
+        .map(|s| s.trim_start_matches('v').to_string())
+        .ok_or_else(|| anyhow!("release missing tag_name"))?;
+    let current = env!("CARGO_PKG_VERSION");
+    let cmp = compare_semver(current, &latest_version);
+    if cmp != std::cmp::Ordering::Less {
+        return Ok(()); // Already at or ahead of latest.
+    }
+
+    if !policy_allows(policy, current, &latest_version) {
+        eprintln!(
+            "self-update: {latest_version} available (current {current}); auto_apply='{}', staging skipped.",
+            au["auto_apply"].as_str().unwrap_or("patch")
+        );
+        return Ok(());
+    }
+
+    if let Err(e) = stage_release(&release, &latest_version).await {
+        eprintln!("self-update: stage failed: {e}");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Install-kind detection.
+// ---------------------------------------------------------------------------
+
+pub fn detect_install_kind() -> InstallKind {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return InstallKind::Raw,
+    };
+    let path_str = exe.to_string_lossy();
+
+    // Homebrew on macOS / Linux.
+    if path_str.contains("/Cellar/")
+        || path_str.starts_with("/opt/homebrew/")
+        || path_str.starts_with("/home/linuxbrew/")
+    {
+        return InstallKind::PackageManager;
+    }
+
+    // System paths typically mean dpkg/rpm.
+    #[cfg(target_os = "linux")]
+    if path_str.starts_with("/usr/bin/") || path_str.starts_with("/usr/sbin/") {
+        return InstallKind::PackageManager;
+    }
+
+    // Windows: typical MSI install location and Chocolatey lib paths.
+    #[cfg(target_os = "windows")]
+    {
+        let lower = path_str.to_lowercase();
+        if lower.contains(r"\program files\")
+            || lower.contains(r"\program files (x86)\")
+            || lower.contains(r"\chocolatey\lib\")
+            || lower.contains(r"\scoop\apps\")
+        {
+            return InstallKind::PackageManager;
+        }
+    }
+
+    InstallKind::Raw
+}
+
+// ---------------------------------------------------------------------------
+// GitHub releases fetch.
+// ---------------------------------------------------------------------------
+
+async fn fetch_release(channel: &str) -> Result<Value> {
+    let client = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .timeout(Duration::from_secs(15))
+        .build()?;
+    let url = if channel == "beta" {
+        RELEASE_API_BETA
+    } else {
+        RELEASE_API_STABLE
+    };
+    let resp = client.get(url).send().await?;
+    if !resp.status().is_success() {
+        return Err(anyhow!("releases endpoint returned {}", resp.status()));
+    }
+    let body: Value = resp.json().await?;
+    if channel == "beta" {
+        // /releases returns an array. Pick the first non-draft, prefer prerelease.
+        let arr = body.as_array().ok_or_else(|| anyhow!("expected array"))?;
+        for r in arr {
+            if r["draft"].as_bool().unwrap_or(false) {
+                continue;
+            }
+            return Ok(r.clone());
+        }
+        return Err(anyhow!("no usable release on beta channel"));
+    }
+    Ok(body)
+}
+
+// ---------------------------------------------------------------------------
+// Versioning.
+// ---------------------------------------------------------------------------
+
+fn compare_semver(a: &str, b: &str) -> std::cmp::Ordering {
+    let parse = |s: &str| -> (u64, u64, u64) {
+        let core = s.split('-').next().unwrap_or(s);
+        let mut it = core.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
+        (
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+        )
+    };
+    parse(a).cmp(&parse(b))
+}
+
+fn policy_allows(policy: ApplyPolicy, current: &str, latest: &str) -> bool {
+    let parse = |s: &str| -> (u64, u64, u64) {
+        let core = s.split('-').next().unwrap_or(s);
+        let mut it = core.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
+        (
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+        )
+    };
+    let (cm, cn, _cp) = parse(current);
+    let (lm, ln, _lp) = parse(latest);
+    match policy {
+        ApplyPolicy::None => false,
+        ApplyPolicy::All => true,
+        ApplyPolicy::Minor => lm == cm,
+        ApplyPolicy::Patch => lm == cm && ln == cn,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Asset matching, download, verify, stage.
+// ---------------------------------------------------------------------------
+
+fn current_target_triple_hint() -> &'static str {
+    // Matches the substrings GitHub release assets typically embed.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        "linux-x86_64"
+    }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        "linux-aarch64"
+    }
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        "macos-x86_64"
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        "macos-aarch64"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "windows-x86_64"
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        "unknown"
+    }
+}
+
+fn pick_asset<'a>(assets: &'a [Value]) -> Option<&'a Value> {
+    let needle = current_target_triple_hint();
+    assets
+        .iter()
+        .find(|a| a["name"].as_str().is_some_and(|n| n.contains(needle)))
+}
+
+fn pick_sha_asset<'a>(assets: &'a [Value]) -> Option<&'a Value> {
+    assets.iter().find(|a| {
+        a["name"]
+            .as_str()
+            .map(|n| n.eq_ignore_ascii_case("SHA256SUMS") || n.ends_with(".sha256"))
+            .unwrap_or(false)
+    })
+}
+
+async fn stage_release(release: &Value, version: &str) -> Result<()> {
+    let assets = release["assets"]
+        .as_array()
+        .ok_or_else(|| anyhow!("release missing assets"))?;
+    let asset = pick_asset(assets)
+        .ok_or_else(|| anyhow!("no release asset matches current platform"))?;
+    let dl_url = asset["browser_download_url"]
+        .as_str()
+        .ok_or_else(|| anyhow!("asset missing browser_download_url"))?;
+    let asset_name = asset["name"].as_str().unwrap_or("anyai");
+
+    let updates_dir = crate::anyai_dir()?.join("updates").join(version);
+    std::fs::create_dir_all(&updates_dir)?;
+    let staged_path = updates_dir.join(asset_name);
+    let part_path = updates_dir.join(format!("{asset_name}.part"));
+
+    let client = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .timeout(Duration::from_secs(300))
+        .build()?;
+    let bytes = client.get(dl_url).send().await?.error_for_status()?.bytes().await?;
+    std::fs::write(&part_path, &bytes)?;
+
+    if let Some(sha_asset) = pick_sha_asset(assets) {
+        let sha_url = sha_asset["browser_download_url"]
+            .as_str()
+            .ok_or_else(|| anyhow!("sha asset missing url"))?;
+        let sha_text = client.get(sha_url).send().await?.error_for_status()?.text().await?;
+        let expected = expected_sha_for(&sha_text, asset_name).ok_or_else(|| {
+            anyhow!("SHA256SUMS does not list an entry for {asset_name}")
+        })?;
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let actual = hex::encode(hasher.finalize());
+        if !actual.eq_ignore_ascii_case(&expected) {
+            let _ = std::fs::remove_file(&part_path);
+            return Err(anyhow!(
+                "sha256 mismatch for {asset_name}: expected {expected}, got {actual}"
+            ));
+        }
+    } else {
+        eprintln!("self-update: warning — no SHA256SUMS in release; skipping integrity check.");
+    }
+
+    // Mark the staged file executable (Unix only).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&part_path)?.permissions();
+        perms.set_mode(0o755);
+        let _ = std::fs::set_permissions(&part_path, perms);
+    }
+
+    std::fs::rename(&part_path, &staged_path)?;
+
+    // Write the pending marker — the next process start picks it up.
+    let pending_path = crate::anyai_dir()?.join("updates/pending.json");
+    let pending_doc = serde_json::json!({
+        "version": version,
+        "path": staged_path.to_string_lossy(),
+        "staged_at": iso_now(),
+    });
+    std::fs::write(&pending_path, serde_json::to_string_pretty(&pending_doc)?)?;
+    eprintln!(
+        "self-update: staged {version} at {} (apply on next launch)",
+        staged_path.display()
+    );
+    Ok(())
+}
+
+fn expected_sha_for(sha_text: &str, asset_name: &str) -> Option<String> {
+    // Lines look like: "<hex>  <filename>" or "<hex> *<filename>".
+    for line in sha_text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let hash = parts.next()?;
+        let name = parts.next()?.trim_start_matches('*');
+        if name == asset_name {
+            return Some(hash.to_string());
+        }
+    }
+    // Single-asset .sha256 file: just the hash.
+    let stripped = sha_text.trim();
+    if stripped.len() == 64 && stripped.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Some(stripped.to_string());
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Atomic file replacement.
+// ---------------------------------------------------------------------------
+
+fn atomic_replace(staged: &Path, target: &Path) -> Result<()> {
+    // On Unix, rename(2) is atomic when src and dst are on the same filesystem.
+    // ~/.anyai is in $HOME, target is wherever the binary lives — they are very
+    // likely on the same FS, but not guaranteed. We try rename first, then fall
+    // back to copy + rename via a sibling temp of the target.
+    let target_dir = target.parent().ok_or_else(|| anyhow!("target has no parent"))?;
+    let tmp = target_dir.join(format!(
+        ".anyai-update-{}.tmp",
+        std::process::id()
+    ));
+    if let Err(_) = std::fs::copy(staged, &tmp) {
+        // If copy itself failed (read-only FS, permissions), bubble up.
+        return Err(anyhow!("cannot copy staged binary into target dir {target_dir:?}"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&tmp)?.permissions();
+        perms.set_mode(0o755);
+        let _ = std::fs::set_permissions(&tmp, perms);
+    }
+    // Atomic rename over the running binary. Unix allows replacing a running
+    // executable; the running process keeps the old inode until exit.
+    // Windows blocks open executables; on Windows we fall back to scheduling
+    // a rename at next boot via MoveFileEx.
+    #[cfg(unix)]
+    {
+        std::fs::rename(&tmp, target)?;
+        return Ok(());
+    }
+    #[cfg(windows)]
+    {
+        match std::fs::rename(&tmp, target) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                // Schedule the swap for next boot. The current process keeps
+                // running; the new binary takes over at reboot/restart.
+                schedule_replace_on_reboot_windows(&tmp, target)
+            }
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        std::fs::rename(&tmp, target)?;
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn schedule_replace_on_reboot_windows(src: &Path, dst: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    let src_w: Vec<u16> = src.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let dst_w: Vec<u16> = dst.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_DELAY_UNTIL_REBOOT: u32 = 0x4;
+    extern "system" {
+        fn MoveFileExW(src: *const u16, dst: *const u16, flags: u32) -> i32;
+    }
+    let ok = unsafe {
+        MoveFileExW(
+            src_w.as_ptr(),
+            dst_w.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_DELAY_UNTIL_REBOOT,
+        )
+    };
+    if ok == 0 {
+        return Err(anyhow!("MoveFileExW failed"));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Check interval gating.
+// ---------------------------------------------------------------------------
+
+fn check_marker_path() -> Result<PathBuf> {
+    Ok(crate::anyai_dir()?.join("cache/last-update-check"))
+}
+
+fn is_due(interval_hours: f64) -> Result<bool> {
+    let path = check_marker_path()?;
+    if !path.exists() {
+        return Ok(true);
+    }
+    let s = std::fs::read_to_string(&path).unwrap_or_default();
+    let prev = s.trim().parse::<i64>().unwrap_or(0);
+    let now = unix_secs();
+    let elapsed_h = (now - prev) as f64 / 3600.0;
+    Ok(elapsed_h >= interval_hours)
+}
+
+fn stamp_check_now() -> Result<()> {
+    let path = check_marker_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, format!("{}\n", unix_secs()))?;
+    Ok(())
+}
+
+fn unix_secs() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn iso_now() -> String {
+    let secs = unix_secs();
+    let z = secs + 719468 * 86400;
+    let days = z.div_euclid(86400);
+    let secs_of_day = z.rem_euclid(86400);
+    let hh = secs_of_day / 3600;
+    let mm = (secs_of_day / 60) % 60;
+    let ss = secs_of_day % 60;
+    let era = days.div_euclid(146097);
+    let doe = days - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y_adj = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y_adj + 1 } else { y_adj };
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+// ---------------------------------------------------------------------------
+// CLI surface (`anyai update [check|status|apply]`).
+// ---------------------------------------------------------------------------
+
+pub async fn cmd_update(args: &[String]) -> Result<()> {
+    match args.first().map(|s| s.as_str()) {
+        None | Some("status") => print_status().await,
+        Some("check") => {
+            // Force a check now, ignoring the interval marker.
+            let _ = stamp_check_now();
+            tick().await
+        }
+        Some("apply") => {
+            apply_pending()?;
+            println!("Applied (or no pending update). The next process start runs the new binary.");
+            Ok(())
+        }
+        Some(unknown) => Err(anyhow!("unknown update subcommand: {unknown}")),
+    }
+}
+
+async fn print_status() -> Result<()> {
+    let kind = detect_install_kind();
+    println!("Current version : {}", env!("CARGO_PKG_VERSION"));
+    println!(
+        "Install kind    : {}",
+        match kind {
+            InstallKind::Raw => "raw (self-update eligible)",
+            InstallKind::PackageManager => "package-manager (self-update disabled)",
+        }
+    );
+    let pending = crate::anyai_dir()?.join("updates/pending.json");
+    if pending.exists() {
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&pending)?)?;
+        println!(
+            "Pending         : {} staged at {}",
+            v["version"].as_str().unwrap_or("?"),
+            v["staged_at"].as_str().unwrap_or("?")
+        );
+    } else {
+        println!("Pending         : none");
+    }
+    Ok(())
+}
