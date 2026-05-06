@@ -406,8 +406,9 @@ fn expected_sha_for(sha_text: &str, asset_name: &str) -> Option<String> {
             continue;
         }
         let mut parts = line.split_whitespace();
-        let hash = parts.next()?;
-        let name = parts.next()?.trim_start_matches('*');
+        let Some(hash) = parts.next() else { continue };
+        let Some(name) = parts.next() else { continue };
+        let name = name.trim_start_matches('*');
         if name == asset_name {
             return Some(hash.to_string());
         }
@@ -689,6 +690,31 @@ def456 *anyai-macos-aarch64.tar.gz
     fn expected_sha_returns_none_for_missing_entry() {
         let sums = "abc123  anyai-linux-x86_64.tar.gz\n";
         assert_eq!(expected_sha_for(sums, "nope.tar.gz"), None);
+    }
+
+    #[test]
+    fn expected_sha_accepts_bare_64_char_hash() {
+        let single = "0".repeat(64);
+        assert_eq!(expected_sha_for(&single, "any-name"), Some(single.clone()));
+        let with_newline = format!("{single}\n");
+        assert_eq!(expected_sha_for(&with_newline, "any-name"), Some(single));
+    }
+
+    #[test]
+    fn expected_sha_rejects_short_bare_hash() {
+        assert_eq!(expected_sha_for("abc123", "any-name"), None);
+    }
+
+    #[test]
+    fn expected_sha_skips_malformed_lines() {
+        let sums = "\
+malformed-line-with-only-one-token
+abc123  anyai-linux-x86_64.tar.gz
+";
+        assert_eq!(
+            expected_sha_for(sums, "anyai-linux-x86_64.tar.gz"),
+            Some("abc123".into())
+        );
     }
 
     #[test]
