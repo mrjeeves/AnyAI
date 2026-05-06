@@ -95,7 +95,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   installer-asset:
-    name: Upload install.sh
+    name: Upload installers
     needs: bundles
     runs-on: ubuntu-latest
     steps:
@@ -103,6 +103,8 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name || inputs.tag }}
-          files: scripts/install.sh
+          files: |
+            scripts/install.sh
+            scripts/install.ps1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
