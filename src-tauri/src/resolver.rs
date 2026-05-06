@@ -152,7 +152,9 @@ fn walk_manifest<'a>(
 
         if let Some(imports) = raw["imports"].as_array() {
             for imp in imports {
-                let Some(imp_url) = imp.as_str() else { continue };
+                let Some(imp_url) = imp.as_str() else {
+                    continue;
+                };
                 let imported = match walk_manifest(imp_url, visited).await {
                     Ok(v) => v,
                     Err(_) => continue, // Import failure is non-fatal; merge the rest.
@@ -287,14 +289,18 @@ fn walk_catalog<'a>(
 
         if let Some(imports) = raw["imports"].as_array() {
             for imp in imports {
-                let Some(imp_url) = imp.as_str() else { continue };
+                let Some(imp_url) = imp.as_str() else {
+                    continue;
+                };
                 let imported = match walk_catalog(imp_url, visited).await {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
                 if let Some(providers) = imported["providers"].as_array() {
                     for p in providers {
-                        let Some(name) = p["name"].as_str() else { continue };
+                        let Some(name) = p["name"].as_str() else {
+                            continue;
+                        };
                         if seen.contains(name) {
                             continue;
                         }
@@ -312,7 +318,9 @@ fn walk_catalog<'a>(
         // Importing file wins on name collision (closer publisher).
         if let Some(providers) = raw["providers"].as_array() {
             for p in providers {
-                let Some(name) = p["name"].as_str() else { continue };
+                let Some(name) = p["name"].as_str() else {
+                    continue;
+                };
                 let mut entry = p.clone();
                 entry["origin"] = Value::String(url.to_string());
                 if seen.contains(name) {

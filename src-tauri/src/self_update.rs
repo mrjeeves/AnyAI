@@ -82,7 +82,9 @@ fn apply_pending() -> Result<()> {
     let staged = PathBuf::from(staged_path);
     if !staged.exists() {
         let _ = std::fs::remove_file(&pending);
-        return Err(anyhow!("staged binary {staged:?} missing — clearing marker"));
+        return Err(anyhow!(
+            "staged binary {staged:?} missing — clearing marker"
+        ));
     }
 
     let current_exe = std::env::current_exe().context("current_exe")?;
@@ -297,14 +299,14 @@ fn current_target_triple_hint() -> &'static str {
     }
 }
 
-fn pick_asset<'a>(assets: &'a [Value]) -> Option<&'a Value> {
+fn pick_asset(assets: &[Value]) -> Option<&Value> {
     let needle = current_target_triple_hint();
     assets
         .iter()
         .find(|a| a["name"].as_str().is_some_and(|n| n.contains(needle)))
 }
 
-fn pick_sha_asset<'a>(assets: &'a [Value]) -> Option<&'a Value> {
+fn pick_sha_asset(assets: &[Value]) -> Option<&Value> {
     assets.iter().find(|a| {
         a["name"]
             .as_str()
@@ -317,8 +319,8 @@ async fn stage_release(release: &Value, version: &str) -> Result<()> {
     let assets = release["assets"]
         .as_array()
         .ok_or_else(|| anyhow!("release missing assets"))?;
-    let asset = pick_asset(assets)
-        .ok_or_else(|| anyhow!("no release asset matches current platform"))?;
+    let asset =
+        pick_asset(assets).ok_or_else(|| anyhow!("no release asset matches current platform"))?;
     let dl_url = asset["browser_download_url"]
         .as_str()
         .ok_or_else(|| anyhow!("asset missing browser_download_url"))?;
@@ -333,17 +335,28 @@ async fn stage_release(release: &Value, version: &str) -> Result<()> {
         .user_agent(USER_AGENT)
         .timeout(Duration::from_secs(300))
         .build()?;
-    let bytes = client.get(dl_url).send().await?.error_for_status()?.bytes().await?;
+    let bytes = client
+        .get(dl_url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
     std::fs::write(&part_path, &bytes)?;
 
     if let Some(sha_asset) = pick_sha_asset(assets) {
         let sha_url = sha_asset["browser_download_url"]
             .as_str()
             .ok_or_else(|| anyhow!("sha asset missing url"))?;
-        let sha_text = client.get(sha_url).send().await?.error_for_status()?.text().await?;
-        let expected = expected_sha_for(&sha_text, asset_name).ok_or_else(|| {
-            anyhow!("SHA256SUMS does not list an entry for {asset_name}")
-        })?;
+        let sha_text = client
+            .get(sha_url)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        let expected = expected_sha_for(&sha_text, asset_name)
+            .ok_or_else(|| anyhow!("SHA256SUMS does not list an entry for {asset_name}"))?;
         let mut hasher = Sha256::new();
         hasher.update(&bytes);
         let actual = hex::encode(hasher.finalize());
@@ -414,14 +427,15 @@ fn atomic_replace(staged: &Path, target: &Path) -> Result<()> {
     // ~/.anyai is in $HOME, target is wherever the binary lives — they are very
     // likely on the same FS, but not guaranteed. We try rename first, then fall
     // back to copy + rename via a sibling temp of the target.
-    let target_dir = target.parent().ok_or_else(|| anyhow!("target has no parent"))?;
-    let tmp = target_dir.join(format!(
-        ".anyai-update-{}.tmp",
-        std::process::id()
-    ));
-    if let Err(_) = std::fs::copy(staged, &tmp) {
+    let target_dir = target
+        .parent()
+        .ok_or_else(|| anyhow!("target has no parent"))?;
+    let tmp = target_dir.join(format!(".anyai-update-{}.tmp", std::process::id()));
+    if std::fs::copy(staged, &tmp).is_err() {
         // If copy itself failed (read-only FS, permissions), bubble up.
-        return Err(anyhow!("cannot copy staged binary into target dir {target_dir:?}"));
+        return Err(anyhow!(
+            "cannot copy staged binary into target dir {target_dir:?}"
+        ));
     }
     #[cfg(unix)]
     {
@@ -437,7 +451,7 @@ fn atomic_replace(staged: &Path, target: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         std::fs::rename(&tmp, target)?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(windows)]
     {
@@ -460,8 +474,16 @@ fn atomic_replace(staged: &Path, target: &Path) -> Result<()> {
 #[cfg(windows)]
 fn schedule_replace_on_reboot_windows(src: &Path, dst: &Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    let src_w: Vec<u16> = src.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    let dst_w: Vec<u16> = dst.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let src_w: Vec<u16> = src
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let dst_w: Vec<u16> = dst
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
     const MOVEFILE_DELAY_UNTIL_REBOOT: u32 = 0x4;
     extern "system" {
