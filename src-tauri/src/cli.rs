@@ -13,6 +13,7 @@ pub async fn run(args: Vec<String>) -> Result<()> {
         Some("providers") => cmd_providers(&args[1..]).await,
         Some("import") => cmd_import(&args[1..]).await,
         Some("export") => cmd_export(&args[1..]).await,
+        Some("update") => crate::self_update::cmd_update(&args[1..]).await,
         Some("help") | Some("--help") | Some("-h") => {
             print_help();
             Ok(())
@@ -45,6 +46,7 @@ COMMANDS:
   providers     Manage providers
   import <url>  Import config from URL or file
   export        Export config
+  update        Self-update: status | check | apply
 
 FLAGS (run):
   --mode <text|vision|code|transcribe>
@@ -458,6 +460,7 @@ async fn cmd_sources(args: &[String]) -> Result<()> {
             let source_name = args
                 .get(1)
                 .ok_or_else(|| anyhow!("usage: anyai sources list <name>"))?;
+            let json = args.contains(&"--json".to_string());
             let config = load_config()?;
             let sources = config["sources"].as_array().cloned().unwrap_or_default();
             let url = sources
@@ -466,17 +469,24 @@ async fn cmd_sources(args: &[String]) -> Result<()> {
                 .and_then(|s| s["url"].as_str())
                 .ok_or_else(|| anyhow!("source '{source_name}' not found"))?
                 .to_string();
-            let out = tokio::process::Command::new("curl")
-                .args(["-sf", "--max-time", "10", &url])
-                .output()
-                .await?;
-            let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
-            for p in v["providers"].as_array().unwrap_or(&vec![]) {
-                println!(
-                    "  {}  —  {}",
-                    p["name"].as_str().unwrap_or("?"),
-                    p["description"].as_str().unwrap_or("")
-                );
+            let v = crate::resolver::fetch_source_catalog(&url).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else {
+                for p in v["providers"].as_array().unwrap_or(&vec![]) {
+                    let origin = p["origin"].as_str().unwrap_or(&url);
+                    let suffix = if origin == url {
+                        String::new()
+                    } else {
+                        format!("  [from {origin}]")
+                    };
+                    println!(
+                        "  {}  —  {}{}",
+                        p["name"].as_str().unwrap_or("?"),
+                        p["description"].as_str().unwrap_or(""),
+                        suffix,
+                    );
+                }
             }
         }
         Some("refresh") => {

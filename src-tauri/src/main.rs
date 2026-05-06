@@ -8,6 +8,7 @@ mod hardware;
 mod ollama;
 mod preload;
 mod resolver;
+mod self_update;
 mod watcher;
 
 #[tauri::command]
@@ -82,6 +83,10 @@ async fn resolve_virtual_model(requested: String) -> Result<String, String> {
 }
 
 fn main() {
+    // First thing every process does: apply any staged self-update so the new
+    // binary takes over before we open ports, sockets, or the GUI window.
+    self_update::apply_pending_if_any();
+
     // If invoked from CLI with arguments, handle as CLI and exit before starting GUI.
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 {
@@ -164,6 +169,7 @@ fn ensure_config_dir(_app: &tauri::AppHandle) -> anyhow::Result<()> {
     std::fs::create_dir_all(&dir)?;
     std::fs::create_dir_all(dir.join("cache/sources"))?;
     std::fs::create_dir_all(dir.join("cache/manifests"))?;
+    std::fs::create_dir_all(dir.join("updates"))?;
     Ok(())
 }
 

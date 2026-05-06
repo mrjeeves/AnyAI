@@ -27,6 +27,8 @@ export interface Manifest {
   version: string;
   ttl_minutes?: number;
   default_mode: Mode;
+  /** URLs of other manifests whose modes/tiers are merged into this one. */
+  imports?: string[];
   modes: Record<string, ManifestMode>;
 }
 
@@ -41,11 +43,21 @@ export interface Provider {
   source: string | null;
 }
 
+export interface CatalogEntry {
+  name: string;
+  url: string;
+  description?: string;
+  /** URL of the file this entry was sourced from. Set by the resolver during merge. */
+  origin?: string;
+}
+
 export interface ProviderCatalog {
   name: string;
   description?: string;
   ttl_minutes?: number;
-  providers: Array<{ name: string; url: string; description?: string }>;
+  /** URLs of other catalogs whose providers are merged into this one. */
+  imports?: string[];
+  providers: CatalogEntry[];
 }
 
 export interface ApiConfig {
@@ -56,6 +68,16 @@ export interface ApiConfig {
   bearer_token: string | null;
 }
 
+export type AutoUpdateChannel = "stable" | "beta";
+export type AutoApplyPolicy = "patch" | "minor" | "all" | "none";
+
+export interface AutoUpdateConfig {
+  enabled: boolean;
+  channel: AutoUpdateChannel;
+  auto_apply: AutoApplyPolicy;
+  check_interval_hours: number;
+}
+
 export interface Config {
   active_provider: string;
   active_mode: Mode;
@@ -64,6 +86,7 @@ export interface Config {
   mode_overrides: Partial<Record<Mode, string | null>>;
   tracked_modes: Mode[];
   api: ApiConfig;
+  auto_update: AutoUpdateConfig;
   sources: Source[];
   providers: Provider[];
 }

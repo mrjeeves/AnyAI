@@ -4,7 +4,8 @@
 //! models without booting the JS runtime. Reads the same on-disk caches the GUI writes.
 
 use anyhow::{anyhow, Result};
-use serde_json::Value;
+use serde_json::{Map, Value};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use tokio::time::Duration;
 
@@ -13,6 +14,7 @@ use crate::hardware::HardwareProfile;
 pub const VIRTUAL_PREFIX: &str = "anyai-";
 pub const KNOWN_MODES: &[&str] = &["text", "vision", "code", "transcribe"];
 const DEFAULT_TTL_MIN: f64 = 360.0;
+const DEFAULT_SOURCE_TTL_MIN: f64 = 1440.0;
 const FALLBACK_MANIFEST_URL: &str = "https://anyai.run/manifest/default.json";
 
 /// Resolve a single mode against the active provider's manifest using current hardware.
@@ -126,9 +128,73 @@ pub async fn translate_virtual(requested: &str) -> Result<String> {
 
 // ---------------------------------------------------------------------------
 // Manifest fetch + cache (mirrors src/manifest.ts cache directory layout).
+//
+// Each URL is fetched and cached against ITS OWN ttl_minutes — imports are
+// walked recursively, with each imported file obeying its own TTL.
 // ---------------------------------------------------------------------------
 
 async fn fetch_or_load_manifest(url: &str) -> Result<Value> {
+    let mut visited: HashSet<String> = HashSet::new();
+    walk_manifest(url, &mut visited).await
+}
+
+fn walk_manifest<'a>(
+    url: &'a str,
+    visited: &'a mut HashSet<String>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
+    Box::pin(async move {
+        if !visited.insert(url.to_string()) {
+            return Ok(empty_manifest());
+        }
+
+        let raw = fetch_one_manifest(url).await?;
+        let mut merged_modes: Map<String, Value> = Map::new();
+
+        if let Some(imports) = raw["imports"].as_array() {
+            for imp in imports {
+                let Some(imp_url) = imp.as_str() else {
+                    continue;
+                };
+                let imported = match walk_manifest(imp_url, visited).await {
+                    Ok(v) => v,
+                    Err(_) => continue, // Import failure is non-fatal; merge the rest.
+                };
+                if let Some(modes) = imported["modes"].as_object() {
+                    for (k, v) in modes {
+                        merged_modes.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+
+        // Importing file wins on mode-key collision (closer publisher).
+        if let Some(modes) = raw["modes"].as_object() {
+            for (k, v) in modes {
+                merged_modes.insert(k.clone(), v.clone());
+            }
+        }
+
+        Ok(serde_json::json!({
+            "name": raw["name"].clone(),
+            "version": raw["version"].clone(),
+            "ttl_minutes": raw["ttl_minutes"].clone(),
+            "default_mode": raw["default_mode"].clone(),
+            "modes": Value::Object(merged_modes),
+        }))
+    })
+}
+
+fn empty_manifest() -> Value {
+    serde_json::json!({
+        "name": "",
+        "version": "1",
+        "default_mode": "text",
+        "modes": {},
+    })
+}
+
+/// Fetch a single manifest URL, honouring its own ttl_minutes. No import recursion.
+async fn fetch_one_manifest(url: &str) -> Result<Value> {
     if let Some(cached) = read_manifest_cache(url) {
         let ttl_min = cached["manifest"]["ttl_minutes"]
             .as_f64()
@@ -191,6 +257,152 @@ fn write_manifest_cache(url: &str, manifest: &Value) -> Result<()> {
 fn manifest_cache_path(url: &str) -> Result<PathBuf> {
     Ok(crate::anyai_dir()?
         .join("cache/manifests")
+        .join(format!("{:x}.json", djb2(url))))
+}
+
+// ---------------------------------------------------------------------------
+// Source-catalog fetch + recursive imports.
+// Mirrors `src/sources.ts::fetchSourceCatalog`. Each imported catalog is
+// fetched + cached against its own ttl_minutes; cycles broken by URL.
+// ---------------------------------------------------------------------------
+
+/// Fetch a source catalog with recursive imports merged in. The returned
+/// `providers` array is flat; each entry has an `origin` field set to the URL
+/// of the file that contributed it.
+pub async fn fetch_source_catalog(url: &str) -> Result<Value> {
+    let mut visited: HashSet<String> = HashSet::new();
+    walk_catalog(url, &mut visited).await
+}
+
+fn walk_catalog<'a>(
+    url: &'a str,
+    visited: &'a mut HashSet<String>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
+    Box::pin(async move {
+        if !visited.insert(url.to_string()) {
+            return Ok(serde_json::json!({ "name": "", "providers": [] }));
+        }
+
+        let raw = fetch_one_catalog(url).await?;
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut out: Vec<Value> = Vec::new();
+
+        if let Some(imports) = raw["imports"].as_array() {
+            for imp in imports {
+                let Some(imp_url) = imp.as_str() else {
+                    continue;
+                };
+                let imported = match walk_catalog(imp_url, visited).await {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if let Some(providers) = imported["providers"].as_array() {
+                    for p in providers {
+                        let Some(name) = p["name"].as_str() else {
+                            continue;
+                        };
+                        if seen.contains(name) {
+                            continue;
+                        }
+                        seen.insert(name.to_string());
+                        let mut entry = p.clone();
+                        if entry.get("origin").is_none() {
+                            entry["origin"] = Value::String(imp_url.to_string());
+                        }
+                        out.push(entry);
+                    }
+                }
+            }
+        }
+
+        // Importing file wins on name collision (closer publisher).
+        if let Some(providers) = raw["providers"].as_array() {
+            for p in providers {
+                let Some(name) = p["name"].as_str() else {
+                    continue;
+                };
+                let mut entry = p.clone();
+                entry["origin"] = Value::String(url.to_string());
+                if seen.contains(name) {
+                    if let Some(idx) = out.iter().position(|e| e["name"].as_str() == Some(name)) {
+                        out[idx] = entry;
+                    }
+                    continue;
+                }
+                seen.insert(name.to_string());
+                out.push(entry);
+            }
+        }
+
+        Ok(serde_json::json!({
+            "name": raw["name"].clone(),
+            "description": raw["description"].clone(),
+            "ttl_minutes": raw["ttl_minutes"].clone(),
+            "providers": out,
+        }))
+    })
+}
+
+async fn fetch_one_catalog(url: &str) -> Result<Value> {
+    if let Some(cached) = read_catalog_cache(url) {
+        let ttl_min = cached["catalog"]["ttl_minutes"]
+            .as_f64()
+            .unwrap_or(DEFAULT_SOURCE_TTL_MIN);
+        let fetched_at = cached["fetched_at"].as_str().unwrap_or("");
+        if !is_stale(fetched_at, ttl_min) {
+            return Ok(cached["catalog"].clone());
+        }
+    }
+    match fetch_catalog_http(url).await {
+        Ok(c) => {
+            let _ = write_catalog_cache(url, &c);
+            Ok(c)
+        }
+        Err(e) => {
+            if let Some(cached) = read_catalog_cache(url) {
+                return Ok(cached["catalog"].clone());
+            }
+            Err(e)
+        }
+    }
+}
+
+async fn fetch_catalog_http(url: &str) -> Result<Value> {
+    let body = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new("curl")
+            .args(["-sf", "--max-time", "10", url])
+            .output(),
+    )
+    .await??;
+    if !body.status.success() {
+        return Err(anyhow!("HTTP fetch failed for {url}"));
+    }
+    Ok(serde_json::from_slice(&body.stdout)?)
+}
+
+fn read_catalog_cache(url: &str) -> Option<Value> {
+    let path = catalog_cache_path(url).ok()?;
+    let s = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&s).ok()
+}
+
+fn write_catalog_cache(url: &str, catalog: &Value) -> Result<()> {
+    let path = catalog_cache_path(url)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let entry = serde_json::json!({
+        "fetched_at": chrono_iso_now(),
+        "catalog": catalog,
+    });
+    std::fs::write(path, serde_json::to_string_pretty(&entry)?)?;
+    Ok(())
+}
+
+fn catalog_cache_path(url: &str) -> Result<PathBuf> {
+    Ok(crate::anyai_dir()?
+        .join("cache/sources")
         .join(format!("{:x}.json", djb2(url))))
 }
 
@@ -313,6 +525,12 @@ pub fn default_config_value() -> Value {
             "cors_allow_all": false,
             "bearer_token": null
         },
+        "auto_update": {
+            "enabled": true,
+            "channel": "stable",
+            "auto_apply": "patch",
+            "check_interval_hours": 6
+        },
         "sources": [
             { "name": "AnyAI", "url": "https://anyai.run/sources/index.json" }
         ],
@@ -322,9 +540,9 @@ pub fn default_config_value() -> Value {
     })
 }
 
-/// Shallow-merge missing top-level + `api` keys from defaults so users upgrading from
-/// older configs don't see crashes on first load. Also seeds `tracked_modes` from
-/// `active_mode` for legacy configs.
+/// Shallow-merge missing top-level + nested-object keys from defaults so users
+/// upgrading from older configs don't see crashes on first load. Also seeds
+/// `tracked_modes` from `active_mode` for legacy configs.
 pub fn merge_defaults(mut config: Value) -> Value {
     let defaults = default_config_value();
     if let (Some(obj), Some(def_obj)) = (config.as_object_mut(), defaults.as_object()) {
@@ -333,14 +551,15 @@ pub fn merge_defaults(mut config: Value) -> Value {
                 obj.insert(k.clone(), v.clone());
             }
         }
-        // Nested merge for the `api` block so a partial user-provided api{} keeps defaults.
-        if let (Some(api), Some(def_api)) = (
-            obj.get_mut("api").and_then(Value::as_object_mut),
-            def_obj.get("api").and_then(Value::as_object),
-        ) {
-            for (k, v) in def_api {
-                if !api.contains_key(k) {
-                    api.insert(k.clone(), v.clone());
+        for nested_key in ["api", "auto_update"] {
+            if let (Some(nested), Some(def_nested)) = (
+                obj.get_mut(nested_key).and_then(Value::as_object_mut),
+                def_obj.get(nested_key).and_then(Value::as_object),
+            ) {
+                for (k, v) in def_nested {
+                    if !nested.contains_key(k) {
+                        nested.insert(k.clone(), v.clone());
+                    }
                 }
             }
         }
