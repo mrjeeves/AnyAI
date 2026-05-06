@@ -83,12 +83,12 @@ esac
 
 if ! have rustup && ! have cargo; then
   log "Installing rustup…"
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.77.2
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88.0
   # shellcheck disable=SC1090
   . "$HOME/.cargo/env"
 elif have rustup; then
-  log "Ensuring Rust 1.77.2 is installed…"
-  rustup toolchain install 1.77.2 -c clippy,rustfmt --profile minimal
+  log "Ensuring Rust 1.88.0 is installed…"
+  rustup toolchain install 1.88.0 -c clippy,rustfmt --profile minimal
 fi
 
 # ---------------------------------------------------------------------------

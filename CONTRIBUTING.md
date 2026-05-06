@@ -5,7 +5,7 @@
 ```bash
 git clone https://github.com/mrjeeves/AnyAI
 cd AnyAI
-just setup        # installs Rust 1.77, Node, pnpm, Tauri CLI, GTK deps on Linux
+just setup        # installs Rust 1.88, Node, pnpm, Tauri CLI, GTK deps on Linux
 just dev          # hot-reload GUI
 # or
 just run -- run   # CLI chat
