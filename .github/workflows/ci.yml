@@ -30,9 +30,8 @@ jobs:
             librsvg2-dev \
             libssl-dev
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.88.0
         with:
-          toolchain: 1.77.2
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
@@ -41,7 +40,7 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10
 
       - uses: actions/setup-node@v4
         with:
@@ -60,7 +59,7 @@ jobs:
 
       - name: Rust lint
         working-directory: src-tauri
-        run: cargo clippy --all-targets -- -W warnings
+        run: cargo clippy --all-targets
 
       - name: Rust tests
         working-directory: src-tauri

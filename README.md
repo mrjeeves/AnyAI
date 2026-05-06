@@ -724,7 +724,7 @@ AnyAI manages all its config files. You never need to open or edit them — use 
 ### Prerequisites
 
 **All platforms:**
-- [Rust](https://rustup.rs) 1.77+
+- [Rust](https://rustup.rs) 1.88+
 - [Node.js](https://nodejs.org) 18+
 - [pnpm](https://pnpm.io) 8+
 - [Tauri CLI v2](https://tauri.app): `cargo install tauri-cli`

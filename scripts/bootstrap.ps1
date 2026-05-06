@@ -18,8 +18,8 @@ if (-not (Have "rustup")) {
     $env:Path = "$env:Path;$env:USERPROFILE\.cargo\bin"
 }
 
-Log "Installing Rust 1.77.2 toolchain (no-op if present)…"
-rustup toolchain install 1.77.2 -c clippy,rustfmt --profile minimal | Out-Null
+Log "Installing Rust 1.88.0 toolchain (no-op if present)…"
+rustup toolchain install 1.88.0 -c clippy,rustfmt --profile minimal | Out-Null
 
 if (-not (Have "node")) {
     Log "Installing Node.js LTS…"
