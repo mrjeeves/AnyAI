@@ -4,6 +4,8 @@ use anyhow::{anyhow, Result};
 pub async fn run(args: Vec<String>) -> Result<()> {
     match args.first().map(|s| s.as_str()) {
         Some("run") => cmd_run(&args[1..]).await,
+        Some("serve") => crate::api::cmd_serve(&args[1..]).await,
+        Some("preload") => cmd_preload(&args[1..]).await,
         Some("status") => cmd_status(&args[1..]).await,
         Some("stop") => cmd_stop().await,
         Some("models") => cmd_models(&args[1..]).await,
@@ -11,21 +13,31 @@ pub async fn run(args: Vec<String>) -> Result<()> {
         Some("providers") => cmd_providers(&args[1..]).await,
         Some("import") => cmd_import(&args[1..]).await,
         Some("export") => cmd_export(&args[1..]).await,
-        Some("help") | Some("--help") | Some("-h") => { print_help(); Ok(()) }
-        Some(unknown) => Err(anyhow!("unknown command: {unknown}\nRun `anyai help` for usage.")),
-        None => { print_help(); Ok(()) }
+        Some("help") | Some("--help") | Some("-h") => {
+            print_help();
+            Ok(())
+        }
+        Some(unknown) => Err(anyhow!(
+            "unknown command: {unknown}\nRun `anyai help` for usage."
+        )),
+        None => {
+            print_help();
+            Ok(())
+        }
     }
 }
 
 fn print_help() {
     println!(
-r#"anyai — local AI, zero configuration
+        r#"anyai — local AI, zero configuration
 
 USAGE:
   anyai [command] [flags]
 
 COMMANDS:
   run           Start chat (terminal)
+  serve         Start the OpenAI-compatible HTTP server
+  preload       Pull and warm models for one or more modes
   status        Show current state
   stop          Stop ollama serve
   models        Manage pulled models
@@ -38,6 +50,22 @@ FLAGS (run):
   --mode <text|vision|code|transcribe>
   --model <name>        Override model
   --profile <url>       One-off manifest URL
+
+FLAGS (serve):
+  --host <addr>         Bind address (default 127.0.0.1)
+  --port <n>            Port (default 1473)
+  --cors-allow-all      Permit cross-origin requests
+  --bearer-token <tok>  Require this token via Authorization: Bearer
+  --no-ollama           Don't start ollama (assume it's already running)
+
+FLAGS (preload):
+  <mode...>             One or more of text, vision, code, transcribe
+  --track               Persist to config.tracked_modes
+  --no-warm             Skip the post-pull warm-up call
+  --json                Newline-delimited JSON event output
+
+FLAGS (providers use):
+  --immediate           After swap, evict the previously-resolved tag now
 
 FLAGS (global):
   --json                Machine-readable JSON output
@@ -53,162 +81,51 @@ async fn cmd_run(args: &[String]) -> Result<()> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--mode" => { mode = args.get(i + 1).cloned().unwrap_or_default(); i += 2; }
-            "--model" => { model_override = args.get(i + 1).cloned(); i += 2; }
-            "--profile" => { profile_url = args.get(i + 1).cloned(); i += 2; }
-            _ => { i += 1; }
+            "--mode" => {
+                mode = args.get(i + 1).cloned().unwrap_or_default();
+                i += 2;
+            }
+            "--model" => {
+                model_override = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--profile" => {
+                profile_url = args.get(i + 1).cloned();
+                i += 2;
+            }
+            _ => {
+                i += 1;
+            }
         }
     }
 
-    // Install Ollama if missing
     if !crate::ollama::is_installed() {
         eprintln!("Ollama not found. Installing…");
         crate::ollama::install().await?;
     }
 
-    // Ensure Ollama is running
     eprint!("Starting ollama… ");
     crate::ollama::ensure_running().await?;
     eprintln!("ok");
 
-    // Resolve model
     let hw = crate::hardware::detect()?;
     let model = if let Some(m) = model_override {
         m
     } else {
-        resolve_model_for_cli(&hw, &mode, profile_url.as_deref()).await?
+        crate::resolver::resolve_with_hardware(&mode, &hw, profile_url.as_deref()).await?
     };
 
     eprintln!("Model: {model}  Mode: {mode}");
 
-    // Pull model if not present
-    pull_if_needed(&model).await?;
-
-    // Chat loop
-    chat_loop(&model, &mode).await
-}
-
-async fn resolve_model_for_cli(
-    hw: &crate::hardware::HardwareProfile,
-    mode: &str,
-    profile_url: Option<&str>,
-) -> Result<String> {
-    // Delegate to the TS layer by reading the config and resolving locally (simplified Rust impl)
-    // In production this would call into the same manifest resolution logic.
-    // For the CLI we use a direct HTTP fetch + local tier resolution.
-    let anyai_dir = crate::anyai_dir()?;
-    let config_path = anyai_dir.join("config.json");
-
-    let manifest_url = if let Some(url) = profile_url {
-        url.to_string()
-    } else if config_path.exists() {
-        let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&config_path)?)?;
-        let active = config["active_provider"].as_str().unwrap_or("");
-        config["providers"]
-            .as_array()
-            .and_then(|ps| ps.iter().find(|p| p["name"].as_str() == Some(active)))
-            .and_then(|p| p["url"].as_str())
-            .unwrap_or("https://anyai.run/manifest/default.json")
-            .to_string()
-    } else {
-        "https://anyai.run/manifest/default.json".to_string()
-    };
-
-    // Check mode_overrides
-    if config_path.exists() {
-        let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&config_path)?)?;
-        if let Some(m) = config["mode_overrides"][mode].as_str() {
-            return Ok(m.to_string());
-        }
-    }
-
-    // Fetch or load cached manifest
-    let cache_dir = anyai_dir.join("cache/manifests");
-    let cache_key = format!("{:x}", md5_hash(&manifest_url));
-    let cache_path = cache_dir.join(format!("{cache_key}.json"));
-
-    let manifest_json = if cache_path.exists() {
-        std::fs::read_to_string(&cache_path)?
-    } else {
-        let out = tokio::process::Command::new("curl")
-            .args(["-sf", "--max-time", "10", &manifest_url])
-            .output()
-            .await?;
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout).into_owned();
-            let _ = std::fs::create_dir_all(&cache_dir);
-            let _ = std::fs::write(&cache_path, &s);
-            s
-        } else {
-            // Try bundled fallback
-            let fallback = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../manifests/default.json");
-            std::fs::read_to_string(fallback).unwrap_or_default()
-        }
-    };
-
-    resolve_from_manifest_json(&manifest_json, hw, mode)
-}
-
-fn resolve_from_manifest_json(
-    json: &str,
-    hw: &crate::hardware::HardwareProfile,
-    mode: &str,
-) -> Result<String> {
-    let manifest: serde_json::Value = serde_json::from_str(json)
-        .map_err(|_| anyhow!("invalid manifest JSON"))?;
-
-    let default_mode = manifest["default_mode"].as_str().unwrap_or("text");
-    let mode_spec = manifest["modes"][mode]
-        .as_object()
-        .or_else(|| manifest["modes"][default_mode].as_object())
-        .ok_or_else(|| anyhow!("mode '{mode}' not found in manifest"))?;
-
-    let tiers = mode_spec["tiers"].as_array()
-        .ok_or_else(|| anyhow!("no tiers in manifest"))?;
-
-    let vram = hw.vram_gb.unwrap_or(0.0);
-    let ram = hw.ram_gb;
-
-    for tier in tiers {
-        let min_vram = tier["min_vram_gb"].as_f64().unwrap_or(0.0);
-        let min_ram = tier["min_ram_gb"].as_f64().unwrap_or(0.0);
-        if vram >= min_vram || ram >= min_ram {
-            if let Some(model) = tier["model"].as_str() {
-                return Ok(model.to_string());
-            }
-        }
-    }
-
-    // Bottom-tier fallback
-    tiers.last()
-        .and_then(|t| t["model"].as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| anyhow!("no model found in manifest tiers"))
-}
-
-fn md5_hash(s: &str) -> u64 {
-    // Simple djb2 hash as a cache key — not cryptographic.
-    s.bytes().fold(5381u64, |h, b| h.wrapping_mul(33).wrapping_add(b as u64))
-}
-
-async fn pull_if_needed(model: &str) -> Result<()> {
-    let out = tokio::process::Command::new("ollama")
-        .args(["show", "--modelfile", model])
-        .output()
-        .await?;
-    if out.status.success() { return Ok(()); }
-
     eprint!("Pulling {model}… ");
-    let status = tokio::process::Command::new("ollama")
-        .args(["pull", model])
-        .status()
-        .await?;
-    if !status.success() {
-        return Err(anyhow!("failed to pull {model}"));
-    }
-    eprintln!("done");
-    Ok(())
+    crate::ollama::pull_with(&model, |line| {
+        eprint!("\rPulling {model}… {line}");
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+    })
+    .await?;
+    eprintln!("\rPulling {model}… done                                      ");
+
+    chat_loop(&model, &mode).await
 }
 
 async fn chat_loop(model: &str, _mode: &str) -> Result<()> {
@@ -222,10 +139,16 @@ async fn chat_loop(model: &str, _mode: &str) -> Result<()> {
         print!("> ");
         io::stdout().flush()?;
         let mut line = String::new();
-        if stdin.lock().read_line(&mut line)? == 0 { break; } // EOF
+        if stdin.lock().read_line(&mut line)? == 0 {
+            break;
+        } // EOF
         let line = line.trim();
-        if line.is_empty() { continue; }
-        if line == "exit" || line == "quit" { break; }
+        if line.is_empty() {
+            continue;
+        }
+        if line == "exit" || line == "quit" {
+            break;
+        }
 
         history.push(serde_json::json!({ "role": "user", "content": line }));
 
@@ -237,10 +160,14 @@ async fn chat_loop(model: &str, _mode: &str) -> Result<()> {
 
         let response = tokio::process::Command::new("curl")
             .args([
-                "-sf", "-X", "POST",
+                "-sf",
+                "-X",
+                "POST",
                 "http://127.0.0.1:11434/api/chat",
-                "-H", "Content-Type: application/json",
-                "-d", &body.to_string(),
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                &body.to_string(),
             ])
             .output()
             .await?;
@@ -250,9 +177,10 @@ async fn chat_loop(model: &str, _mode: &str) -> Result<()> {
             continue;
         }
 
-        let resp: serde_json::Value = serde_json::from_slice(&response.stdout)
-            .unwrap_or_default();
-        let content = resp["message"]["content"].as_str().unwrap_or("(no response)");
+        let resp: serde_json::Value = serde_json::from_slice(&response.stdout).unwrap_or_default();
+        let content = resp["message"]["content"]
+            .as_str()
+            .unwrap_or("(no response)");
         println!("{content}\n");
         history.push(serde_json::json!({ "role": "assistant", "content": content }));
     }
@@ -266,9 +194,13 @@ async fn cmd_status(args: &[String]) -> Result<()> {
     let anyai_dir = crate::anyai_dir()?;
     let config_path = anyai_dir.join("config.json");
     let (active_provider, active_mode) = if config_path.exists() {
-        let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&config_path)?)?;
+        let config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path)?)?;
         (
-            config["active_provider"].as_str().unwrap_or("(none)").to_string(),
+            config["active_provider"]
+                .as_str()
+                .unwrap_or("(none)")
+                .to_string(),
             config["active_mode"].as_str().unwrap_or("text").to_string(),
         )
     } else {
@@ -284,19 +216,25 @@ async fn cmd_status(args: &[String]) -> Result<()> {
     };
 
     if json {
-        println!("{}", serde_json::json!({
-            "active_provider": active_provider,
-            "active_mode": active_mode,
-            "ollama_running": running,
-            "hardware": hw,
-        }));
+        println!(
+            "{}",
+            serde_json::json!({
+                "active_provider": active_provider,
+                "active_mode": active_mode,
+                "ollama_running": running,
+                "hardware": hw,
+            })
+        );
     } else {
         println!("Provider : {active_provider}");
         println!("Mode     : {active_mode}");
         println!("Ollama   : {}", if running { "running" } else { "stopped" });
-        println!("VRAM     : {}",
-            hw.vram_gb.map(|v| format!("{:.1} GB ({:?})", v, hw.gpu_type))
-                      .unwrap_or_else(|| "none (CPU)".into()));
+        println!(
+            "VRAM     : {}",
+            hw.vram_gb
+                .map(|v| format!("{:.1} GB ({:?})", v, hw.gpu_type))
+                .unwrap_or_else(|| "none (CPU)".into())
+        );
         println!("RAM      : {:.1} GB", hw.ram_gb);
         println!("Disk free: {:.1} GB", hw.disk_free_gb);
     }
@@ -317,7 +255,8 @@ async fn cmd_models(args: &[String]) -> Result<()> {
             // List models
             let pulled = crate::ollama::list_models().await?;
             let config = load_config()?;
-            let kept: Vec<&str> = config["kept_models"].as_array()
+            let kept: Vec<&str> = config["kept_models"]
+                .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
                 .unwrap_or_default();
             let overrides = config["mode_overrides"].as_object();
@@ -326,31 +265,40 @@ async fn cmd_models(args: &[String]) -> Result<()> {
                 .unwrap_or_default();
 
             if json {
-                let items: Vec<_> = pulled.iter().map(|m| {
-                    serde_json::json!({
-                        "name": m.name,
-                        "size_bytes": m.size,
-                        "kept": kept.contains(&m.name.as_str()),
-                        "override_for": overrides.map(|o| {
-                            o.iter().filter(|(_, v)| v.as_str() == Some(&m.name))
-                                    .map(|(k, _)| k.clone()).collect::<Vec<_>>()
-                        }).unwrap_or_default(),
+                let items: Vec<_> = pulled
+                    .iter()
+                    .map(|m| {
+                        serde_json::json!({
+                            "name": m.name,
+                            "size_bytes": m.size,
+                            "kept": kept.contains(&m.name.as_str()),
+                            "override_for": overrides.map(|o| {
+                                o.iter().filter(|(_, v)| v.as_str() == Some(&m.name))
+                                        .map(|(k, _)| k.clone()).collect::<Vec<_>>()
+                            }).unwrap_or_default(),
+                        })
                     })
-                }).collect();
+                    .collect();
                 println!("{}", serde_json::to_string_pretty(&items)?);
             } else {
-                println!("{:<35} {:>10}  {:}", "NAME", "SIZE", "FLAGS");
+                println!("{:<35} {:>10}  FLAGS", "NAME", "SIZE");
                 for m in &pulled {
                     let size_gb = m.size as f64 / 1024.0 / 1024.0 / 1024.0;
                     let mut flags = vec![];
-                    if kept.contains(&m.name.as_str()) { flags.push("kept"); }
-                    if override_models.contains(&m.name.as_str()) { flags.push("override"); }
+                    if kept.contains(&m.name.as_str()) {
+                        flags.push("kept");
+                    }
+                    if override_models.contains(&m.name.as_str()) {
+                        flags.push("override");
+                    }
                     println!("{:<35} {:>9.1}G  {}", m.name, size_gb, flags.join(" "));
                 }
             }
         }
         Some("keep") => {
-            let name = args.get(1).ok_or_else(|| anyhow!("usage: anyai models keep <model>"))?;
+            let name = args
+                .get(1)
+                .ok_or_else(|| anyhow!("usage: anyai models keep <model>"))?;
             let mut config = load_config()?;
             let kept = config["kept_models"].as_array_mut().map(|a| {
                 if !a.iter().any(|v| v.as_str() == Some(name)) {
@@ -364,7 +312,9 @@ async fn cmd_models(args: &[String]) -> Result<()> {
             println!("Kept: {name}");
         }
         Some("unkeep") => {
-            let name = args.get(1).ok_or_else(|| anyhow!("usage: anyai models unkeep <model>"))?;
+            let name = args
+                .get(1)
+                .ok_or_else(|| anyhow!("usage: anyai models unkeep <model>"))?;
             let mut config = load_config()?;
             if let Some(arr) = config["kept_models"].as_array_mut() {
                 arr.retain(|v| v.as_str() != Some(name));
@@ -373,8 +323,12 @@ async fn cmd_models(args: &[String]) -> Result<()> {
             println!("Unpinned: {name}");
         }
         Some("override") => {
-            let mode = args.get(1).ok_or_else(|| anyhow!("usage: anyai models override <mode> <model|--clear>"))?;
-            let model_or_clear = args.get(2).ok_or_else(|| anyhow!("usage: anyai models override <mode> <model|--clear>"))?;
+            let mode = args
+                .get(1)
+                .ok_or_else(|| anyhow!("usage: anyai models override <mode> <model|--clear>"))?;
+            let model_or_clear = args
+                .get(2)
+                .ok_or_else(|| anyhow!("usage: anyai models override <mode> <model|--clear>"))?;
             let mut config = load_config()?;
             if config["mode_overrides"].is_null() {
                 config["mode_overrides"] = serde_json::json!({});
@@ -390,22 +344,32 @@ async fn cmd_models(args: &[String]) -> Result<()> {
         }
         Some("prune") => {
             let config = load_config()?;
-            let kept: Vec<&str> = config["kept_models"].as_array()
+            let kept: Vec<&str> = config["kept_models"]
+                .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
                 .unwrap_or_default();
-            let override_models: Vec<&str> = config["mode_overrides"].as_object()
+            let override_models: Vec<&str> = config["mode_overrides"]
+                .as_object()
                 .map(|o| o.values().filter_map(|v| v.as_str()).collect())
                 .unwrap_or_default();
 
             let status_path = crate::anyai_dir()?.join("cache/model-status.json");
             let unrecommended: Vec<String> = if status_path.exists() {
-                let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&status_path)?)?;
-                v.as_object().map(|o| {
-                    o.iter()
-                     .filter(|(_, info)| info["recommended_by"].as_array().map(|a| a.is_empty()).unwrap_or(true))
-                     .map(|(k, _)| k.clone())
-                     .collect()
-                }).unwrap_or_default()
+                let v: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(&status_path)?)?;
+                v.as_object()
+                    .map(|o| {
+                        o.iter()
+                            .filter(|(_, info)| {
+                                info["recommended_by"]
+                                    .as_array()
+                                    .map(|a| a.is_empty())
+                                    .unwrap_or(true)
+                            })
+                            .map(|(k, _)| k.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default()
             } else {
                 vec![]
             };
@@ -420,7 +384,9 @@ async fn cmd_models(args: &[String]) -> Result<()> {
             println!("Prune complete");
         }
         Some("rm") => {
-            let name = args.get(1).ok_or_else(|| anyhow!("usage: anyai models rm <model>"))?;
+            let name = args
+                .get(1)
+                .ok_or_else(|| anyhow!("usage: anyai models rm <model>"))?;
             // Remove keep + override entries for this model too
             let mut config = load_config()?;
             if let Some(arr) = config["kept_models"].as_array_mut() {
@@ -448,14 +414,21 @@ async fn cmd_sources(args: &[String]) -> Result<()> {
             let config = load_config()?;
             let sources = config["sources"].as_array().cloned().unwrap_or_default();
             for s in &sources {
-                println!("  {}  {}", s["name"].as_str().unwrap_or("?"), s["url"].as_str().unwrap_or("?"));
+                println!(
+                    "  {}  {}",
+                    s["name"].as_str().unwrap_or("?"),
+                    s["url"].as_str().unwrap_or("?")
+                );
             }
         }
         Some("add") => {
-            let url = args.get(1).ok_or_else(|| anyhow!("usage: anyai sources add <url> --name <name>"))?;
+            let url = args
+                .get(1)
+                .ok_or_else(|| anyhow!("usage: anyai sources add <url> --name <name>"))?;
             let name = flag_value(args, "--name").unwrap_or_else(|| url.clone());
             let mut config = load_config()?;
-            let sources = config["sources"].as_array_mut()
+            let sources = config["sources"]
+                .as_array_mut()
                 .ok_or_else(|| anyhow!("config missing sources array"))?;
             if sources.iter().any(|s| s["name"].as_str() == Some(&name)) {
                 // Update URL
@@ -471,7 +444,9 @@ async fn cmd_sources(args: &[String]) -> Result<()> {
             println!("Source added: {name}");
         }
         Some("rm") => {
-            let name = args.get(1).ok_or_else(|| anyhow!("usage: anyai sources rm <name>"))?;
+            let name = args
+                .get(1)
+                .ok_or_else(|| anyhow!("usage: anyai sources rm <name>"))?;
             let mut config = load_config()?;
             if let Some(arr) = config["sources"].as_array_mut() {
                 arr.retain(|s| s["name"].as_str() != Some(name));
@@ -480,20 +455,28 @@ async fn cmd_sources(args: &[String]) -> Result<()> {
             println!("Source removed: {name}");
         }
         Some("list") => {
-            let source_name = args.get(1).ok_or_else(|| anyhow!("usage: anyai sources list <name>"))?;
+            let source_name = args
+                .get(1)
+                .ok_or_else(|| anyhow!("usage: anyai sources list <name>"))?;
             let config = load_config()?;
             let sources = config["sources"].as_array().cloned().unwrap_or_default();
-            let url = sources.iter()
+            let url = sources
+                .iter()
                 .find(|s| s["name"].as_str() == Some(source_name))
                 .and_then(|s| s["url"].as_str())
                 .ok_or_else(|| anyhow!("source '{source_name}' not found"))?
                 .to_string();
             let out = tokio::process::Command::new("curl")
                 .args(["-sf", "--max-time", "10", &url])
-                .output().await?;
+                .output()
+                .await?;
             let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
             for p in v["providers"].as_array().unwrap_or(&vec![]) {
-                println!("  {}  —  {}", p["name"].as_str().unwrap_or("?"), p["description"].as_str().unwrap_or(""));
+                println!(
+                    "  {}  —  {}",
+                    p["name"].as_str().unwrap_or("?"),
+                    p["description"].as_str().unwrap_or("")
+                );
             }
         }
         Some("refresh") => {
@@ -501,6 +484,11 @@ async fn cmd_sources(args: &[String]) -> Result<()> {
             let cache_dir = crate::anyai_dir()?.join("cache/sources");
             let _ = std::fs::remove_dir_all(&cache_dir);
             let _ = std::fs::create_dir_all(&cache_dir);
+            // Also clear manifest caches so the next ensure pulls fresh data.
+            let manifest_cache = crate::anyai_dir()?.join("cache/manifests");
+            let _ = std::fs::remove_dir_all(&manifest_cache);
+            let _ = std::fs::create_dir_all(&manifest_cache);
+            crate::preload::ensure_tracked_models(false).await.ok();
         }
         Some("reset") => {
             merge_preset_sources()?;
@@ -524,44 +512,78 @@ async fn cmd_providers(args: &[String]) -> Result<()> {
             }
         }
         Some("add") => {
-            let url = args.get(1).ok_or_else(|| anyhow!("usage: anyai providers add <url> --name <name>"))?;
+            let url = args
+                .get(1)
+                .ok_or_else(|| anyhow!("usage: anyai providers add <url> --name <name>"))?;
             let name = flag_value(args, "--name").unwrap_or_else(|| url.clone());
             let source = flag_value(args, "--source");
             let mut config = load_config()?;
-            let providers = config["providers"].as_array_mut()
+            let providers = config["providers"]
+                .as_array_mut()
                 .ok_or_else(|| anyhow!("config missing providers"))?;
             if providers.iter().any(|p| p["name"].as_str() == Some(&name)) {
                 for p in providers.iter_mut() {
-                    if p["name"].as_str() == Some(&name) { p["url"] = serde_json::json!(url); }
+                    if p["name"].as_str() == Some(&name) {
+                        p["url"] = serde_json::json!(url);
+                    }
                 }
             } else {
                 providers.push(serde_json::json!({ "name": name, "url": url, "source": source }));
             }
             save_config(&config)?;
             println!("Provider added: {name}");
+            crate::preload::ensure_tracked_models(false).await.ok();
         }
         Some("use") => {
-            let name = args.get(1).ok_or_else(|| anyhow!("usage: anyai providers use <name>"))?;
+            let name = args
+                .get(1)
+                .ok_or_else(|| anyhow!("usage: anyai providers use <name>"))?;
+            let immediate = args.contains(&"--immediate".to_string());
             let mut config = load_config()?;
             let providers = config["providers"].as_array().cloned().unwrap_or_default();
             if !providers.iter().any(|p| p["name"].as_str() == Some(name)) {
                 return Err(anyhow!("provider '{name}' not found"));
             }
+            // Snapshot pre-swap resolved tags (for --immediate eviction).
+            let pre_tags = if immediate {
+                resolved_tags_for_tracked().await.unwrap_or_default()
+            } else {
+                vec![]
+            };
             config["active_provider"] = serde_json::json!(name);
             save_config(&config)?;
             println!("Active provider: {name}");
+
+            crate::preload::ensure_tracked_models(false).await.ok();
+
+            if immediate {
+                let post_tags = resolved_tags_for_tracked().await.unwrap_or_default();
+                let post_set: std::collections::HashSet<_> = post_tags.iter().collect();
+                for tag in pre_tags {
+                    if post_set.contains(&tag) {
+                        continue;
+                    }
+                    eprintln!("Evicting old tag (--immediate): {tag}");
+                    let _ = crate::ollama::delete_model(&tag).await;
+                }
+            }
         }
         Some("rm") => {
-            let name = args.get(1).ok_or_else(|| anyhow!("usage: anyai providers rm <name>"))?;
+            let name = args
+                .get(1)
+                .ok_or_else(|| anyhow!("usage: anyai providers rm <name>"))?;
             let mut config = load_config()?;
             if config["active_provider"].as_str() == Some(name) {
-                return Err(anyhow!("cannot remove active provider; switch first with `anyai providers use`"));
+                return Err(anyhow!(
+                    "cannot remove active provider; switch first with `anyai providers use`"
+                ));
             }
             if let Some(arr) = config["providers"].as_array_mut() {
                 arr.retain(|p| p["name"].as_str() != Some(name));
             }
             save_config(&config)?;
             println!("Provider removed: {name}");
+            crate::preload::ensure_tracked_models(false).await.ok();
         }
         Some("show") => {
             let name = args.get(1);
@@ -569,14 +591,16 @@ async fn cmd_providers(args: &[String]) -> Result<()> {
             let active = config["active_provider"].as_str().unwrap_or("");
             let target = name.map(|s| s.as_str()).unwrap_or(active);
             let providers = config["providers"].as_array().cloned().unwrap_or_default();
-            let url = providers.iter()
+            let url = providers
+                .iter()
                 .find(|p| p["name"].as_str() == Some(target))
                 .and_then(|p| p["url"].as_str())
                 .ok_or_else(|| anyhow!("provider '{target}' not found"))?
                 .to_string();
             let out = tokio::process::Command::new("curl")
                 .args(["-sf", "--max-time", "10", &url])
-                .output().await?;
+                .output()
+                .await?;
             println!("{}", String::from_utf8_lossy(&out.stdout));
         }
         Some("reset") => {
@@ -589,11 +613,14 @@ async fn cmd_providers(args: &[String]) -> Result<()> {
 }
 
 async fn cmd_import(args: &[String]) -> Result<()> {
-    let url_or_path = args.first().ok_or_else(|| anyhow!("usage: anyai import <url|path>"))?;
+    let url_or_path = args
+        .first()
+        .ok_or_else(|| anyhow!("usage: anyai import <url|path>"))?;
     let json_str = if url_or_path.starts_with("http://") || url_or_path.starts_with("https://") {
         let out = tokio::process::Command::new("curl")
             .args(["-sf", "--max-time", "10", url_or_path])
-            .output().await?;
+            .output()
+            .await?;
         String::from_utf8_lossy(&out.stdout).into_owned()
     } else {
         std::fs::read_to_string(url_or_path)?
@@ -605,7 +632,8 @@ async fn cmd_import(args: &[String]) -> Result<()> {
 
     // Merge sources by name
     if let Some(new_sources) = imported["sources"].as_array() {
-        let existing = config["sources"].as_array_mut()
+        let existing = config["sources"]
+            .as_array_mut()
             .ok_or_else(|| anyhow!("config missing sources"))?;
         for s in new_sources {
             let name = s["name"].as_str().unwrap_or("");
@@ -618,7 +646,8 @@ async fn cmd_import(args: &[String]) -> Result<()> {
 
     // Merge providers by name
     if let Some(new_providers) = imported["providers"].as_array() {
-        let existing = config["providers"].as_array_mut()
+        let existing = config["providers"]
+            .as_array_mut()
             .ok_or_else(|| anyhow!("config missing providers"))?;
         for p in new_providers {
             let name = p["name"].as_str().unwrap_or("");
@@ -641,8 +670,12 @@ async fn cmd_export(args: &[String]) -> Result<()> {
 
     let config = load_config()?;
     let mut export = serde_json::json!({});
-    if !providers_only { export["sources"] = config["sources"].clone(); }
-    if !sources_only { export["providers"] = config["providers"].clone(); }
+    if !providers_only {
+        export["sources"] = config["sources"].clone();
+    }
+    if !sources_only {
+        export["providers"] = config["providers"].clone();
+    }
 
     if as_url {
         let encoded = base64_encode(&export.to_string());
@@ -653,51 +686,93 @@ async fn cmd_export(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-// Config helpers
+async fn cmd_preload(args: &[String]) -> Result<()> {
+    let track = args.contains(&"--track".to_string());
+    let no_warm = args.contains(&"--no-warm".to_string());
+    let json = args.contains(&"--json".to_string());
 
-fn config_path() -> Result<std::path::PathBuf> {
-    Ok(crate::anyai_dir()?.join("config.json"))
-}
-
-pub fn load_config() -> Result<serde_json::Value> {
-    let path = config_path()?;
-    if !path.exists() {
-        return Ok(default_config());
+    let modes: Vec<String> = args
+        .iter()
+        .filter(|a| !a.starts_with("--"))
+        .cloned()
+        .collect();
+    if modes.is_empty() {
+        return Err(anyhow!(
+            "usage: anyai preload <mode...> [--track] [--no-warm] [--json]"
+        ));
     }
-    let s = std::fs::read_to_string(&path)?;
-    serde_json::from_str(&s).map_err(|e| anyhow!("invalid config.json: {e}"))
-}
+    for m in &modes {
+        if !crate::resolver::KNOWN_MODES.contains(&m.as_str()) {
+            return Err(anyhow!(
+                "unknown mode '{m}' (expected one of: text, vision, code, transcribe)"
+            ));
+        }
+    }
 
-fn save_config(config: &serde_json::Value) -> Result<()> {
-    let path = config_path()?;
-    let _ = std::fs::create_dir_all(path.parent().unwrap());
-    std::fs::write(&path, serde_json::to_string_pretty(config)?)?;
+    if !crate::ollama::is_installed() {
+        eprintln!("Ollama not found. Installing…");
+        crate::ollama::install().await?;
+    }
+    crate::ollama::ensure_running().await?;
+
+    let warm = !no_warm;
+    crate::preload::preload(&modes, track, warm, |evt| {
+        if json {
+            println!("{}", serde_json::to_string(&evt).unwrap_or_default());
+        } else {
+            match evt.status.as_str() {
+                "resolved" => eprintln!("[{}] resolved → {}", evt.mode, evt.model),
+                "pulling" => eprint!("\r[{}] pulling {} {}", evt.mode, evt.model, evt.detail),
+                "pulled" => eprintln!(
+                    "\r[{}] pulled  {}                                              ",
+                    evt.mode, evt.model
+                ),
+                "warming" => eprintln!("[{}] warming {}", evt.mode, evt.model),
+                "ready" => eprintln!("[{}] ready   {}", evt.mode, evt.model),
+                "error" => eprintln!("[{}] ERROR   {}: {}", evt.mode, evt.model, evt.detail),
+                _ => eprintln!("[{}] {} {}", evt.mode, evt.status, evt.detail),
+            }
+        }
+    })
+    .await?;
     Ok(())
 }
 
-fn default_config() -> serde_json::Value {
-    serde_json::json!({
-        "active_provider": "AnyAI Default",
-        "active_mode": "text",
-        "model_cleanup_days": 1,
-        "kept_models": [],
-        "mode_overrides": {},
-        "sources": [
-            { "name": "AnyAI", "url": "https://anyai.run/sources/index.json" }
-        ],
-        "providers": [
-            { "name": "AnyAI Default", "url": "https://anyai.run/manifest/default.json", "source": "AnyAI" }
-        ]
-    })
+async fn resolved_tags_for_tracked() -> Result<Vec<String>> {
+    let modes = crate::resolver::tracked_modes()?;
+    let mut tags = Vec::new();
+    for m in modes {
+        if let Ok(t) = crate::resolver::resolve(&m).await {
+            tags.push(t);
+        }
+    }
+    tags.sort();
+    tags.dedup();
+    Ok(tags)
+}
+
+// Config helpers — thin wrappers over the resolver module so cli.rs and api.rs
+// share one implementation.
+
+pub fn load_config() -> Result<serde_json::Value> {
+    crate::resolver::load_config_value()
+}
+
+fn save_config(config: &serde_json::Value) -> Result<()> {
+    crate::resolver::save_config_value(config)
 }
 
 fn merge_preset_sources() -> Result<()> {
-    let preset_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../providers/preset-sources.json");
-    if !preset_path.exists() { return Ok(()); }
-    let preset: Vec<serde_json::Value> = serde_json::from_str(&std::fs::read_to_string(preset_path)?)?;
+    let preset_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../providers/preset-sources.json");
+    if !preset_path.exists() {
+        return Ok(());
+    }
+    let preset: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(preset_path)?)?;
     let mut config = load_config()?;
-    let sources = config["sources"].as_array_mut()
+    let sources = config["sources"]
+        .as_array_mut()
         .ok_or_else(|| anyhow!("config missing sources"))?;
     for s in preset {
         let name = s["name"].as_str().unwrap_or("").to_string();
@@ -709,12 +784,16 @@ fn merge_preset_sources() -> Result<()> {
 }
 
 fn merge_preset_providers() -> Result<()> {
-    let preset_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../providers/preset.json");
-    if !preset_path.exists() { return Ok(()); }
-    let preset: Vec<serde_json::Value> = serde_json::from_str(&std::fs::read_to_string(preset_path)?)?;
+    let preset_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../providers/preset.json");
+    if !preset_path.exists() {
+        return Ok(());
+    }
+    let preset: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(preset_path)?)?;
     let mut config = load_config()?;
-    let providers = config["providers"].as_array_mut()
+    let providers = config["providers"]
+        .as_array_mut()
         .ok_or_else(|| anyhow!("config missing providers"))?;
     for p in preset {
         let name = p["name"].as_str().unwrap_or("").to_string();
@@ -726,9 +805,7 @@ fn merge_preset_providers() -> Result<()> {
 }
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
-    args.windows(2)
-        .find(|w| w[0] == flag)
-        .map(|w| w[1].clone())
+    args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
 }
 
 fn base64_encode(s: &str) -> String {
@@ -744,8 +821,12 @@ fn base64_encode(s: &str) -> String {
         let b2 = bytes.get(i + 2).copied().unwrap_or(0) as u32;
         out.push(CHARS[((b0 >> 2) & 0x3f) as usize] as char);
         out.push(CHARS[(((b0 << 4) | (b1 >> 4)) & 0x3f) as usize] as char);
-        if i + 1 < bytes.len() { out.push(CHARS[(((b1 << 2) | (b2 >> 6)) & 0x3f) as usize] as char); }
-        if i + 2 < bytes.len() { out.push(CHARS[(b2 & 0x3f) as usize] as char); }
+        if i + 1 < bytes.len() {
+            out.push(CHARS[(((b1 << 2) | (b2 >> 6)) & 0x3f) as usize] as char);
+        }
+        if i + 2 < bytes.len() {
+            out.push(CHARS[(b2 & 0x3f) as usize] as char);
+        }
         i += 3;
     }
     out

@@ -1,0 +1,109 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.2.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  bundles:
+    name: Tauri bundles (${{ matrix.platform.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { name: linux-x86_64,  os: ubuntu-latest,  target: x86_64-unknown-linux-gnu }
+          - { name: macos-aarch64, os: macos-14,       target: aarch64-apple-darwin }
+          - { name: macos-x86_64,  os: macos-13,       target: x86_64-apple-darwin }
+          - { name: windows-x86_64, os: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.platform.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.77.2
+          targets: ${{ matrix.platform.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name || inputs.tag }}
+          releaseName: ${{ github.ref_name || inputs.tag }}
+          releaseDraft: false
+          prerelease: false
+          args: --target ${{ matrix.platform.target }}
+
+      - name: Package portable binary
+        shell: bash
+        run: |
+          set -e
+          BIN=src-tauri/target/${{ matrix.platform.target }}/release/anyai
+          if [[ "${{ runner.os }}" == "Windows" ]]; then BIN="${BIN}.exe"; fi
+          if [[ ! -f "$BIN" ]]; then
+            echo "binary not found at $BIN"; exit 1
+          fi
+          mkdir -p dist-bin
+          NAME="anyai-${{ matrix.platform.name }}"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp "$BIN" "dist-bin/anyai.exe"
+            (cd dist-bin && 7z a "${NAME}.zip" anyai.exe)
+            sha256sum "dist-bin/${NAME}.zip" > "dist-bin/${NAME}.zip.sha256" 2>/dev/null \
+              || shasum -a 256 "dist-bin/${NAME}.zip" > "dist-bin/${NAME}.zip.sha256"
+          else
+            cp "$BIN" "dist-bin/anyai"
+            tar -czf "dist-bin/${NAME}.tar.gz" -C dist-bin anyai
+            (cd dist-bin && (sha256sum "${NAME}.tar.gz" || shasum -a 256 "${NAME}.tar.gz") > "${NAME}.tar.gz.sha256")
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name || inputs.tag }}
+          files: |
+            dist-bin/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  installer-asset:
+    name: Upload install.sh
+    needs: bundles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name || inputs.tag }}
+          files: scripts/install.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

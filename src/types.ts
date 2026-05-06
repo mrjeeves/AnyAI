@@ -48,12 +48,22 @@ export interface ProviderCatalog {
   providers: Array<{ name: string; url: string; description?: string }>;
 }
 
+export interface ApiConfig {
+  enabled: boolean;
+  host: string;
+  port: number;
+  cors_allow_all: boolean;
+  bearer_token: string | null;
+}
+
 export interface Config {
   active_provider: string;
   active_mode: Mode;
   model_cleanup_days: number;
   kept_models: string[];
   mode_overrides: Partial<Record<Mode, string | null>>;
+  tracked_modes: Mode[];
+  api: ApiConfig;
   sources: Source[];
   providers: Provider[];
 }

@@ -31,7 +31,10 @@ pub async fn install() -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         // Try brew first, then fall back to the install script
-        let brew = Command::new("brew").args(["install", "ollama"]).status().await;
+        let brew = Command::new("brew")
+            .args(["install", "ollama"])
+            .status()
+            .await;
         if brew.map(|s| !s.success()).unwrap_or(true) {
             let status = Command::new("sh")
                 .args(["-c", "curl -fsSL https://ollama.com/install.sh | sh"])
@@ -53,11 +56,15 @@ pub async fn install() -> Result<()> {
 }
 
 pub async fn ensure_running() -> Result<()> {
-    if api_reachable().await { return Ok(()); }
+    if api_reachable().await {
+        return Ok(());
+    }
 
     let mut guard = process_lock().lock().await;
     // Check again after acquiring the lock.
-    if api_reachable().await { return Ok(()); }
+    if api_reachable().await {
+        return Ok(());
+    }
 
     let child = Command::new("ollama")
         .arg("serve")
@@ -71,7 +78,9 @@ pub async fn ensure_running() -> Result<()> {
     // Wait up to 10 seconds for API to become reachable.
     for _ in 0..20 {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        if api_reachable().await { return Ok(()); }
+        if api_reachable().await {
+            return Ok(());
+        }
     }
     Err(anyhow!("ollama serve did not become reachable within 10s"))
 }
@@ -95,6 +104,19 @@ async fn reqwest_get(url: &str) -> Result<String> {
 }
 
 pub async fn pull(model: &str, window: &tauri::WebviewWindow) -> Result<()> {
+    pull_with(model, |line| {
+        let _ = window.emit("ollama-pull-progress", line);
+    })
+    .await
+}
+
+/// Pull a model, invoking `on_line` for each progress line from `ollama pull`.
+/// Returns Ok(()) on success, Err on non-zero exit. Idempotent: completes immediately
+/// if the model is already pulled.
+pub async fn pull_with<F: FnMut(&str)>(model: &str, mut on_line: F) -> Result<()> {
+    if has_model(model).await? {
+        return Ok(());
+    }
     let model = model.to_string();
     let mut child = Command::new("ollama")
         .args(["pull", &model])
@@ -108,12 +130,57 @@ pub async fn pull(model: &str, window: &tauri::WebviewWindow) -> Result<()> {
     let mut lines = BufReader::new(stdout).lines();
 
     while let Ok(Some(line)) = lines.next_line().await {
-        let _ = window.emit("ollama-pull-progress", &line);
+        on_line(&line);
     }
 
     let status = child.wait().await.context("ollama pull wait")?;
     if !status.success() {
         return Err(anyhow!("ollama pull failed for {model}"));
+    }
+    Ok(())
+}
+
+/// True if the named model+tag is already pulled.
+pub async fn has_model(model: &str) -> Result<bool> {
+    let out = Command::new("ollama")
+        .args(["show", "--modelfile", model])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .context("ollama show")?;
+    Ok(out.success())
+}
+
+/// Fire a 1-token chat call so Ollama mmaps the weights and keeps the model loaded
+/// for `keep_alive`. Used by `anyai preload --warm`.
+pub async fn warm(model: &str) -> Result<()> {
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": "ok"}],
+        "stream": false,
+        "keep_alive": "10m",
+        "options": { "num_predict": 1 }
+    })
+    .to_string();
+    let out = Command::new("curl")
+        .args([
+            "-sf",
+            "--max-time",
+            "120",
+            "-X",
+            "POST",
+            "http://127.0.0.1:11434/api/chat",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &body,
+        ])
+        .output()
+        .await
+        .context("curl warm")?;
+    if !out.status.success() {
+        return Err(anyhow!("warm-up call failed for {model}"));
     }
     Ok(())
 }
@@ -147,7 +214,9 @@ pub async fn list_models() -> Result<Vec<ModelInfo>> {
     let mut models = Vec::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
             let name = v["name"].as_str().unwrap_or("").to_string();
             let size = v["size"].as_u64().unwrap_or(0);

@@ -64,21 +64,20 @@ AnyAI manages Ollama silently. You never interact with Ollama directly. When Any
 
 ### Requirements
 
-- macOS 12+, Linux (x86_64), or Windows 10+
+- macOS 12+, Linux (x86_64 or aarch64), or Windows 10+
 - Internet connection on first run (to pull the model — typically 3–15 GB)
 - Ollama is installed automatically if missing
 
-### From release (recommended)
+### One-line install (macOS / Linux)
 
 ```bash
-# macOS
-brew install anyai              # coming soon
-
-# Linux
 curl -fsSL https://anyai.run/install.sh | sh
+```
 
-# Windows
-# Download installer from https://anyai.run/download
+The installer tries to download a pre-built binary from the latest GitHub release. If no release matches your platform, it falls back to building from source via `scripts/bootstrap.sh`. Pass `--run` to launch immediately:
+
+```bash
+curl -fsSL https://anyai.run/install.sh | sh -s -- --run
 ```
 
 ### From source
@@ -86,15 +85,31 @@ curl -fsSL https://anyai.run/install.sh | sh
 ```bash
 git clone https://github.com/mrjeeves/AnyAI
 cd AnyAI
-pnpm install
-cargo tauri build
+just setup        # installs Rust, Node, pnpm, Tauri CLI, GTK/webkit2gtk on Linux
+just build        # produces src-tauri/target/release/anyai
+just run          # or: just dev (hot-reload GUI)
 ```
 
-See [Building from source](#building-from-source) for prerequisites.
+`just setup` is idempotent — re-run any time. See [Building from source](#building-from-source) for the full prereq list.
 
 ---
 
 ## CLI reference
+
+Quick reference of subcommands:
+
+| Command            | Purpose                                                |
+|--------------------|--------------------------------------------------------|
+| `anyai run`        | Chat in the terminal (auto-installs Ollama if missing) |
+| `anyai serve`      | Start the OpenAI-compatible HTTP server                |
+| `anyai preload`    | Pull and warm models for one or more modes             |
+| `anyai status`     | Show provider, mode, hardware, ollama state            |
+| `anyai stop`       | Stop the managed Ollama process                        |
+| `anyai models`     | List / pin / override / prune pulled models            |
+| `anyai providers`  | Manage provider URLs                                   |
+| `anyai sources`    | Manage source catalog URLs                             |
+| `anyai import`     | Import a config bundle                                 |
+| `anyai export`     | Export the current config                              |
 
 ### Run / Chat
 
@@ -266,6 +281,82 @@ anyai import anyai:import:eyJzb3VyY2VzIjpbLi4uXSwicHJvdmlkZXJzIjpbLi4uXX0
 ```
 
 Import is always additive — it never overwrites existing entries. Merge is by name: if you already have a provider called "DeepSeek R1", it is not replaced.
+
+---
+
+### Preload
+
+Prepare models for one or more modes ahead of time. Useful before going offline, before a demo, or during setup so the OpenAI server has everything warm.
+
+```bash
+anyai preload text                      # pull the text-mode model
+anyai preload text vision code          # pull all three
+anyai preload text vision --track       # also persist as tracked modes
+anyai preload text --no-warm            # skip the post-pull warm-up call
+anyai preload text --json               # newline-delimited JSON events
+```
+
+Tracked modes are kept current automatically: when a manifest update changes the recommended tag, AnyAI pulls the new one in the background and starts the eviction clock on the old one.
+
+---
+
+### Serve (OpenAI-compatible API)
+
+`anyai serve` starts an OpenAI-compatible HTTP server on `127.0.0.1:1473` so any tool that speaks the OpenAI wire format (Cursor, Continue, Aider, custom agents) can use AnyAI as a drop-in provider.
+
+```bash
+anyai serve                             # 127.0.0.1:1473
+anyai serve --port 8080
+anyai serve --host 0.0.0.0 --bearer-token sk-…   # expose to LAN with auth
+anyai serve --no-ollama                 # don't auto-start ollama
+```
+
+**Endpoints**
+
+| Path | Behaviour |
+|------|----------|
+| `POST /v1/chat/completions` | OpenAI chat. Streams when `stream: true`. |
+| `POST /v1/completions`      | Legacy completions. |
+| `POST /v1/embeddings`       | Proxied to Ollama embeddings. |
+| `GET  /v1/models`           | Virtual model IDs + raw pulled tags. |
+| `GET  /healthz`             | 200 if Ollama reachable, else 503. |
+| `POST /v1/anyai/preload`    | Body `{"modes":[…], "track":bool}`; SSE progress. |
+| `GET  /v1/anyai/status`     | Current resolved tag per tracked mode. |
+
+**Virtual model IDs** resolve at request-time to the best model for your hardware:
+
+| Model ID         | Resolves to (example) |
+|------------------|----------------------|
+| `anyai-text`     | `qwen2.5:14b` |
+| `anyai-vision`   | `qwen2.5vl:7b` |
+| `anyai-code`     | `qwen2.5-coder:14b` |
+| `anyai-transcribe` | `whisper:large` |
+
+When the active provider's manifest changes, the underlying tag swaps automatically; the virtual model ID stays the same so external clients don't need updating. The response includes an `X-AnyAI-Resolved-Model` header showing which tag actually served the request.
+
+**First-request behaviour**: if a virtual model's underlying tag isn't pulled yet, the server returns `503 + Retry-After: 10` with a JSON body describing pull progress. Pass `?wait=true` (or header `X-AnyAI-Wait: true`) to hold the connection and stream pull progress as SSE keep-alives instead.
+
+**Use from Cursor / Continue / Aider** — point at:
+
+```
+Base URL: http://127.0.0.1:1473/v1
+Model:    anyai-code
+API key:  (any non-empty string, ignored unless --bearer-token set)
+```
+
+**Example**
+
+```bash
+curl -s http://127.0.0.1:1473/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "anyai-text",
+    "messages": [{"role":"user","content":"hello"}],
+    "stream": false
+  }'
+```
+
+The GUI also runs the API server on the same port by default — you can use AnyAI as both a desktop chat app and a local OpenAI endpoint at the same time. Disable via `config.json` (`api.enabled: false`).
 
 ---
 
