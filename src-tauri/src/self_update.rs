@@ -308,11 +308,18 @@ fn pick_asset(assets: &[Value]) -> Option<&Value> {
         .find(|a| a["name"].as_str().is_some_and(|n| n.contains(needle)))
 }
 
-fn pick_sha_asset(assets: &[Value]) -> Option<&Value> {
+fn pick_sha_asset<'a>(assets: &'a [Value], asset_name: &str) -> Option<&'a Value> {
+    let preferred = format!("{asset_name}.sha256");
+    if let Some(matching) = assets
+        .iter()
+        .find(|a| a["name"].as_str() == Some(preferred.as_str()))
+    {
+        return Some(matching);
+    }
     assets.iter().find(|a| {
         a["name"]
             .as_str()
-            .map(|n| n.eq_ignore_ascii_case("SHA256SUMS") || n.ends_with(".sha256"))
+            .map(|n| n.eq_ignore_ascii_case("SHA256SUMS"))
             .unwrap_or(false)
     })
 }
@@ -346,7 +353,7 @@ async fn stage_release(release: &Value, version: &str) -> Result<()> {
         .await?;
     std::fs::write(&part_path, &bytes)?;
 
-    if let Some(sha_asset) = pick_sha_asset(assets) {
+    if let Some(sha_asset) = pick_sha_asset(assets, asset_name) {
         let sha_url = sha_asset["browser_download_url"]
             .as_str()
             .ok_or_else(|| anyhow!("sha asset missing url"))?;
@@ -750,29 +757,42 @@ abc123  anyai-linux-x86_64.tar.gz
     }
 
     #[test]
-    fn pick_sha_asset_finds_sha256sums() {
+    fn pick_sha_asset_prefers_matching_sidecar_over_others() {
+        let assets = vec![
+            json!({"name": "anyai-linux-x86_64.tar.gz"}),
+            json!({"name": "anyai-linux-x86_64.tar.gz.sha256"}),
+            json!({"name": "anyai-macos-aarch64.tar.gz"}),
+            json!({"name": "anyai-macos-aarch64.tar.gz.sha256"}),
+        ];
+        let picked =
+            pick_sha_asset(&assets, "anyai-linux-x86_64.tar.gz").expect("expected sidecar");
+        assert_eq!(picked["name"], "anyai-linux-x86_64.tar.gz.sha256");
+    }
+
+    #[test]
+    fn pick_sha_asset_falls_back_to_sha256sums() {
         let assets = vec![
             json!({"name": "anyai-linux-x86_64.tar.gz"}),
             json!({"name": "SHA256SUMS"}),
         ];
-        let picked = pick_sha_asset(&assets).expect("expected SHA256SUMS");
+        let picked =
+            pick_sha_asset(&assets, "anyai-linux-x86_64.tar.gz").expect("expected SHA256SUMS");
         assert_eq!(picked["name"], "SHA256SUMS");
     }
 
     #[test]
-    fn pick_sha_asset_finds_sidecar_suffix() {
+    fn pick_sha_asset_returns_none_when_no_match_and_no_sums_file() {
         let assets = vec![
-            json!({"name": "anyai.tar.gz"}),
-            json!({"name": "anyai.tar.gz.sha256"}),
+            json!({"name": "anyai-linux-x86_64.tar.gz"}),
+            json!({"name": "anyai-macos-aarch64.tar.gz.sha256"}),
         ];
-        let picked = pick_sha_asset(&assets).expect("expected sidecar");
-        assert_eq!(picked["name"], "anyai.tar.gz.sha256");
+        assert!(pick_sha_asset(&assets, "anyai-linux-x86_64.tar.gz").is_none());
     }
 
     #[test]
-    fn pick_sha_asset_returns_none_when_absent() {
-        let assets = vec![json!({"name": "anyai.tar.gz"})];
-        assert!(pick_sha_asset(&assets).is_none());
+    fn pick_sha_asset_returns_none_when_assets_empty() {
+        let assets: Vec<Value> = vec![];
+        assert!(pick_sha_asset(&assets, "anyai-linux-x86_64.tar.gz").is_none());
     }
 
     #[test]
