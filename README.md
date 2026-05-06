@@ -6,11 +6,19 @@ AnyAI is a single binary that exposes an OpenAI-compatible HTTP API on `127.0.0.
 
 ## Install
 
+macOS / Linux:
+
 ```bash
-curl -fsSL https://anyai.run/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mrjeeves/AnyAI/main/scripts/install.sh | sh
 ```
 
-macOS / Linux. Windows: download the latest binary from [Releases](https://github.com/mrjeeves/AnyAI/releases).
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/mrjeeves/AnyAI/main/scripts/install.ps1 | iex
+```
+
+Or grab a binary from [Releases](https://github.com/mrjeeves/AnyAI/releases).
 
 ## Quick start
 

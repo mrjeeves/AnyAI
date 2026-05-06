@@ -57,13 +57,25 @@ On every request: re-resolve, hot-swap if upstream changed, return. A 5-minute b
 ### One-line (macOS / Linux)
 
 ```bash
-curl -fsSL https://anyai.run/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mrjeeves/AnyAI/main/scripts/install.sh | sh
 ```
 
 The installer downloads a pre-built binary from the latest GitHub release. If no release matches your platform it falls back to building from source via `scripts/bootstrap.sh`. Pass `--run` to launch immediately:
 
 ```bash
-curl -fsSL https://anyai.run/install.sh | sh -s -- --run
+curl -fsSL https://raw.githubusercontent.com/mrjeeves/AnyAI/main/scripts/install.sh | sh -s -- --run
+```
+
+### One-line (Windows, PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/mrjeeves/AnyAI/main/scripts/install.ps1 | iex
+```
+
+To launch immediately after install:
+
+```powershell
+iex "& { $(irm https://raw.githubusercontent.com/mrjeeves/AnyAI/main/scripts/install.ps1) } -Run"
 ```
 
 ### From source
