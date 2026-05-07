@@ -18,6 +18,10 @@ pub async fn run(args: Vec<String>) -> Result<()> {
             print_help();
             Ok(())
         }
+        Some("--version") | Some("-V") | Some("version") => {
+            println!("anyai {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Some(unknown) => Err(anyhow!(
             "unknown command: {unknown}\nRun `anyai help` for usage."
         )),
@@ -34,6 +38,7 @@ fn print_help() {
 
 USAGE:
   anyai [command] [flags]
+  anyai --version
 
 COMMANDS:
   run           Start chat (terminal)

@@ -193,7 +193,9 @@ async fn run_check(force: bool) -> Result<()> {
         }
         eprintln!("self-update: stage failed: {e}");
     } else if force {
-        println!("Run `anyai update apply` (or just relaunch anyai) to switch to {latest_version}.");
+        println!(
+            "Run `anyai update apply` (or just relaunch anyai) to switch to {latest_version}."
+        );
     }
     Ok(())
 }
