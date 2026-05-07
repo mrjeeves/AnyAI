@@ -97,34 +97,58 @@ fn apply_pending() -> Result<()> {
 /// One tick of the update check, intended to be called from the watcher loop.
 /// Cheap when nothing is due (gated by `check_interval_hours`).
 pub async fn tick() -> Result<()> {
+    run_check(false).await
+}
+
+/// Check + stage now, ignoring the cooldown and printing user-facing output.
+/// Used by `anyai update check`.
+pub async fn force_check() -> Result<()> {
+    run_check(true).await
+}
+
+async fn run_check(force: bool) -> Result<()> {
     let cfg = crate::resolver::load_config_value()?;
     let au = &cfg["auto_update"];
     if !au["enabled"].as_bool().unwrap_or(true) {
+        if force {
+            println!("self-update is disabled in config (auto_update.enabled=false).");
+        }
         return Ok(());
     }
     if std::env::var("ANYAI_AUTOUPDATE")
         .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
         .unwrap_or(false)
     {
+        if force {
+            println!("self-update is disabled via ANYAI_AUTOUPDATE=0.");
+        }
         return Ok(());
     }
 
     if detect_install_kind() == InstallKind::PackageManager {
-        // Log once per process at most by stamping a marker.
         let marker = crate::anyai_dir()?.join("updates/pm-detected.flag");
         if !marker.exists() {
             let _ = std::fs::create_dir_all(marker.parent().unwrap());
             let _ = std::fs::write(&marker, "skip");
-            eprintln!(
-                "self-update: package-manager install detected; deferring to system updater."
+            if !force {
+                eprintln!(
+                    "self-update: package-manager install detected; deferring to system updater."
+                );
+            }
+        }
+        if force {
+            println!(
+                "Package-manager install detected; self-update is deferred to the system updater."
             );
         }
         return Ok(());
     }
 
-    let interval_hours = au["check_interval_hours"].as_f64().unwrap_or(6.0);
-    if !is_due(interval_hours)? {
-        return Ok(());
+    if !force {
+        let interval_hours = au["check_interval_hours"].as_f64().unwrap_or(6.0);
+        if !is_due(interval_hours)? {
+            return Ok(());
+        }
     }
     stamp_check_now()?;
 
@@ -139,19 +163,37 @@ pub async fn tick() -> Result<()> {
     let current = env!("CARGO_PKG_VERSION");
     let cmp = compare_semver(current, &latest_version);
     if cmp != std::cmp::Ordering::Less {
-        return Ok(()); // Already at or ahead of latest.
-    }
-
-    if !policy_allows(policy, current, &latest_version) {
-        eprintln!(
-            "self-update: {latest_version} available (current {current}); auto_apply='{}', staging skipped.",
-            au["auto_apply"].as_str().unwrap_or("patch")
-        );
+        if force {
+            println!("Already at latest ({current}); newest published is {latest_version}.");
+        }
         return Ok(());
     }
 
+    if !policy_allows(policy, current, &latest_version) {
+        let policy_str = au["auto_apply"].as_str().unwrap_or("patch");
+        if force {
+            println!(
+                "{latest_version} is available (current {current}), but auto_apply='{policy_str}' \
+                 does not permit this jump. Set auto_apply=\"all\" in ~/.anyai/config.json to allow it."
+            );
+        } else {
+            eprintln!(
+                "self-update: {latest_version} available (current {current}); auto_apply='{policy_str}', staging skipped."
+            );
+        }
+        return Ok(());
+    }
+
+    if force {
+        println!("Staging {latest_version}…");
+    }
     if let Err(e) = stage_release(&release, &latest_version).await {
+        if force {
+            return Err(anyhow!("stage failed: {e}"));
+        }
         eprintln!("self-update: stage failed: {e}");
+    } else if force {
+        println!("Run `anyai update apply` (or just relaunch anyai) to switch to {latest_version}.");
     }
     Ok(())
 }
@@ -576,11 +618,7 @@ fn iso_now() -> String {
 pub async fn cmd_update(args: &[String]) -> Result<()> {
     match args.first().map(|s| s.as_str()) {
         None | Some("status") => print_status().await,
-        Some("check") => {
-            // Force a check now, ignoring the interval marker.
-            let _ = stamp_check_now();
-            tick().await
-        }
+        Some("check") => force_check().await,
         Some("apply") => {
             apply_pending()?;
             println!("Applied (or no pending update). The next process start runs the new binary.");
