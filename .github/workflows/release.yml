@@ -54,6 +54,30 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      - name: Build frontend (Vite)
+        run: pnpm build
+
+      - name: Verify frontend bundle
+        shell: bash
+        run: |
+          set -e
+          if [[ ! -f dist/index.html ]]; then
+            echo "::error::dist/index.html missing — vite build failed silently"
+            exit 1
+          fi
+          if grep -q '/src/main.ts' dist/index.html; then
+            echo "::error::dist/index.html still references /src/main.ts — vite did not rewrite the entry"
+            cat dist/index.html
+            exit 1
+          fi
+          if [[ ! -d dist/assets ]] || [[ -z "$(ls -A dist/assets 2>/dev/null)" ]]; then
+            echo "::error::dist/assets is empty — no compiled JS/CSS"
+            ls -la dist/
+            exit 1
+          fi
+          echo "dist/ OK:"
+          ls -la dist/ dist/assets/
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
