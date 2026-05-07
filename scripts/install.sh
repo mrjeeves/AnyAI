@@ -66,6 +66,44 @@ install_binary() {
   log "Installed: $PREFIX_DIR/anyai"
 }
 
+ensure_on_path() {
+  case ":$PATH:" in
+    *":$PREFIX_DIR:"*) return 0 ;;
+  esac
+
+  local shell_name rc line marker
+  shell_name="$(basename "${SHELL:-bash}")"
+  marker="# added by anyai installer"
+  case "$shell_name" in
+    zsh)
+      rc="$HOME/.zshrc"
+      line="export PATH=\"$PREFIX_DIR:\$PATH\"  $marker"
+      ;;
+    fish)
+      rc="$HOME/.config/fish/config.fish"
+      line="fish_add_path -g $PREFIX_DIR  $marker"
+      ;;
+    *)
+      rc="$HOME/.bashrc"
+      line="export PATH=\"$PREFIX_DIR:\$PATH\"  $marker"
+      ;;
+  esac
+
+  if grep -qsF "$marker" "$rc" 2>/dev/null; then
+    warn "$PREFIX_DIR not on current PATH; PATH already added to $rc — open a new terminal."
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$rc")"
+  if printf '\n%s\n' "$line" >> "$rc" 2>/dev/null; then
+    log "Added $PREFIX_DIR to PATH in $rc"
+    log "Open a new terminal (or run: source $rc) for it to take effect."
+  else
+    warn "$PREFIX_DIR is not on PATH. Add this to your shell rc:"
+    warn "  $line"
+  fi
+}
+
 try_release() {
   if ! command -v curl >/dev/null 2>&1; then
     warn "curl missing; skipping release download."
@@ -129,6 +167,10 @@ build_from_source() {
 
 if [[ "$FORCE_SOURCE" == "true" ]] || ! try_release; then
   build_from_source
+fi
+
+if [[ "$DRY_RUN" != "true" ]]; then
+  ensure_on_path
 fi
 
 if [[ "$RUN_AFTER" == "true" ]] && [[ "$DRY_RUN" != "true" ]]; then
