@@ -75,6 +75,13 @@ jobs:
             ls -la dist/
             exit 1
           fi
+          # Guard against the SSR-runtime regression: if Svelte's server build
+          # leaks into the client bundle, `mount()` throws and the WebView is
+          # blank. Detect by looking for the server-only error name.
+          if grep -q 'lifecycle_function_unavailable' dist/assets/*.js; then
+            echo "::error::dist bundle contains Svelte SSR runtime — mount() would throw in the browser. Check vite.config.ts resolve.conditions."
+            exit 1
+          fi
           echo "dist/ OK:"
           ls -la dist/ dist/assets/
 
