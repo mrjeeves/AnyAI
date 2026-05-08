@@ -106,9 +106,18 @@ if ! have node; then
 fi
 
 if ! have pnpm; then
-  log "Enabling pnpm via corepack…"
-  corepack enable || true
-  corepack prepare pnpm@latest --activate
+  if have corepack; then
+    log "Enabling pnpm via corepack…"
+    corepack enable || true
+    corepack prepare pnpm@latest --activate
+  elif have npm; then
+    # Node 25+ unbundled corepack; older Node distros may also not ship it.
+    log "Installing pnpm via npm…"
+    npm install -g pnpm
+  else
+    warn "Neither corepack nor npm is on PATH. Install pnpm manually: https://pnpm.io/installation"
+    exit 1
+  fi
 fi
 
 # ---------------------------------------------------------------------------

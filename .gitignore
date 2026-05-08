@@ -2,6 +2,9 @@ node_modules/
 dist/
 src-tauri/target/
 target/
+# Tauri regenerates per-platform capability schemas next to the tracked
+# capabilities.json on every build; they're build artifacts, not source.
+src-tauri/gen/schemas/*-schema.json
 .env
 .env.local
 .DS_Store
