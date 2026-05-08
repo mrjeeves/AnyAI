@@ -57,8 +57,25 @@
         body,
       });
 
-      const data = await resp.json();
-      const content = data?.message?.content ?? "(no response)";
+      const data = await resp.json().catch(() => null);
+
+      // Ollama signals failure either via non-2xx + JSON body containing
+      // `error`, or via 200 + no message field. Surface whichever we got
+      // instead of swallowing it as "(no response)".
+      if (!resp.ok || data?.error) {
+        const detail = data?.error ?? `HTTP ${resp.status}`;
+        messages = [...messages, { role: "assistant", content: `(ollama: ${detail})` }];
+        return;
+      }
+      const content = data?.message?.content;
+      if (!content) {
+        const preview = JSON.stringify(data ?? {}).slice(0, 240);
+        messages = [
+          ...messages,
+          { role: "assistant", content: `(empty response — raw: ${preview})` },
+        ];
+        return;
+      }
       messages = [...messages, { role: "assistant", content }];
     } catch (e) {
       messages = [...messages, { role: "assistant", content: `(error: ${e})` }];
