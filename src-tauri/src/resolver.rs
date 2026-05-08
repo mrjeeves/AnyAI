@@ -15,7 +15,8 @@ pub const VIRTUAL_PREFIX: &str = "anyai-";
 pub const KNOWN_MODES: &[&str] = &["text", "vision", "code", "transcribe"];
 const DEFAULT_TTL_MIN: f64 = 360.0;
 const DEFAULT_SOURCE_TTL_MIN: f64 = 1440.0;
-const FALLBACK_MANIFEST_URL: &str = "https://anyai.run/manifest/default.json";
+const FALLBACK_MANIFEST_URL: &str =
+    "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/manifests/default.json";
 
 /// Resolve a single mode against the active provider's manifest using current hardware.
 pub async fn resolve(mode: &str) -> Result<String> {
@@ -532,10 +533,17 @@ pub fn default_config_value() -> Value {
             "check_interval_hours": 6
         },
         "sources": [
-            { "name": "AnyAI", "url": "https://anyai.run/sources/index.json" }
+            {
+                "name": "AnyAI",
+                "url": "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/sources/index.json"
+            }
         ],
         "providers": [
-            { "name": "AnyAI Default", "url": "https://anyai.run/manifest/default.json", "source": "AnyAI" }
+            {
+                "name": "AnyAI Default",
+                "url": "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/manifests/default.json",
+                "source": "AnyAI"
+            }
         ]
     })
 }

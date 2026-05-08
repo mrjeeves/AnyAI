@@ -10,12 +10,14 @@
   let {
     activeModel,
     activeMode,
+    supportedModes,
     hardware,
     onModeChange,
     onProviderChange,
   } = $props<{
     activeModel: string;
     activeMode: Mode;
+    supportedModes: Set<Mode>;
     hardware: HardwareProfile | null;
     onModeChange: (mode: Mode) => void;
     onProviderChange: () => void;
@@ -115,7 +117,7 @@
     {/if}
   </div>
 
-  <ModeBar current={activeMode} onChange={handleModeChange} />
+  <ModeBar current={activeMode} supported={supportedModes} onChange={handleModeChange} />
 
   <div class="input-row">
     <textarea

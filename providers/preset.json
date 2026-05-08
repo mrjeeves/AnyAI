@@ -1,5 +1,7 @@
 [
-  { "name": "AnyAI Default", "url": "https://anyai.run/manifest/default.json",  "source": "AnyAI"     },
-  { "name": "Coding Focus",  "url": "https://anyai.run/manifest/code.json",      "source": "AnyAI"     },
-  { "name": "Privacy First", "url": "https://anyai.run/manifest/private.json",   "source": "AnyAI"     }
+  {
+    "name": "AnyAI Default",
+    "url": "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/manifests/default.json",
+    "source": "AnyAI"
+  }
 ]

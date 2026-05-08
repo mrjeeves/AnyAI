@@ -1,8 +1,12 @@
 <script lang="ts">
   import type { Mode } from "../types";
 
-  let { current, onChange } = $props<{
+  let { current, supported, onChange } = $props<{
     current: Mode;
+    /** Modes the active manifest defines tiers for. Modes outside this set
+     * render disabled with an "(unsupported)" hint — useful for transcribe,
+     * which has no working Ollama model in the default manifest. */
+    supported: Set<Mode>;
     onChange: (mode: Mode) => void;
   }>();
 
@@ -16,11 +20,15 @@
 
 <div class="mode-bar">
   {#each modes as m}
+    {@const ok = supported.has(m.id)}
     <button
       class:active={m.id === current}
-      onclick={() => onChange(m.id)}
+      class:unsupported={!ok}
+      disabled={!ok}
+      title={ok ? "" : `${m.label} isn't in the active manifest — no model is recommended for it.`}
+      onclick={() => ok && onChange(m.id)}
     >
-      {m.label}
+      {m.label}{!ok ? " · unsupported" : ""}
     </button>
   {/each}
 </div>
@@ -43,6 +51,11 @@
     cursor: pointer;
     transition: all .15s;
   }
-  button:hover { border-color: #444; color: #ccc; }
+  button:hover:not(:disabled) { border-color: #444; color: #ccc; }
   button.active { background: #6e6ef7; border-color: #6e6ef7; color: #fff; font-weight: 500; }
+  button.unsupported {
+    opacity: .45;
+    cursor: not-allowed;
+    font-style: italic;
+  }
 </style>

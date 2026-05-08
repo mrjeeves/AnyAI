@@ -18,7 +18,19 @@
   let hardware = $state<HardwareProfile | null>(null);
   let activeModel = $state("");
   let activeMode = $state<Mode>("text");
+  let supportedModes = $state<Set<Mode>>(new Set(["text", "vision", "code", "transcribe"]));
   let error = $state("");
+
+  // Modes the active manifest actually has tiers for. Falls back to all four
+  // before the manifest loads so the bar isn't briefly all-disabled.
+  function modesIn(manifest: { modes: Record<string, unknown> } | null): Set<Mode> {
+    if (!manifest) return new Set(["text", "vision", "code", "transcribe"]);
+    const set = new Set<Mode>();
+    for (const m of ["text", "vision", "code", "transcribe"] as Mode[]) {
+      if (manifest.modes[m]) set.add(m);
+    }
+    return set;
+  }
 
   onMount(async () => {
     try {
@@ -33,6 +45,7 @@
       runCleanup().catch(() => {});
 
       const manifest = await getActiveManifest();
+      supportedModes = modesIn(manifest);
       activeModel = resolveModel(hw, manifest, activeMode, config.mode_overrides);
 
       const ollamaInstalled = await invoke<boolean>("ollama_installed");
@@ -54,6 +67,7 @@
         if (!hardware) return;
         if (e.mode !== activeMode) return;
         const [config, manifest] = await Promise.all([loadConfig(), getActiveManifest()]);
+        supportedModes = modesIn(manifest);
         activeModel = resolveModel(hardware, manifest, activeMode, config.mode_overrides);
       });
     } catch (e) {
@@ -80,6 +94,7 @@
     activeMode = mode;
     if (!hardware) return;
     const [config, manifest] = await Promise.all([loadConfig(), getActiveManifest()]);
+    supportedModes = modesIn(manifest);
     activeModel = resolveModel(hardware, manifest, mode, config.mode_overrides);
 
     await updateConfig({ active_mode: mode });
@@ -88,6 +103,7 @@
   async function onProviderChange() {
     if (!hardware) return;
     const [config, manifest] = await Promise.all([loadConfig(), getActiveManifest()]);
+    supportedModes = modesIn(manifest);
     activeModel = resolveModel(hardware, manifest, activeMode, config.mode_overrides);
   }
 </script>
@@ -111,6 +127,7 @@
     <Chat
       {activeModel}
       {activeMode}
+      {supportedModes}
       {hardware}
       onModeChange={onModeChange}
       onProviderChange={onProviderChange}

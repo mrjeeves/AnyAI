@@ -31,9 +31,15 @@ const DEFAULT_CONFIG: Config = {
   tracked_modes: ["text"],
   api: { ...DEFAULT_API },
   auto_update: { ...DEFAULT_AUTO_UPDATE },
-  sources: [{ name: "AnyAI", url: "https://anyai.run/sources/index.json" }],
+  sources: [
+    { name: "AnyAI", url: "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/sources/index.json" },
+  ],
   providers: [
-    { name: "AnyAI Default", url: "https://anyai.run/manifest/default.json", source: "AnyAI" },
+    {
+      name: "AnyAI Default",
+      url: "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/manifests/default.json",
+      source: "AnyAI",
+    },
   ],
 };
 

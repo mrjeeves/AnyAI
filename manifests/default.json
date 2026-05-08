@@ -1,42 +1,36 @@
 {
   "name": "AnyAI Default",
-  "version": "1",
+  "version": "2",
   "ttl_minutes": 360,
   "default_mode": "text",
   "modes": {
     "text": {
       "label": "Text",
       "tiers": [
-        { "min_vram_gb": 24, "min_ram_gb": 48, "model": "qwen2.5:32b",  "fallback": "qwen2.5:14b" },
-        { "min_vram_gb": 12, "min_ram_gb": 24, "model": "qwen2.5:14b",  "fallback": "qwen2.5:7b"  },
-        { "min_vram_gb": 6,  "min_ram_gb": 12, "model": "qwen2.5:7b",   "fallback": "qwen2.5:3b"  },
-        { "min_vram_gb": 3,  "min_ram_gb": 6,  "model": "qwen2.5:3b",   "fallback": "tinyllama"   },
-        { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "tinyllama",    "fallback": "tinyllama"   }
+        { "min_vram_gb": 40, "min_ram_gb": 64, "model": "llama3.3:70b",  "fallback": "qwen3:32b"     },
+        { "min_vram_gb": 20, "min_ram_gb": 32, "model": "qwen3:32b",     "fallback": "qwen3:14b"     },
+        { "min_vram_gb": 12, "min_ram_gb": 24, "model": "qwen3:14b",     "fallback": "qwen3:8b"      },
+        { "min_vram_gb": 6,  "min_ram_gb": 12, "model": "qwen3:8b",      "fallback": "gemma3:4b"     },
+        { "min_vram_gb": 3,  "min_ram_gb": 6,  "model": "gemma3:4b",     "fallback": "llama3.2:3b"   },
+        { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "llama3.2:3b",   "fallback": "llama3.2:1b"   }
       ]
     },
     "vision": {
       "label": "Vision",
       "tiers": [
-        { "min_vram_gb": 12, "min_ram_gb": 16, "model": "qwen2.5vl:7b",  "fallback": "llava:7b" },
-        { "min_vram_gb": 6,  "min_ram_gb": 8,  "model": "qwen2.5vl:3b",  "fallback": "llava:7b" },
-        { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "llava:7b",      "fallback": "llava:7b" }
+        { "min_vram_gb": 24, "min_ram_gb": 32, "model": "qwen2.5vl:32b", "fallback": "qwen2.5vl:7b"  },
+        { "min_vram_gb": 12, "min_ram_gb": 16, "model": "qwen2.5vl:7b",  "fallback": "qwen2.5vl:3b"  },
+        { "min_vram_gb": 6,  "min_ram_gb": 8,  "model": "qwen2.5vl:3b",  "fallback": "moondream"     },
+        { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "moondream",     "fallback": "moondream"     }
       ]
     },
     "code": {
       "label": "Code",
       "tiers": [
-        { "min_vram_gb": 12, "min_ram_gb": 24, "model": "qwen2.5-coder:14b", "fallback": "qwen2.5-coder:7b" },
-        { "min_vram_gb": 6,  "min_ram_gb": 12, "model": "qwen2.5-coder:7b",  "fallback": "qwen2.5-coder:3b" },
-        { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "qwen2.5-coder:3b",  "fallback": "qwen2.5-coder:3b" }
-      ]
-    },
-    "transcribe": {
-      "label": "Transcribe",
-      "input": "audio",
-      "tiers": [
-        { "min_vram_gb": 8,  "min_ram_gb": 16, "model": "whisper:large",  "fallback": "whisper:medium" },
-        { "min_vram_gb": 4,  "min_ram_gb": 8,  "model": "whisper:medium", "fallback": "whisper:base"   },
-        { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "whisper:base",   "fallback": "whisper:base"   }
+        { "min_vram_gb": 24, "min_ram_gb": 48, "model": "qwen2.5-coder:32b", "fallback": "qwen2.5-coder:14b" },
+        { "min_vram_gb": 12, "min_ram_gb": 24, "model": "qwen2.5-coder:14b", "fallback": "qwen2.5-coder:7b"  },
+        { "min_vram_gb": 6,  "min_ram_gb": 12, "model": "qwen2.5-coder:7b",  "fallback": "qwen2.5-coder:3b"  },
+        { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "qwen2.5-coder:3b",  "fallback": "qwen2.5-coder:1.5b"}
       ]
     }
   }
