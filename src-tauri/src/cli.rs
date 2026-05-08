@@ -51,7 +51,7 @@ COMMANDS:
   providers     Manage providers
   import <url>  Import config from URL or file
   export        Export config
-  update        Self-update: status | check | apply
+  update        Update to the latest release (one shot: check + download + apply)
 
 FLAGS (run):
   --mode <text|vision|code|transcribe>
