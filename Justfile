@@ -53,6 +53,13 @@ check: lint
     @cd src-tauri && cargo fmt --check
     @cd src-tauri && cargo test --no-fail-fast
 
-# Cut a release via the GitHub release workflow.
-release tag:
-    @gh workflow run release.yml -f tag={{tag}}
+# Cut a release: bump version everywhere, commit, push, trigger the workflow.
+# Usage: just release 0.1.8
+release version:
+    @./scripts/bump-version.sh {{version}}
+    @if ! git diff --quiet src-tauri/Cargo.toml src-tauri/Cargo.lock package.json; then \
+        git add src-tauri/Cargo.toml src-tauri/Cargo.lock package.json; \
+        git commit -m "chore(release): {{version}}"; \
+    fi
+    @git push
+    @gh workflow run release.yml -f tag={{version}}

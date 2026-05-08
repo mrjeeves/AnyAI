@@ -28,10 +28,12 @@ jobs:
       - uses: actions/checkout@v4
 
       # Guard against the "tag says v0.1.5, binary reports 0.1.2" trap.
-      # The binary embeds CARGO_PKG_VERSION at compile time; if Cargo.toml
-      # / package.json / tauri.conf.json don't match the tag, every install
-      # of the release will misreport its version and self-update from it
-      # will keep saying "update available."
+      # The binary embeds CARGO_PKG_VERSION at compile time, so if the
+      # manifests don't match the tag every install will misreport its
+      # version and self-update will keep saying "update available."
+      # src-tauri/Cargo.toml is the single source of truth; tauri.conf.json
+      # has no version field (Tauri 2 falls back to Cargo.toml). package.json
+      # is kept in sync by `just release` / scripts/bump-version.sh.
       - name: Verify tag matches manifest versions
         shell: bash
         run: |
@@ -41,11 +43,9 @@ jobs:
           fail() { echo "::error::$*"; exit 1; }
           got_cargo=$(awk -F\" '/^version = / {print $2; exit}' src-tauri/Cargo.toml)
           got_pkg=$(node -e "console.log(require('./package.json').version)")
-          got_tauri=$(node -e "console.log(require('./src-tauri/tauri.conf.json').version)")
-          [[ "$got_cargo" == "$EXPECTED" ]] || fail "src-tauri/Cargo.toml version is $got_cargo, expected $EXPECTED (tag $TAG)"
-          [[ "$got_pkg"   == "$EXPECTED" ]] || fail "package.json version is $got_pkg, expected $EXPECTED (tag $TAG)"
-          [[ "$got_tauri" == "$EXPECTED" ]] || fail "src-tauri/tauri.conf.json version is $got_tauri, expected $EXPECTED (tag $TAG)"
-          echo "Manifest versions all match tag $TAG ($EXPECTED)."
+          [[ "$got_cargo" == "$EXPECTED" ]] || fail "src-tauri/Cargo.toml version is $got_cargo, expected $EXPECTED (tag $TAG). Run 'just release $EXPECTED' to bump."
+          [[ "$got_pkg"   == "$EXPECTED" ]] || fail "package.json version is $got_pkg, expected $EXPECTED (tag $TAG). Run 'just release $EXPECTED' to bump."
+          echo "Manifest versions match tag $TAG ($EXPECTED)."
 
       - name: Linux deps
         if: runner.os == 'Linux'
