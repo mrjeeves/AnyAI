@@ -11,6 +11,9 @@ mod resolver;
 mod self_update;
 mod watcher;
 
+#[cfg(target_os = "windows")]
+mod windows;
+
 #[tauri::command]
 async fn detect_hardware() -> Result<hardware::HardwareProfile, String> {
     hardware::detect().map_err(|e| e.to_string())
@@ -83,13 +86,27 @@ async fn resolve_virtual_model(requested: String) -> Result<String, String> {
 }
 
 fn main() {
+    // If invoked from CLI with arguments, handle as CLI and exit before starting GUI.
+    let args: Vec<String> = std::env::args().collect();
+    let cli_mode = args.len() > 1;
+
+    // On Windows the release binary is built as a GUI subsystem app so the
+    // GUI launches from Explorer without a console flash. The flip side is
+    // that cmd.exe / PowerShell don't connect any stdio when they invoke
+    // anyai.exe for a CLI command, so println!/eprintln! go to the void.
+    // Attach to the parent console and rewire std handles BEFORE any output
+    // (incl. self_update messages) so `anyai status`, `anyai --version`,
+    // etc. actually print.
+    #[cfg(target_os = "windows")]
+    if cli_mode {
+        windows::attach_parent_console();
+    }
+
     // First thing every process does: apply any staged self-update so the new
     // binary takes over before we open ports, sockets, or the GUI window.
     self_update::apply_pending_if_any();
 
-    // If invoked from CLI with arguments, handle as CLI and exit before starting GUI.
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 {
+    if cli_mode {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async {
             if let Err(e) = cli::run(args[1..].to_vec()).await {

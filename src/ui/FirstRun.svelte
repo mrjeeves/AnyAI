@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
+  import { open as openExternal } from "@tauri-apps/plugin-shell";
   import { onMount, onDestroy } from "svelte";
   import type { HardwareProfile } from "../types";
 
@@ -52,6 +53,26 @@
   function formatModel(name: string): string {
     return name.split(":")[0].replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
   }
+
+  // Split an error message into text + URL pieces so the URL can render as a
+  // clickable link. The Windows "install Ollama manually" path has the
+  // download URL embedded in the error string and the user otherwise has no
+  // way to follow it from inside the app.
+  function splitOnUrl(s: string): Array<{ kind: "text" | "url"; value: string }> {
+    const parts: Array<{ kind: "text" | "url"; value: string }> = [];
+    const re = /https?:\/\/\S+/g;
+    let last = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(s))) {
+      if (m.index > last) parts.push({ kind: "text", value: s.slice(last, m.index) });
+      // Strip trailing punctuation that's almost never part of the URL.
+      let url = m[0].replace(/[.,;:!?)\]]+$/, "");
+      parts.push({ kind: "url", value: url });
+      last = m.index + url.length;
+    }
+    if (last < s.length) parts.push({ kind: "text", value: s.slice(last) });
+    return parts;
+  }
 </script>
 
 <div class="first-run">
@@ -87,7 +108,11 @@
     {:else}
       <div class="error-block">
         <p>Something went wrong:</p>
-        <code>{errorMsg}</code>
+        <code>
+          {#each splitOnUrl(errorMsg) as part}
+            {#if part.kind === "url"}<a href={part.value} onclick={(e) => { e.preventDefault(); openExternal(part.value); }}>{part.value}</a>{:else}{part.value}{/if}
+          {/each}
+        </code>
         <button onclick={run}>Retry</button>
       </div>
     {/if}
@@ -123,6 +148,7 @@
   .progress { font-size: .78rem; color: #555; font-family: monospace; word-break: break-all; }
   .error-block { display: flex; flex-direction: column; gap: .75rem; align-items: center; }
   .error-block code { font-size: .8rem; color: #f66; background: #1a1a1a; padding: .5rem; border-radius: 6px; word-break: break-all; }
+  .error-block code a { color: #6e6ef7; text-decoration: underline; cursor: pointer; }
   button {
     padding: .5rem 1.25rem; background: #6e6ef7; color: #fff; border: none;
     border-radius: 6px; cursor: pointer; font-size: .875rem;

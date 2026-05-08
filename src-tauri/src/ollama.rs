@@ -13,7 +13,43 @@ fn process_lock() -> &'static Mutex<Option<Child>> {
 }
 
 pub fn is_installed() -> bool {
-    which::which("ollama").is_ok()
+    if which::which("ollama").is_ok() {
+        return true;
+    }
+    // After a fresh manual install on Windows the user's running anyai still
+    // has the pre-install PATH, so `which` keeps reporting "not installed"
+    // even after they click Retry. Probe the standard install location and
+    // augment PATH for the rest of this process so subsequent
+    // Command::new("ollama") calls also resolve.
+    #[cfg(target_os = "windows")]
+    {
+        if ensure_windows_default_on_path() {
+            return which::which("ollama").is_ok();
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_windows_default_on_path() -> bool {
+    use std::env;
+    let Some(local) = env::var_os("LOCALAPPDATA") else {
+        return false;
+    };
+    let ollama_dir = std::path::PathBuf::from(local)
+        .join("Programs")
+        .join("Ollama");
+    if !ollama_dir.join("ollama.exe").exists() {
+        return false;
+    }
+    let existing = env::var_os("PATH").unwrap_or_default();
+    let mut new_path = ollama_dir.into_os_string();
+    if !existing.is_empty() {
+        new_path.push(";");
+        new_path.push(&existing);
+    }
+    env::set_var("PATH", new_path);
+    true
 }
 
 pub async fn install() -> Result<()> {
@@ -48,8 +84,10 @@ pub async fn install() -> Result<()> {
     }
     #[cfg(target_os = "windows")]
     {
+        // No silent install on Windows — the user has to run the official
+        // installer. Surface the URL so the GUI can render it as a link.
         return Err(anyhow!(
-            "Please install Ollama from https://ollama.com/download"
+            "Ollama for Windows must be installed manually. Download it from https://ollama.com/download then click Retry."
         ));
     }
     Ok(())

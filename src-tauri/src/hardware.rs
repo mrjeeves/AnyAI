@@ -136,15 +136,8 @@ fn detect_ram_gb() -> f64 {
     }
 
     #[cfg(target_os = "windows")]
-    if let Ok(out) = Command::new("wmic")
-        .args(["ComputerSystem", "get", "TotalPhysicalMemory"])
-        .output()
-    {
-        if let Ok(s) = String::from_utf8(out.stdout) {
-            if let Some(bytes) = s.lines().nth(1).and_then(|l| l.trim().parse::<u64>().ok()) {
-                return bytes as f64 / 1024.0 / 1024.0 / 1024.0;
-            }
-        }
+    if let Some(bytes) = crate::windows::total_physical_memory_bytes() {
+        return bytes as f64 / 1024.0 / 1024.0 / 1024.0;
     }
 
     8.0
@@ -166,15 +159,8 @@ fn detect_disk_free_gb() -> f64 {
     }
 
     #[cfg(target_os = "windows")]
-    if let Ok(out) = Command::new("wmic")
-        .args(["logicaldisk", "where", "DeviceID='C:'", "get", "FreeSpace"])
-        .output()
-    {
-        if let Ok(s) = String::from_utf8(out.stdout) {
-            if let Some(bytes) = s.lines().nth(1).and_then(|l| l.trim().parse::<u64>().ok()) {
-                return bytes as f64 / 1024.0 / 1024.0 / 1024.0;
-            }
-        }
+    if let Some(bytes) = crate::windows::disk_free_bytes("C:\\") {
+        return bytes as f64 / 1024.0 / 1024.0 / 1024.0;
     }
 
     50.0
