@@ -152,7 +152,7 @@
 
     {#if hardware}
       <p class="hw">
-        {hardware.vram_gb != null
+        {#if hardware.soc}{hardware.soc} · {/if}{hardware.vram_gb != null
           ? `${hardware.vram_gb.toFixed(0)} GB ${hardware.gpu_type.toUpperCase()} · ${hardware.ram_gb.toFixed(0)} GB RAM`
           : `${hardware.ram_gb.toFixed(0)} GB RAM · CPU only`}
       </p>

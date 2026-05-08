@@ -239,6 +239,11 @@ async fn cmd_status(args: &[String]) -> Result<()> {
         println!("Provider : {active_provider}");
         println!("Mode     : {active_mode}");
         println!("Ollama   : {}", if running { "running" } else { "stopped" });
+        if let Some(soc) = hw.soc.as_deref() {
+            println!("System   : {soc} ({})", hw.arch);
+        } else {
+            println!("System   : {}", hw.arch);
+        }
         println!(
             "VRAM     : {}",
             hw.vram_gb

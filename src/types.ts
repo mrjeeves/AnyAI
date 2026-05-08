@@ -5,6 +5,10 @@ export interface HardwareProfile {
   ram_gb: number;
   disk_free_gb: number;
   gpu_type: GpuType;
+  /** CPU architecture the binary was built for, e.g. "x86_64", "aarch64". */
+  arch?: string;
+  /** Friendly board / SoC label when known, e.g. "Raspberry Pi 5 Model B". */
+  soc?: string | null;
 }
 
 export type Mode = "text" | "vision" | "code" | "transcribe";
