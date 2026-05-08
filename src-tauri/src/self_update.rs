@@ -73,8 +73,13 @@ fn apply_pending() -> Result<()> {
         .ok_or_else(|| anyhow!("pending.json missing path"))?;
     let target_version = pending_doc["version"].as_str().unwrap_or("?");
 
-    if target_version == env!("CARGO_PKG_VERSION") {
-        // Already running this version. Clear the marker.
+    // Refuse downgrades and same-version applies. A stale pending.json left
+    // over from a previous version's broken self-update can otherwise replace
+    // a freshly-installed binary with an older one — see the 0.1.4 → 0.1.5
+    // regression where the defensive extract was unwittingly rolling users
+    // back to 0.1.4 because a year-old pending.json still pointed at it.
+    let current = env!("CARGO_PKG_VERSION");
+    if compare_semver(target_version, current) != std::cmp::Ordering::Greater {
         let _ = std::fs::remove_file(&pending);
         return Ok(());
     }
