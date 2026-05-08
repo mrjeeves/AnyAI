@@ -92,6 +92,25 @@ async fn ollama_chat(model: String, messages: serde_json::Value) -> Result<Strin
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn update_status() -> Result<self_update::UpdateStatus, String> {
+    self_update::status().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn update_check_now() -> Result<self_update::CheckOutcome, String> {
+    self_update::check_now().await.map_err(|e| e.to_string())
+}
+
+/// Relaunch the GUI so `apply_pending_if_any` swaps in the staged binary on
+/// next process start. The UI is expected to call this only after a
+/// successful check that produced a `Staged` outcome (or if `pending` is
+/// already non-null in `update_status`).
+#[tauri::command]
+fn update_apply_now(app: tauri::AppHandle) {
+    app.restart();
+}
+
 fn main() {
     // If invoked from CLI with arguments, handle as CLI and exit before starting GUI.
     let args: Vec<String> = std::env::args().collect();
@@ -142,6 +161,9 @@ fn main() {
             ensure_tracked_models,
             resolve_virtual_model,
             ollama_chat,
+            update_status,
+            update_check_now,
+            update_apply_now,
         ])
         .setup(|app| {
             let app_handle = app.handle().clone();

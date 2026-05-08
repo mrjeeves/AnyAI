@@ -1,8 +1,9 @@
 <script lang="ts">
   import ProvidersSection from "./settings/ProvidersSection.svelte";
   import ModelsSection from "./settings/ModelsSection.svelte";
+  import UpdatesSection from "./settings/UpdatesSection.svelte";
 
-  type Tab = "providers" | "models";
+  type Tab = "providers" | "models" | "updates";
 
   let { initialTab = "providers", onClose, onChanged } = $props<{
     initialTab?: Tab;
@@ -16,6 +17,7 @@
   const tabs: Array<{ id: Tab; label: string }> = [
     { id: "providers", label: "Providers" },
     { id: "models", label: "Models" },
+    { id: "updates", label: "Updates" },
   ];
 </script>
 
@@ -40,6 +42,8 @@
         <ProvidersSection {onChanged} />
       {:else if active === "models"}
         <ModelsSection />
+      {:else if active === "updates"}
+        <UpdatesSection />
       {/if}
     </div>
   </div>
