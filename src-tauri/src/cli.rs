@@ -125,8 +125,8 @@ async fn cmd_run(args: &[String]) -> Result<()> {
     eprintln!("Model: {model}  Mode: {mode}");
 
     eprint!("Pulling {model}… ");
-    crate::ollama::pull_with(&model, |line| {
-        eprint!("\rPulling {model}… {line}");
+    crate::ollama::pull_with(&model, |evt| {
+        eprint!("\rPulling {model}… {}                                ", evt.render());
         let _ = std::io::Write::flush(&mut std::io::stderr());
     })
     .await?;

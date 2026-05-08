@@ -62,12 +62,12 @@ pub async fn preload<F: FnMut(PreloadEvent)>(
             let m_for_cb = mode.clone();
             let model_for_cb = model.clone();
             // Tokio Mutex would be tricky around &mut closure; collect lines and forward periodically.
-            let pull_res = crate::ollama::pull_with(&model, |line| {
+            let pull_res = crate::ollama::pull_with(&model, |evt| {
                 on_event(PreloadEvent {
                     mode: m_for_cb.clone(),
                     model: model_for_cb.clone(),
                     status: "pulling".into(),
-                    detail: line.to_string(),
+                    detail: evt.render(),
                 });
             })
             .await;

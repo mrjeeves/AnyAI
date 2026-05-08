@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { fetch } from "@tauri-apps/plugin-http";
+  import { invoke } from "@tauri-apps/api/core";
   import ModeBar from "./ModeBar.svelte";
   import StatusBar from "./StatusBar.svelte";
   import ProviderPanel from "./ProviderPanel.svelte";
@@ -45,34 +45,19 @@
     thinking = true;
 
     try {
-      const body = JSON.stringify({
+      // Going through the Rust-side ollama_chat command instead of
+      // tauri-plugin-http: Ollama's CORS allowlist on Windows rejects
+      // requests originating from the Tauri WebView (`http://tauri.localhost`)
+      // with HTTP 403 even after the model is downloaded. reqwest from Rust
+      // doesn't set Origin, so the daemon accepts the call.
+      const content = await invoke<string>("ollama_chat", {
         model: activeModel,
         messages: messages.map((m) => ({ role: m.role, content: m.content })),
-        stream: false,
       });
-
-      const resp = await fetch("http://127.0.0.1:11434/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body,
-      });
-
-      const data = await resp.json().catch(() => null);
-
-      // Ollama signals failure either via non-2xx + JSON body containing
-      // `error`, or via 200 + no message field. Surface whichever we got
-      // instead of swallowing it as "(no response)".
-      if (!resp.ok || data?.error) {
-        const detail = data?.error ?? `HTTP ${resp.status}`;
-        messages = [...messages, { role: "assistant", content: `(ollama: ${detail})` }];
-        return;
-      }
-      const content = data?.message?.content;
       if (!content) {
-        const preview = JSON.stringify(data ?? {}).slice(0, 240);
         messages = [
           ...messages,
-          { role: "assistant", content: `(empty response — raw: ${preview})` },
+          { role: "assistant", content: "(empty response)" },
         ];
         return;
       }

@@ -85,6 +85,13 @@ async fn resolve_virtual_model(requested: String) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn ollama_chat(model: String, messages: serde_json::Value) -> Result<String, String> {
+    ollama::chat_once(&model, messages)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 fn main() {
     // If invoked from CLI with arguments, handle as CLI and exit before starting GUI.
     let args: Vec<String> = std::env::args().collect();
@@ -134,6 +141,7 @@ fn main() {
             preload_modes,
             ensure_tracked_models,
             resolve_virtual_model,
+            ollama_chat,
         ])
         .setup(|app| {
             let app_handle = app.handle().clone();
