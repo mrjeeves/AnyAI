@@ -87,6 +87,15 @@ fn apply_pending() -> Result<()> {
         ));
     }
 
+    // Legacy pending.json may point at the downloaded archive itself (a bug
+    // in <=0.1.4 that wrote the .tar.gz over the binary, producing
+    // "exec format error"). If we can see we're holding an archive, extract
+    // it on the fly into the same directory and apply the embedded binary.
+    let staged_dir = staged
+        .parent()
+        .ok_or_else(|| anyhow!("staged path has no parent"))?;
+    let staged = extract_binary_if_archived(&staged, staged_dir, /*verbose=*/ false)?;
+
     let current_exe = std::env::current_exe().context("current_exe")?;
     atomic_replace(&staged, &current_exe)?;
     let _ = std::fs::remove_file(&pending);
@@ -369,25 +378,51 @@ fn pick_sha_asset<'a>(assets: &'a [Value], asset_name: &str) -> Option<&'a Value
 }
 
 async fn stage_release(release: &Value, version: &str) -> Result<()> {
+    let staged_binary = download_verify_extract(release, version, /*verbose=*/ false).await?;
+    write_pending_marker(&staged_binary, version)?;
+    eprintln!(
+        "self-update: staged {version} at {} (apply on next launch)",
+        staged_binary.display()
+    );
+    Ok(())
+}
+
+/// Download the platform asset, verify its SHA256, and (if it's an archive)
+/// extract the embedded `anyai` / `anyai.exe` binary. Returns the path of
+/// the verified executable on disk. Does NOT write `pending.json` —
+/// callers decide whether to apply now or stage for next launch.
+async fn download_verify_extract(release: &Value, version: &str, verbose: bool) -> Result<PathBuf> {
     let assets = release["assets"]
         .as_array()
         .ok_or_else(|| anyhow!("release missing assets"))?;
-    let asset =
-        pick_asset(assets).ok_or_else(|| anyhow!("no release asset matches current platform"))?;
+    let asset = pick_asset(assets).ok_or_else(|| {
+        anyhow!(
+            "no release asset matches current platform ({})",
+            current_target_triple_hint()
+        )
+    })?;
     let dl_url = asset["browser_download_url"]
         .as_str()
         .ok_or_else(|| anyhow!("asset missing browser_download_url"))?;
     let asset_name = asset["name"].as_str().unwrap_or("anyai");
+    let asset_size = asset["size"].as_u64();
 
     let updates_dir = crate::anyai_dir()?.join("updates").join(version);
     std::fs::create_dir_all(&updates_dir)?;
-    let staged_path = updates_dir.join(asset_name);
+    let archive_path = updates_dir.join(asset_name);
     let part_path = updates_dir.join(format!("{asset_name}.part"));
 
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .timeout(Duration::from_secs(300))
         .build()?;
+
+    if verbose {
+        match asset_size {
+            Some(n) => println!("Downloading {asset_name} ({})…", human_bytes(n)),
+            None => println!("Downloading {asset_name}…"),
+        }
+    }
     let bytes = client
         .get(dl_url)
         .send()
@@ -419,34 +454,101 @@ async fn stage_release(release: &Value, version: &str) -> Result<()> {
                 "sha256 mismatch for {asset_name}: expected {expected}, got {actual}"
             ));
         }
-    } else {
-        eprintln!("self-update: warning — no SHA256SUMS in release; skipping integrity check.");
+        if verbose {
+            println!("Verified SHA256: {}…", &actual[..12]);
+        }
+    } else if verbose {
+        println!("warning: no SHA256SUMS in release; skipping integrity check.");
     }
 
-    // Mark the staged file executable (Unix only).
+    std::fs::rename(&part_path, &archive_path)?;
+
+    let binary = extract_binary_if_archived(&archive_path, &updates_dir, verbose)?;
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&part_path)?.permissions();
+        let mut perms = std::fs::metadata(&binary)?.permissions();
         perms.set_mode(0o755);
-        let _ = std::fs::set_permissions(&part_path, perms);
+        let _ = std::fs::set_permissions(&binary, perms);
     }
 
-    std::fs::rename(&part_path, &staged_path)?;
+    Ok(binary)
+}
 
-    // Write the pending marker — the next process start picks it up.
+fn write_pending_marker(staged: &Path, version: &str) -> Result<()> {
     let pending_path = crate::anyai_dir()?.join("updates/pending.json");
     let pending_doc = serde_json::json!({
         "version": version,
-        "path": staged_path.to_string_lossy(),
+        "path": staged.to_string_lossy(),
         "staged_at": iso_now(),
     });
     std::fs::write(&pending_path, serde_json::to_string_pretty(&pending_doc)?)?;
-    eprintln!(
-        "self-update: staged {version} at {} (apply on next launch)",
-        staged_path.display()
-    );
     Ok(())
+}
+
+/// If `archive` is a tar.gz / tgz / zip, run `tar -xf` and return the path
+/// to the embedded `anyai` (or `anyai.exe`). If it's already a raw binary,
+/// return it unchanged.
+///
+/// Uses the system `tar`. On every target we ship for (macOS, Linux,
+/// Windows 10 1803+), `tar` is libarchive-backed and auto-detects gzipped
+/// tarballs and zip files via `tar -xf`.
+fn extract_binary_if_archived(archive: &Path, dest_dir: &Path, verbose: bool) -> Result<PathBuf> {
+    let name = archive.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let is_archive = name.ends_with(".tar.gz") || name.ends_with(".tgz") || name.ends_with(".zip");
+    if !is_archive {
+        return Ok(archive.to_path_buf());
+    }
+
+    #[cfg(windows)]
+    let bin_name = "anyai.exe";
+    #[cfg(not(windows))]
+    let bin_name = "anyai";
+
+    let bin_path = dest_dir.join(bin_name);
+    // A stale extract from a previous run could shadow a corrupted re-download;
+    // wipe it so we know the file in place came from THIS archive.
+    let _ = std::fs::remove_file(&bin_path);
+
+    if verbose {
+        println!("Extracting {name}…");
+    }
+    let status = std::process::Command::new("tar")
+        .arg("-xf")
+        .arg(archive)
+        .arg("-C")
+        .arg(dest_dir)
+        .status()
+        .with_context(|| format!("failed to spawn `tar` to extract {}", archive.display()))?;
+    if !status.success() {
+        return Err(anyhow!(
+            "tar exited with {status} extracting {}",
+            archive.display()
+        ));
+    }
+    if !bin_path.exists() {
+        return Err(anyhow!(
+            "extracted archive does not contain `{bin_name}` at {}",
+            bin_path.display()
+        ));
+    }
+    Ok(bin_path)
+}
+
+fn human_bytes(n: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    if n >= GB {
+        format!("{:.1} GB", n as f64 / GB as f64)
+    } else if n >= MB {
+        format!("{:.1} MB", n as f64 / MB as f64)
+    } else if n >= KB {
+        format!("{:.1} KB", n as f64 / KB as f64)
+    } else {
+        format!("{n} B")
+    }
 }
 
 fn expected_sha_for(sha_text: &str, asset_name: &str) -> Option<String> {
@@ -619,7 +721,13 @@ fn iso_now() -> String {
 
 pub async fn cmd_update(args: &[String]) -> Result<()> {
     match args.first().map(|s| s.as_str()) {
-        None | Some("status") => print_status().await,
+        // No args: do everything in one go — status, check, download,
+        // verify, extract, apply. This is the path users should hit.
+        None => run_update_now().await,
+
+        // Escape hatches kept for scripts and the "I just want to look"
+        // case. They are intentionally undocumented in the main `--help`.
+        Some("status") => print_status().await,
         Some("check") => force_check().await,
         Some("apply") => {
             apply_pending()?;
@@ -628,6 +736,93 @@ pub async fn cmd_update(args: &[String]) -> Result<()> {
         }
         Some(unknown) => Err(anyhow!("unknown update subcommand: {unknown}")),
     }
+}
+
+/// `anyai update` (no args). The single source-of-truth command: prints
+/// status, checks GitHub, downloads, verifies, extracts, and applies in
+/// one shot. Ignores `auto_apply` — a user invoking this is consenting
+/// to the upgrade right now.
+async fn run_update_now() -> Result<()> {
+    let current = env!("CARGO_PKG_VERSION");
+    let kind = detect_install_kind();
+
+    println!(
+        "Current : anyai {current} ({})",
+        match kind {
+            InstallKind::Raw => "raw install",
+            InstallKind::PackageManager => "package-manager install",
+        }
+    );
+
+    if kind == InstallKind::PackageManager {
+        println!(
+            "Self-update is disabled here. Use your package manager (e.g. `brew upgrade anyai`)."
+        );
+        return Ok(());
+    }
+
+    let cfg = crate::resolver::load_config_value()?;
+    let au = &cfg["auto_update"];
+    if !au["enabled"].as_bool().unwrap_or(true) {
+        println!("Self-update is disabled in ~/.anyai/config.json (auto_update.enabled=false).");
+        return Ok(());
+    }
+    if std::env::var("ANYAI_AUTOUPDATE")
+        .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false)
+    {
+        println!("Self-update is disabled via ANYAI_AUTOUPDATE=0.");
+        return Ok(());
+    }
+
+    // Carry over any previously-staged update before we go look for a newer
+    // one. This handles the watcher-staged-but-never-applied case.
+    let pending_path = crate::anyai_dir()?.join("updates/pending.json");
+    if pending_path.exists() {
+        match serde_json::from_str::<Value>(&std::fs::read_to_string(&pending_path)?) {
+            Ok(v) => {
+                let pv = v["version"].as_str().unwrap_or("?").to_string();
+                if pv != current {
+                    println!("Pending : {pv} already staged → applying first…");
+                    if let Err(e) = apply_pending() {
+                        eprintln!("warning: could not apply staged {pv}: {e}");
+                    }
+                } else {
+                    let _ = std::fs::remove_file(&pending_path);
+                }
+            }
+            Err(_) => {
+                let _ = std::fs::remove_file(&pending_path);
+            }
+        }
+    }
+
+    let channel = au["channel"].as_str().unwrap_or("stable");
+    println!("Checking GitHub releases ({channel})…");
+    let release = fetch_release(channel).await?;
+    let latest = release["tag_name"]
+        .as_str()
+        .map(|s| s.trim_start_matches('v').to_string())
+        .ok_or_else(|| anyhow!("release missing tag_name"))?;
+
+    if compare_semver(current, &latest) != std::cmp::Ordering::Less {
+        println!("Already at the latest version ({latest}).");
+        stamp_check_now()?;
+        return Ok(());
+    }
+
+    println!("Update available: {current} → {latest}");
+
+    let staged_binary = download_verify_extract(&release, &latest, /*verbose=*/ true).await?;
+
+    println!("Applying…");
+    let current_exe = std::env::current_exe().context("locating current_exe")?;
+    atomic_replace(&staged_binary, &current_exe)?;
+    let _ = std::fs::remove_file(&pending_path);
+    stamp_check_now()?;
+
+    println!("Updated to {latest}. Relaunch anyai to use the new version.");
+    Ok(())
 }
 
 async fn print_status() -> Result<()> {
@@ -895,5 +1090,63 @@ abc123  anyai-linux-x86_64.tar.gz
             detect_install_kind_from_path(r"C:\Users\me\scoop\apps\anyai\current\anyai.exe"),
             InstallKind::PackageManager
         );
+    }
+
+    #[test]
+    fn human_bytes_formats_each_scale() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(2 * 1024), "2.0 KB");
+        assert_eq!(human_bytes(3 * 1024 * 1024 + 1024 * 512), "3.5 MB");
+        assert_eq!(human_bytes(2u64 * 1024 * 1024 * 1024), "2.0 GB");
+    }
+
+    /// Builds a tiny tar.gz containing a fake `anyai`/`anyai.exe`
+    /// (whichever name the helper expects on this platform), runs the
+    /// extraction helper, and confirms the binary lands at the expected
+    /// path. Skipped if `tar` isn't on PATH.
+    #[test]
+    fn extract_binary_if_archived_pulls_anyai_out_of_targz() {
+        if which::which("tar").is_err() {
+            eprintln!("skipping: `tar` not found on PATH");
+            return;
+        }
+        let bin_name = if cfg!(windows) { "anyai.exe" } else { "anyai" };
+        let dir = tempdir_for_test("anyai-extract-targz");
+        let bin_inside = dir.join(bin_name);
+        std::fs::write(&bin_inside, b"fake-binary").unwrap();
+        let archive = dir.join("anyai-test-x86_64.tar.gz");
+        let status = std::process::Command::new("tar")
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&dir)
+            .arg(bin_name)
+            .status()
+            .expect("tar -czf");
+        assert!(status.success(), "could not build test archive");
+        std::fs::remove_file(&bin_inside).unwrap();
+
+        let extracted = extract_binary_if_archived(&archive, &dir, false).expect("extraction");
+        assert_eq!(extracted, dir.join(bin_name));
+        assert!(extracted.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_binary_if_archived_passes_raw_binary_through_unchanged() {
+        let dir = tempdir_for_test("anyai-extract-raw");
+        let raw = dir.join("anyai");
+        std::fs::write(&raw, b"raw binary").unwrap();
+        let out = extract_binary_if_archived(&raw, &dir, false).expect("passthrough");
+        assert_eq!(out, raw);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn tempdir_for_test(label: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("{label}-{}-{}", std::process::id(), unix_secs()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }
