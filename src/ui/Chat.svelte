@@ -3,8 +3,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import ModeBar from "./ModeBar.svelte";
   import StatusBar from "./StatusBar.svelte";
-  import ProviderPanel from "./ProviderPanel.svelte";
-  import ModelStatus from "./ModelStatus.svelte";
+  import SettingsPanel from "./SettingsPanel.svelte";
   import type { HardwareProfile, Mode } from "../types";
 
   let {
@@ -28,8 +27,7 @@
   let messages = $state<Message[]>([]);
   let input = $state("");
   let thinking = $state(false);
-  let showProviders = $state(false);
-  let showModels = $state(false);
+  let settingsTab = $state<"providers" | "models" | null>(null);
   let messagesEl: HTMLElement;
 
   $effect(() => {
@@ -85,7 +83,7 @@
 
   async function handleProviderChange() {
     messages = [];
-    showProviders = false;
+    settingsTab = null;
     await onProviderChange();
   }
 </script>
@@ -94,8 +92,7 @@
   <StatusBar
     model={activeModel}
     mode={activeMode}
-    onOpenProviders={() => (showProviders = true)}
-    onOpenModels={() => (showModels = true)}
+    onOpenSettings={(tab) => (settingsTab = tab)}
   />
 
   <div class="messages" bind:this={messagesEl}>
@@ -129,11 +126,12 @@
     <button onclick={send} disabled={thinking || !input.trim()}>Send</button>
   </div>
 
-  {#if showProviders}
-    <ProviderPanel onClose={() => (showProviders = false)} onChanged={handleProviderChange} />
-  {/if}
-  {#if showModels}
-    <ModelStatus onClose={() => (showModels = false)} />
+  {#if settingsTab}
+    <SettingsPanel
+      initialTab={settingsTab}
+      onClose={() => (settingsTab = null)}
+      onChanged={handleProviderChange}
+    />
   {/if}
 </div>
 

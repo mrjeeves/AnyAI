@@ -1,32 +1,26 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getProviders, addProvider, removeProvider, setActiveProvider } from "../providers";
-  import { addSource, getSources, fetchSourceCatalog, removeSource } from "../sources";
-  import { loadConfig, invalidateConfigCache } from "../config";
-  import type { Provider, Source } from "../types";
+  import { getProviders, addProvider, removeProvider, setActiveProvider } from "../../providers";
+  import { addSource, getSources, fetchSourceCatalog, removeSource } from "../../sources";
+  import { loadConfig, invalidateConfigCache } from "../../config";
+  import type { Provider, Source } from "../../types";
 
-  let { onClose, onChanged } = $props<{
-    onClose: () => void;
-    onChanged: () => void;
-  }>();
+  let { onChanged } = $props<{ onChanged: () => void }>();
 
   let providers = $state<Provider[]>([]);
   let sources = $state<Source[]>([]);
   let activeProvider = $state("");
   let tab = $state<"providers" | "sources">("providers");
 
-  // Add provider form
   let newUrl = $state("");
   let newName = $state("");
   let adding = $state(false);
   let addError = $state("");
 
-  // Add source form
   let newSourceUrl = $state("");
   let newSourceName = $state("");
   let addingSource = $state(false);
 
-  // Source browse
   let browsingSource = $state<string | null>(null);
   let browseCatalog = $state<Array<{ name: string; url: string; description?: string; origin?: string }>>([]);
   let browseLoading = $state(false);
@@ -118,14 +112,8 @@
   }
 </script>
 
-<div class="overlay" onclick={onClose} role="presentation"></div>
-<div class="panel">
-  <div class="panel-header">
-    <h2>Providers & Sources</h2>
-    <button class="close" onclick={onClose}>✕</button>
-  </div>
-
-  <div class="tabs">
+<div class="section">
+  <div class="h-tabs">
     <button class:active={tab === "providers"} onclick={() => { tab = "providers"; browsingSource = null; }}>Providers</button>
     <button class:active={tab === "sources"} onclick={() => (tab = "sources")}>Sources</button>
   </div>
@@ -213,36 +201,14 @@
 </div>
 
 <style>
-  .overlay {
-    position: fixed; inset: 0;
-    background: rgba(0,0,0,.6);
-    z-index: 10;
+  .section { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+  .h-tabs { display: flex; border-bottom: 1px solid #1e1e1e; flex-shrink: 0; }
+  .h-tabs button {
+    flex: 1; padding: .55rem; background: none; border: none; color: #666;
+    font-size: .8rem; cursor: pointer; border-bottom: 2px solid transparent;
   }
-  .panel {
-    position: fixed; right: 0; top: 0; bottom: 0;
-    width: 320px;
-    background: #111;
-    border-left: 1px solid #222;
-    z-index: 11;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-  .panel-header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: .75rem 1rem;
-    border-bottom: 1px solid #1e1e1e;
-  }
-  h2 { font-size: .95rem; font-weight: 600; }
-  .close { background: none; border: none; color: #666; font-size: 1rem; cursor: pointer; padding: .2rem; }
-  .close:hover { color: #ccc; }
-  .tabs { display: flex; border-bottom: 1px solid #1e1e1e; }
-  .tabs button {
-    flex: 1; padding: .6rem; background: none; border: none; color: #666;
-    font-size: .82rem; cursor: pointer; border-bottom: 2px solid transparent;
-  }
-  .tabs button.active { color: #e8e8e8; border-bottom-color: #6e6ef7; }
-  .list { flex: 1; overflow-y: auto; padding: .5rem; display: flex; flex-direction: column; gap: .25rem; }
+  .h-tabs button.active { color: #e8e8e8; border-bottom-color: #6e6ef7; }
+  .list { flex: 1; overflow-y: auto; padding: .5rem; display: flex; flex-direction: column; gap: .25rem; min-height: 0; }
   .domain-group { margin-bottom: .5rem; }
   .domain-label { font-size: .7rem; color: #444; padding: .3rem .5rem; text-transform: uppercase; letter-spacing: .05em; }
   .item {
@@ -271,6 +237,7 @@
     display: flex;
     flex-direction: column;
     gap: .4rem;
+    flex-shrink: 0;
   }
   input {
     background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px;
