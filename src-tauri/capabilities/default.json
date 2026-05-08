@@ -7,11 +7,26 @@
     "core:default",
     "shell:allow-open",
     "shell:allow-execute",
-    "fs:allow-read-text-file",
-    "fs:allow-write-text-file",
-    "fs:allow-create",
-    "fs:allow-mkdir",
-    "fs:allow-exists",
+    {
+      "identifier": "fs:allow-read-text-file",
+      "allow": [{ "path": "$HOME/.anyai" }, { "path": "$HOME/.anyai/**" }]
+    },
+    {
+      "identifier": "fs:allow-write-text-file",
+      "allow": [{ "path": "$HOME/.anyai" }, { "path": "$HOME/.anyai/**" }]
+    },
+    {
+      "identifier": "fs:allow-create",
+      "allow": [{ "path": "$HOME/.anyai" }, { "path": "$HOME/.anyai/**" }]
+    },
+    {
+      "identifier": "fs:allow-mkdir",
+      "allow": [{ "path": "$HOME/.anyai" }, { "path": "$HOME/.anyai/**" }]
+    },
+    {
+      "identifier": "fs:allow-exists",
+      "allow": [{ "path": "$HOME/.anyai" }, { "path": "$HOME/.anyai/**" }]
+    },
     {
       "identifier": "http:default",
       "allow": [
