@@ -361,9 +361,28 @@ fn current_target_triple_hint() -> &'static str {
 
 fn pick_asset(assets: &[Value]) -> Option<&Value> {
     let needle = current_target_triple_hint();
-    assets
-        .iter()
-        .find(|a| a["name"].as_str().is_some_and(|n| n.contains(needle)))
+    // Both `anyai-macos-aarch64.tar.gz` and `anyai-macos-aarch64.tar.gz.sha256`
+    // contain the platform needle. GitHub's asset ordering is not guaranteed,
+    // and if the sidecar comes back first a naive .contains() check picks the
+    // 64-byte checksum file as "the binary" — which is exactly how 0.1.6 →
+    // 0.1.9 self-update wrote a hex string over `~/.local/bin/anyai` on macOS.
+    assets.iter().find(|a| {
+        a["name"]
+            .as_str()
+            .is_some_and(|n| n.contains(needle) && !is_sidecar_asset(n))
+    })
+}
+
+/// True for files that ride alongside a release artifact (checksums, signatures,
+/// detached PGP, etc.) and must never be picked as the binary itself.
+fn is_sidecar_asset(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".sha256")
+        || lower.ends_with(".sha512")
+        || lower.ends_with(".sig")
+        || lower.ends_with(".asc")
+        || lower.ends_with(".minisig")
+        || lower.ends_with(".pem")
 }
 
 fn pick_sha_asset<'a>(assets: &'a [Value], asset_name: &str) -> Option<&'a Value> {
@@ -501,6 +520,14 @@ fn write_pending_marker(staged: &Path, version: &str) -> Result<()> {
 /// tarballs and zip files via `tar -xf`.
 fn extract_binary_if_archived(archive: &Path, dest_dir: &Path, verbose: bool) -> Result<PathBuf> {
     let name = archive.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    // Refuse to treat a checksum/signature sidecar as the binary. A pre-fix
+    // version (≤0.1.9) could write a `.sha256` path into pending.json; this
+    // catches that case before atomic_replace clobbers the live binary.
+    if is_sidecar_asset(name) {
+        return Err(anyhow!(
+            "refusing to install sidecar `{name}` as the anyai binary"
+        ));
+    }
     let is_archive = name.ends_with(".tar.gz") || name.ends_with(".tgz") || name.ends_with(".zip");
     if !is_archive {
         return Ok(archive.to_path_buf());
@@ -994,6 +1021,52 @@ abc123  anyai-linux-x86_64.tar.gz
     fn pick_asset_returns_none_when_no_platform_match() {
         let assets = vec![json!({"name": "anyai-mystery-platform.tar.gz"})];
         assert!(pick_asset(&assets).is_none());
+    }
+
+    /// Regression: 0.1.6 → 0.1.9 self-update on macOS picked the `.sha256`
+    /// sidecar as the binary because GitHub returned it before the archive
+    /// and `pick_asset` used a naive `.contains(needle)` filter. The hex
+    /// checksum then got atomic_replaced over `~/.local/bin/anyai`, leaving
+    /// users with `line 1: <hash>: command not found`.
+    #[test]
+    fn pick_asset_skips_sha256_sidecar_listed_before_archive() {
+        let needle = current_target_triple_hint();
+        let archive = format!("anyai-{needle}.tar.gz");
+        let sidecar = format!("{archive}.sha256");
+        let assets = vec![
+            json!({ "name": sidecar }),
+            json!({ "name": archive.clone() }),
+        ];
+        let picked = pick_asset(&assets).expect("expected archive to be picked");
+        assert_eq!(picked["name"].as_str(), Some(archive.as_str()));
+    }
+
+    #[test]
+    fn pick_asset_skips_signature_sidecars() {
+        let needle = current_target_triple_hint();
+        let archive = format!("anyai-{needle}.tar.gz");
+        for ext in [".sig", ".asc", ".minisig", ".sha512"] {
+            let sidecar = format!("{archive}{ext}");
+            let assets = vec![
+                json!({ "name": sidecar }),
+                json!({ "name": archive.clone() }),
+            ];
+            let picked = pick_asset(&assets).unwrap_or_else(|| panic!("ext {ext}"));
+            assert_eq!(picked["name"].as_str(), Some(archive.as_str()), "ext {ext}");
+        }
+    }
+
+    #[test]
+    fn extract_binary_if_archived_refuses_sha256_sidecar() {
+        let dir = tempdir_for_test("anyai-extract-sidecar");
+        let sha = dir.join("anyai-macos-aarch64.tar.gz.sha256");
+        std::fs::write(&sha, b"f737bc0e".repeat(8)).unwrap();
+        let err = extract_binary_if_archived(&sha, &dir, false).expect_err("should refuse sidecar");
+        assert!(
+            err.to_string().contains("sidecar"),
+            "unexpected error: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
