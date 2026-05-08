@@ -57,6 +57,11 @@
         activeModel = resolveModel(hardware, manifest, activeMode, config.mode_overrides);
       });
     } catch (e) {
+      // Surface the silenced startup error. Without this it's invisible:
+      // the catch sets `error` and falls into the chat view with
+      // `activeModel = ""`, so Ollama responds "model is required" and
+      // there's no clue why. Log it AND show it in the UI banner.
+      console.error("AnyAI startup failed:", e);
       error = String(e);
       view = "chat"; // Show chat anyway with whatever we have
     }
@@ -100,6 +105,9 @@
       onComplete={onFirstRunComplete}
     />
   {:else}
+    {#if error}
+      <div class="error-banner">⚠ Startup failed: {error}</div>
+    {/if}
     <Chat
       {activeModel}
       {activeMode}
@@ -120,6 +128,15 @@
     overflow: hidden;
   }
   .app { height: 100vh; display: flex; flex-direction: column; }
+  .error-banner {
+    background: #3a1717;
+    color: #ffb4b4;
+    border-bottom: 1px solid #5a2424;
+    padding: .5rem .85rem;
+    font-size: .8rem;
+    font-family: -apple-system, BlinkMacSystemFont, monospace;
+    word-break: break-all;
+  }
   .splash {
     flex: 1;
     display: flex;
