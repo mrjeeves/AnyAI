@@ -129,9 +129,12 @@ jobs:
           NAME="anyai-${{ matrix.platform.name }}"
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             cp "$BIN" "dist-bin/anyai.exe"
+            # chdir before hashing so the `.sha256` sidecar records just the
+            # basename — matching how the GitHub asset is uploaded. Hashing
+            # `dist-bin/<file>` from the repo root would bake `dist-bin/`
+            # into the recorded filename and break self-update verification.
             (cd dist-bin && 7z a "${NAME}.zip" anyai.exe)
-            sha256sum "dist-bin/${NAME}.zip" > "dist-bin/${NAME}.zip.sha256" 2>/dev/null \
-              || shasum -a 256 "dist-bin/${NAME}.zip" > "dist-bin/${NAME}.zip.sha256"
+            (cd dist-bin && (sha256sum "${NAME}.zip" || shasum -a 256 "${NAME}.zip") > "${NAME}.zip.sha256")
           else
             cp "$BIN" "dist-bin/anyai"
             tar -czf "dist-bin/${NAME}.tar.gz" -C dist-bin anyai
