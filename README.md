@@ -25,7 +25,7 @@ Or grab a binary from [Releases](https://github.com/mrjeeves/AnyAI/releases).
 ```
 $ anyai serve
 Listening on http://127.0.0.1:1473
-Tracking: text → qwen2.5:14b   code → qwen2.5-coder:14b
+Tracking: text → qwen3.6:27b
 ```
 
 In another shell, hit it:
@@ -40,7 +40,7 @@ To use AnyAI from Cursor / Continue / Aider / any OpenAI-compatible client, poin
 
 ```
 Base URL: http://127.0.0.1:1473/v1
-Model:    anyai-text     (also: anyai-code, anyai-vision, anyai-transcribe)
+Model:    anyai-text
 API key:  any non-empty string
 ```
 
