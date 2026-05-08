@@ -391,11 +391,7 @@ async fn stage_release(release: &Value, version: &str) -> Result<()> {
 /// extract the embedded `anyai` / `anyai.exe` binary. Returns the path of
 /// the verified executable on disk. Does NOT write `pending.json` —
 /// callers decide whether to apply now or stage for next launch.
-async fn download_verify_extract(
-    release: &Value,
-    version: &str,
-    verbose: bool,
-) -> Result<PathBuf> {
+async fn download_verify_extract(release: &Value, version: &str, verbose: bool) -> Result<PathBuf> {
     let assets = release["assets"]
         .as_array()
         .ok_or_else(|| anyhow!("release missing assets"))?;
@@ -498,17 +494,9 @@ fn write_pending_marker(staged: &Path, version: &str) -> Result<()> {
 /// Uses the system `tar`. On every target we ship for (macOS, Linux,
 /// Windows 10 1803+), `tar` is libarchive-backed and auto-detects gzipped
 /// tarballs and zip files via `tar -xf`.
-fn extract_binary_if_archived(
-    archive: &Path,
-    dest_dir: &Path,
-    verbose: bool,
-) -> Result<PathBuf> {
-    let name = archive
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    let is_archive =
-        name.ends_with(".tar.gz") || name.ends_with(".tgz") || name.ends_with(".zip");
+fn extract_binary_if_archived(archive: &Path, dest_dir: &Path, verbose: bool) -> Result<PathBuf> {
+    let name = archive.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let is_archive = name.ends_with(".tar.gz") || name.ends_with(".tgz") || name.ends_with(".zip");
     if !is_archive {
         return Ok(archive.to_path_buf());
     }
@@ -767,7 +755,9 @@ async fn run_update_now() -> Result<()> {
     );
 
     if kind == InstallKind::PackageManager {
-        println!("Self-update is disabled here. Use your package manager (e.g. `brew upgrade anyai`).");
+        println!(
+            "Self-update is disabled here. Use your package manager (e.g. `brew upgrade anyai`)."
+        );
         return Ok(());
     }
 
@@ -1137,7 +1127,10 @@ abc123  anyai-linux-x86_64.tar.gz
         std::fs::remove_file(&bin_inside).unwrap();
 
         let extracted = extract_binary_if_archived(&archive, &dir, false).expect("extraction");
-        assert_eq!(extracted, dir.join(if cfg!(windows) { "anyai.exe" } else { "anyai" }));
+        assert_eq!(
+            extracted,
+            dir.join(if cfg!(windows) { "anyai.exe" } else { "anyai" })
+        );
         if !cfg!(windows) {
             assert!(extracted.exists());
         }
@@ -1155,11 +1148,8 @@ abc123  anyai-linux-x86_64.tar.gz
     }
 
     fn tempdir_for_test(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "{label}-{}-{}",
-            std::process::id(),
-            unix_secs()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("{label}-{}-{}", std::process::id(), unix_secs()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
