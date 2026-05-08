@@ -27,6 +27,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Guard against the "tag says v0.1.5, binary reports 0.1.2" trap.
+      # The binary embeds CARGO_PKG_VERSION at compile time; if Cargo.toml
+      # / package.json / tauri.conf.json don't match the tag, every install
+      # of the release will misreport its version and self-update from it
+      # will keep saying "update available."
+      - name: Verify tag matches manifest versions
+        shell: bash
+        run: |
+          set -e
+          TAG="${{ inputs.tag || github.ref_name }}"
+          EXPECTED="${TAG#v}"
+          fail() { echo "::error::$*"; exit 1; }
+          got_cargo=$(awk -F\" '/^version = / {print $2; exit}' src-tauri/Cargo.toml)
+          got_pkg=$(node -e "console.log(require('./package.json').version)")
+          got_tauri=$(node -e "console.log(require('./src-tauri/tauri.conf.json').version)")
+          [[ "$got_cargo" == "$EXPECTED" ]] || fail "src-tauri/Cargo.toml version is $got_cargo, expected $EXPECTED (tag $TAG)"
+          [[ "$got_pkg"   == "$EXPECTED" ]] || fail "package.json version is $got_pkg, expected $EXPECTED (tag $TAG)"
+          [[ "$got_tauri" == "$EXPECTED" ]] || fail "src-tauri/tauri.conf.json version is $got_tauri, expected $EXPECTED (tag $TAG)"
+          echo "Manifest versions all match tag $TAG ($EXPECTED)."
+
       - name: Linux deps
         if: runner.os == 'Linux'
         run: |
