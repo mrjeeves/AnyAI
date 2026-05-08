@@ -16,6 +16,7 @@
 //! detected and skipped — the OS package manager owns versioning there.
 
 use anyhow::{anyhow, Context, Result};
+use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -212,6 +213,152 @@ async fn run_check(force: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// GUI surface (Tauri commands).
+//
+// The Updates tab in Settings reads this status and drives a "Check now" /
+// "Restart to apply" flow. Same building blocks as the watcher and CLI; just
+// shaped as serde-friendly returns instead of stdout prints.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PendingUpdate {
+    pub version: String,
+    pub staged_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateStatus {
+    pub current_version: String,
+    /// "raw" or "package_manager".
+    pub install_kind: String,
+    pub enabled: bool,
+    pub channel: String,
+    pub auto_apply: String,
+    pub check_interval_hours: f64,
+    /// Unix seconds of the last successful check, if any.
+    pub last_check_unix: Option<i64>,
+    pub pending: Option<PendingUpdate>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CheckOutcome {
+    /// `auto_update.enabled = false` or `ANYAI_AUTOUPDATE=0`.
+    Disabled,
+    /// Install lives under a package manager — defer to the OS.
+    PackageManager,
+    UpToDate {
+        current: String,
+        latest: String,
+    },
+    /// New binary downloaded, verified, and staged for next launch.
+    Staged {
+        version: String,
+    },
+    /// Newer release exists but `auto_apply` won't permit it.
+    PolicyBlocked {
+        current: String,
+        latest: String,
+        policy: String,
+    },
+}
+
+pub fn status() -> Result<UpdateStatus> {
+    let cfg = crate::resolver::load_config_value().unwrap_or_else(|_| serde_json::json!({}));
+    let au = &cfg["auto_update"];
+    let install_kind = match detect_install_kind() {
+        InstallKind::Raw => "raw",
+        InstallKind::PackageManager => "package_manager",
+    };
+
+    let pending_path = crate::anyai_dir()?.join("updates/pending.json");
+    let pending = if pending_path.exists() {
+        match std::fs::read_to_string(&pending_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        {
+            Some(v) => Some(PendingUpdate {
+                version: v["version"].as_str().unwrap_or("?").to_string(),
+                staged_at: v["staged_at"].as_str().unwrap_or("?").to_string(),
+            }),
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    Ok(UpdateStatus {
+        current_version: env!("CARGO_PKG_VERSION").to_string(),
+        install_kind: install_kind.to_string(),
+        enabled: au["enabled"].as_bool().unwrap_or(true),
+        channel: au["channel"].as_str().unwrap_or("stable").to_string(),
+        auto_apply: au["auto_apply"].as_str().unwrap_or("patch").to_string(),
+        check_interval_hours: au["check_interval_hours"].as_f64().unwrap_or(6.0),
+        last_check_unix: read_last_check(),
+        pending,
+    })
+}
+
+fn read_last_check() -> Option<i64> {
+    let path = check_marker_path().ok()?;
+    if !path.exists() {
+        return None;
+    }
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+}
+
+/// Force a release check and return a structured outcome the GUI can render.
+/// Mirrors the gating logic in `run_check` but reports the result instead of
+/// printing it. Always bypasses the cooldown — a user clicking "Check now"
+/// has consented to a network call.
+pub async fn check_now() -> Result<CheckOutcome> {
+    let cfg = crate::resolver::load_config_value()?;
+    let au = &cfg["auto_update"];
+
+    if !au["enabled"].as_bool().unwrap_or(true) {
+        return Ok(CheckOutcome::Disabled);
+    }
+    if std::env::var("ANYAI_AUTOUPDATE")
+        .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false)
+    {
+        return Ok(CheckOutcome::Disabled);
+    }
+    if detect_install_kind() == InstallKind::PackageManager {
+        return Ok(CheckOutcome::PackageManager);
+    }
+
+    stamp_check_now()?;
+
+    let channel = au["channel"].as_str().unwrap_or("stable");
+    let policy_str = au["auto_apply"].as_str().unwrap_or("patch").to_string();
+    let policy = ApplyPolicy::parse(&policy_str);
+    let release = fetch_release(channel).await?;
+
+    let latest = release["tag_name"]
+        .as_str()
+        .map(|s| s.trim_start_matches('v').to_string())
+        .ok_or_else(|| anyhow!("release missing tag_name"))?;
+    let current = env!("CARGO_PKG_VERSION").to_string();
+
+    if compare_semver(&current, &latest) != std::cmp::Ordering::Less {
+        return Ok(CheckOutcome::UpToDate { current, latest });
+    }
+    if !policy_allows(policy, &current, &latest) {
+        return Ok(CheckOutcome::PolicyBlocked {
+            current,
+            latest,
+            policy: policy_str,
+        });
+    }
+
+    stage_release(&release, &latest).await?;
+    Ok(CheckOutcome::Staged { version: latest })
 }
 
 // ---------------------------------------------------------------------------
