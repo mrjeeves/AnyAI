@@ -27,9 +27,24 @@ if (-not (Have "node")) {
 }
 
 if (-not (Have "pnpm")) {
-    Log "Enabling pnpm via corepack…"
-    corepack enable
-    corepack prepare pnpm@latest --activate
+    # winget updates the persistent PATH but not the running session's, so a
+    # freshly installed Node (and the corepack shim that ships with it) won't
+    # be on PATH yet. Refresh from the machine + user envs before probing.
+    $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+
+    if (Have "corepack") {
+        Log "Enabling pnpm via corepack…"
+        corepack enable
+        corepack prepare pnpm@latest --activate
+    } elseif (Have "npm") {
+        # Node 25+ unbundled corepack; older Node may also not ship it. npm
+        # is always there, so install pnpm directly.
+        Log "Installing pnpm via npm…"
+        npm install -g pnpm
+    } else {
+        Warn "Neither corepack nor npm is on PATH. Open a new terminal (so the post-install PATH refreshes) and re-run scripts/bootstrap.ps1."
+        exit 1
+    }
 }
 
 # WebView2 is required by Tauri on Windows.
