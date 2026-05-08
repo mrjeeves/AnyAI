@@ -1,7 +1,9 @@
 use anyhow::{anyhow, Context, Result};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::process::Stdio;
 use std::sync::OnceLock;
+use std::time::Duration;
 use tauri::Emitter;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -104,8 +106,16 @@ pub async fn ensure_running() -> Result<()> {
         return Ok(());
     }
 
+    // OLLAMA_ORIGINS=* belt-and-suspenders: when WE spawn the server (e.g. Linux
+    // or a fresh standalone Windows install), this lets the GUI fetch directly
+    // from `http://127.0.0.1:11434` without Ollama's CORS allowlist rejecting
+    // the WebView's `Origin` (which on Tauri 2 / Windows is `http://tauri.localhost`,
+    // not in Ollama's defaults). When the Windows installer runs Ollama as a
+    // tray service we can't influence its env — that's why the GUI also routes
+    // chat through anyai's API server (see Chat.svelte).
     let child = Command::new("ollama")
         .arg("serve")
+        .env("OLLAMA_ORIGINS", "*")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -141,39 +151,161 @@ async fn reqwest_get(url: &str) -> Result<String> {
     }
 }
 
+/// Structured progress emitted while pulling a model.
+///
+/// `total` and `completed` are byte counts for the layer being pulled when
+/// available; both are 0 for status-only frames (`pulling manifest`,
+/// `verifying sha256 digest`, `writing manifest`, `success`, …).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PullEvent {
+    pub status: String,
+    #[serde(default)]
+    pub digest: String,
+    #[serde(default)]
+    pub total: u64,
+    #[serde(default)]
+    pub completed: u64,
+    /// 0.0–1.0 if `total > 0`, otherwise None.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percent: Option<f64>,
+    #[serde(default)]
+    pub done: bool,
+}
+
+impl PullEvent {
+    /// Compact human-readable rendering used by the CLI and by API/preload
+    /// fallbacks where the consumer expects a single string.
+    pub fn render(&self) -> String {
+        if self.total > 0 {
+            let pct = self.percent.unwrap_or(0.0) * 100.0;
+            format!(
+                "{} {:.1}% ({}/{})",
+                self.status,
+                pct,
+                fmt_bytes(self.completed),
+                fmt_bytes(self.total),
+            )
+        } else {
+            self.status.clone()
+        }
+    }
+}
+
+fn fmt_bytes(n: u64) -> String {
+    const K: f64 = 1024.0;
+    let n = n as f64;
+    if n >= K * K * K {
+        format!("{:.2} GB", n / (K * K * K))
+    } else if n >= K * K {
+        format!("{:.1} MB", n / (K * K))
+    } else if n >= K {
+        format!("{:.0} KB", n / K)
+    } else {
+        format!("{n} B")
+    }
+}
+
 pub async fn pull(model: &str, window: &tauri::WebviewWindow) -> Result<()> {
-    pull_with(model, |line| {
-        let _ = window.emit("ollama-pull-progress", line);
+    pull_with(model, |evt| {
+        let _ = window.emit("ollama-pull-progress", evt.clone());
     })
     .await
 }
 
-/// Pull a model, invoking `on_line` for each progress line from `ollama pull`.
-/// Returns Ok(()) on success, Err on non-zero exit. Idempotent: completes immediately
-/// if the model is already pulled.
-pub async fn pull_with<F: FnMut(&str)>(model: &str, mut on_line: F) -> Result<()> {
+/// Pull a model via Ollama's HTTP API (`POST /api/pull`) and invoke `on_event`
+/// for each streamed progress frame. Idempotent: returns immediately if the
+/// model is already present.
+///
+/// Why HTTP instead of `ollama pull` subprocess:
+/// 1. The CLI emits its progress to stderr using `\r`-replaced lines, which
+///    `BufReader::lines()` only sees at the end — the GUI saw "Starting…"
+///    forever.
+/// 2. We were piping stderr without ever reading it. Once the kernel pipe
+///    buffer (~64 KB) filled, the child blocked on its next stderr write,
+///    making the download appear to stall — that's the "very slow" report.
+///
+/// The HTTP API streams reliable JSON frames and avoids both pitfalls.
+pub async fn pull_with<F: FnMut(&PullEvent)>(model: &str, mut on_event: F) -> Result<()> {
     if has_model(model).await? {
+        let mut done = PullEvent {
+            status: "already pulled".into(),
+            done: true,
+            ..Default::default()
+        };
+        done.percent = Some(1.0);
+        on_event(&done);
         return Ok(());
     }
-    let model = model.to_string();
-    let mut child = Command::new("ollama")
-        .args(["pull", &model])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("failed to spawn ollama pull")?;
 
-    use tokio::io::{AsyncBufReadExt, BufReader};
-    let stdout = child.stdout.take().expect("stdout");
-    let mut lines = BufReader::new(stdout).lines();
+    // The HTTP API needs the daemon up. ensure_running is a no-op when it's
+    // already reachable (the common Windows path: tray app already serving).
+    ensure_running().await?;
 
-    while let Ok(Some(line)) = lines.next_line().await {
-        on_line(&line);
+    let client = reqwest::Client::builder()
+        // No total timeout — large pulls take many minutes.
+        .pool_idle_timeout(Duration::from_secs(30))
+        .build()
+        .context("reqwest client")?;
+
+    let body = serde_json::json!({ "name": model, "stream": true });
+    let resp = client
+        .post("http://127.0.0.1:11434/api/pull")
+        .json(&body)
+        .send()
+        .await
+        .context("POST /api/pull")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let detail = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("ollama pull HTTP {status}: {detail}"));
     }
 
-    let status = child.wait().await.context("ollama pull wait")?;
-    if !status.success() {
-        return Err(anyhow!("ollama pull failed for {model}"));
+    // Frames are NDJSON. A single chunk can hold partial frames or several
+    // frames concatenated, so buffer and split on '\n'.
+    let mut stream = resp.bytes_stream();
+    let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("read /api/pull stream")?;
+        buf.extend_from_slice(&chunk);
+        while let Some(nl) = buf.iter().position(|b| *b == b'\n') {
+            let line = buf.drain(..=nl).collect::<Vec<u8>>();
+            let line = &line[..line.len() - 1]; // drop '\n'
+            if line.is_empty() {
+                continue;
+            }
+            let mut evt: PullEvent = match serde_json::from_slice(line) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if evt.total > 0 {
+                evt.percent = Some((evt.completed as f64 / evt.total as f64).clamp(0.0, 1.0));
+            }
+            // Ollama signals success with {"status":"success"}.
+            if evt.status.eq_ignore_ascii_case("success") {
+                evt.done = true;
+                evt.percent = Some(1.0);
+            }
+            // Ollama can also surface errors mid-stream:
+            // {"error":"pull model manifest: ..."}.
+            // serde_json::from_slice into PullEvent drops `error`; re-parse to catch it.
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) {
+                if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+                    return Err(anyhow!("ollama pull error: {err}"));
+                }
+            }
+            on_event(&evt);
+        }
+    }
+
+    // Final confirmation: if the daemon ended the stream without a "success"
+    // frame, the model still has to actually exist locally for us to call this
+    // a successful pull.
+    if !has_model(model).await.unwrap_or(false) {
+        return Err(anyhow!(
+            "ollama pull finished but model {model} is not present"
+        ));
     }
     Ok(())
 }
@@ -276,4 +408,45 @@ pub async fn delete_model(name: &str) -> Result<()> {
         return Err(anyhow!("ollama rm {name} failed"));
     }
     Ok(())
+}
+
+/// One-shot non-streaming chat completion against the local Ollama daemon.
+///
+/// Used by the Tauri GUI chat: going through the WebView's fetch fails on
+/// Windows because Tauri 2 serves pages from `http://tauri.localhost`, which
+/// isn't in Ollama's default CORS allowlist (it lists `tauri://*` but not
+/// `http://tauri.localhost`) — the daemon answers 403. Calling Ollama from
+/// Rust via reqwest sidesteps that entirely: reqwest doesn't set an Origin
+/// header, so Ollama treats the request as same-origin and lets it through.
+pub async fn chat_once(model: &str, messages: serde_json::Value) -> Result<String> {
+    ensure_running().await?;
+    let client = reqwest::Client::builder()
+        .pool_idle_timeout(Duration::from_secs(30))
+        .build()
+        .context("reqwest client")?;
+    let body = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "stream": false,
+    });
+    let resp = client
+        .post("http://127.0.0.1:11434/api/chat")
+        .json(&body)
+        .send()
+        .await
+        .context("POST /api/chat")?;
+    let status = resp.status();
+    let text = resp.text().await.context("read /api/chat response")?;
+    if !status.is_success() {
+        return Err(anyhow!("ollama HTTP {status}: {text}"));
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&text).with_context(|| format!("parse /api/chat response: {text}"))?;
+    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(anyhow!("ollama error: {err}"));
+    }
+    Ok(v["message"]["content"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string())
 }

@@ -1,0 +1,12 @@
+{
+  "name": "AnyAI",
+  "description": "Default catalog hosted in the AnyAI repo. Lists known providers users can pick from.",
+  "ttl_minutes": 1440,
+  "providers": [
+    {
+      "name": "AnyAI Default",
+      "url": "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/manifests/default.json",
+      "description": "Default model recommendations across hardware tiers."
+    }
+  ]
+}

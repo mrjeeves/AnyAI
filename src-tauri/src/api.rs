@@ -497,11 +497,11 @@ fn ensure_pull_started(state: &AppState, tag: &str) -> watch::Receiver<PullStatu
     let tag_owned = tag.to_string();
     let map = state.pull_status.clone();
     tokio::spawn(async move {
-        let res = crate::ollama::pull_with(&tag_owned, |line| {
+        let res = crate::ollama::pull_with(&tag_owned, |evt| {
             let _ = tx.send(PullStatus {
                 done: false,
                 error: None,
-                last_line: line.to_string(),
+                last_line: evt.render(),
             });
         })
         .await;
