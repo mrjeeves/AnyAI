@@ -303,7 +303,9 @@ pub async fn pull_with<F: FnMut(&PullEvent)>(model: &str, mut on_event: F) -> Re
     // frame, the model still has to actually exist locally for us to call this
     // a successful pull.
     if !has_model(model).await.unwrap_or(false) {
-        return Err(anyhow!("ollama pull finished but model {model} is not present"));
+        return Err(anyhow!(
+            "ollama pull finished but model {model} is not present"
+        ));
     }
     Ok(())
 }
@@ -438,8 +440,8 @@ pub async fn chat_once(model: &str, messages: serde_json::Value) -> Result<Strin
     if !status.is_success() {
         return Err(anyhow!("ollama HTTP {status}: {text}"));
     }
-    let v: serde_json::Value = serde_json::from_str(&text)
-        .with_context(|| format!("parse /api/chat response: {text}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).with_context(|| format!("parse /api/chat response: {text}"))?;
     if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
         return Err(anyhow!("ollama error: {err}"));
     }
