@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { fetch } from "@tauri-apps/plugin-http";
   import ModeBar from "./ModeBar.svelte";
   import StatusBar from "./StatusBar.svelte";
   import ProviderPanel from "./ProviderPanel.svelte";
@@ -46,7 +47,7 @@
     try {
       const body = JSON.stringify({
         model: activeModel,
-        messages: messages.slice(0, -0).map((m) => ({ role: m.role, content: m.content })),
+        messages: messages.map((m) => ({ role: m.role, content: m.content })),
         stream: false,
       });
 

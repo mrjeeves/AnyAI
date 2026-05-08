@@ -12,7 +12,14 @@
     "fs:allow-create",
     "fs:allow-mkdir",
     "fs:allow-exists",
-    "http:default",
+    {
+      "identifier": "http:default",
+      "allow": [
+        { "url": "http://127.0.0.1:*/*" },
+        { "url": "http://localhost:*/*" },
+        { "url": "https://*/*" }
+      ]
+    },
     "dialog:default"
   ]
 }
