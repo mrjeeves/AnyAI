@@ -36,12 +36,15 @@ install_linux_deps() {
   fi
 
   case "${ID:-}" in
-    ubuntu|debian|pop|linuxmint)
+    ubuntu|debian|pop|linuxmint|raspbian)
       log "Installing Tauri build deps (apt)…"
       sudo apt-get update -qq
+      # xdg-utils is required by Tauri's AppImage bundler (xdg-open ships
+      # inside the AppImage); preinstalled on ubuntu-latest x86_64 runners
+      # but missing on ubuntu-24.04-arm and Raspberry Pi OS.
       sudo apt-get install -y --no-install-recommends \
         libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
-        librsvg2-dev libssl-dev curl wget file build-essential pkg-config
+        librsvg2-dev libssl-dev xdg-utils curl wget file build-essential pkg-config
       ;;
     fedora|rhel|centos)
       log "Installing Tauri build deps (dnf)…"
