@@ -54,6 +54,22 @@ On every request: re-resolve, hot-swap if upstream changed, return. A 5-minute b
 - Internet on first run (to pull the model — typically 3–15 GB)
 - Ollama is auto-installed if missing
 
+### Small systems (Raspberry Pi 4 / Pi 5)
+
+AnyAI ships native `linux-aarch64` builds, so a 64-bit Raspberry Pi OS install is a one-liner. The hardware detector reads `/proc/device-tree/model` and `/proc/cpuinfo`, surfaces the board name (e.g. "Raspberry Pi 5 Model B") in the GUI and `anyai status`, and walks a CPU-friendly tier ladder so a 2 GB Pi 4 lands on `llama3.2:1b` while a 16 GB Pi 5 reaches `qwen3:8b`.
+
+| Board                 | Default text model |
+|-----------------------|--------------------|
+| Pi 4 / Pi 5 — 2 GB    | `llama3.2:1b`      |
+| Pi 4 / Pi 5 — 4 GB    | `llama3.2:3b`      |
+| Pi 4 / Pi 5 — 8 GB    | `gemma3:4b`        |
+| Pi 5 — 16 GB          | `qwen3:8b`         |
+
+Notes:
+- Use **64-bit Raspberry Pi OS** (Bookworm or newer). 32-bit (`armv7l`) is not a release target.
+- Ollama installs through its official script on Pi 4/5 (aarch64). If that fails on a constrained image, run `anyai serve --no-ollama` and point Ollama at `127.0.0.1:11434` yourself.
+- Override the picked model anytime: `anyai preload text --model llama3.2:1b --track`.
+
 ### One-line (macOS / Linux)
 
 ```bash

@@ -12,7 +12,8 @@
         { "min_vram_gb": 12, "min_ram_gb": 24, "model": "qwen3:14b",     "fallback": "qwen3:8b"      },
         { "min_vram_gb": 6,  "min_ram_gb": 12, "model": "qwen3:8b",      "fallback": "gemma3:4b"     },
         { "min_vram_gb": 3,  "min_ram_gb": 6,  "model": "gemma3:4b",     "fallback": "llama3.2:3b"   },
-        { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "llama3.2:3b",   "fallback": "llama3.2:1b"   }
+        { "min_vram_gb": 2,  "min_ram_gb": 4,  "model": "llama3.2:3b",   "fallback": "llama3.2:1b"   },
+        { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "llama3.2:1b",   "fallback": "llama3.2:1b"   }
       ]
     },
     "vision": {
@@ -27,10 +28,11 @@
     "code": {
       "label": "Code",
       "tiers": [
-        { "min_vram_gb": 24, "min_ram_gb": 48, "model": "qwen2.5-coder:32b", "fallback": "qwen2.5-coder:14b" },
-        { "min_vram_gb": 12, "min_ram_gb": 24, "model": "qwen2.5-coder:14b", "fallback": "qwen2.5-coder:7b"  },
-        { "min_vram_gb": 6,  "min_ram_gb": 12, "model": "qwen2.5-coder:7b",  "fallback": "qwen2.5-coder:3b"  },
-        { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "qwen2.5-coder:3b",  "fallback": "qwen2.5-coder:1.5b"}
+        { "min_vram_gb": 24, "min_ram_gb": 48, "model": "qwen2.5-coder:32b",  "fallback": "qwen2.5-coder:14b" },
+        { "min_vram_gb": 12, "min_ram_gb": 24, "model": "qwen2.5-coder:14b",  "fallback": "qwen2.5-coder:7b"  },
+        { "min_vram_gb": 6,  "min_ram_gb": 12, "model": "qwen2.5-coder:7b",   "fallback": "qwen2.5-coder:3b"  },
+        { "min_vram_gb": 2,  "min_ram_gb": 4,  "model": "qwen2.5-coder:3b",   "fallback": "qwen2.5-coder:1.5b"},
+        { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "qwen2.5-coder:1.5b", "fallback": "qwen2.5-coder:1.5b"}
       ]
     }
   }
