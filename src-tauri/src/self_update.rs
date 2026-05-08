@@ -1101,39 +1101,35 @@ abc123  anyai-linux-x86_64.tar.gz
         assert_eq!(human_bytes(2u64 * 1024 * 1024 * 1024), "2.0 GB");
     }
 
-    /// Builds a tiny tar.gz containing a fake `anyai` executable, runs the
-    /// extraction helper, and confirms the binary lands at the expected path.
-    /// Skipped if `tar` isn't on PATH (CI runners and our supported targets
-    /// all have it; this guard keeps the test honest in odd environments).
+    /// Builds a tiny tar.gz containing a fake `anyai`/`anyai.exe`
+    /// (whichever name the helper expects on this platform), runs the
+    /// extraction helper, and confirms the binary lands at the expected
+    /// path. Skipped if `tar` isn't on PATH.
     #[test]
     fn extract_binary_if_archived_pulls_anyai_out_of_targz() {
         if which::which("tar").is_err() {
             eprintln!("skipping: `tar` not found on PATH");
             return;
         }
+        let bin_name = if cfg!(windows) { "anyai.exe" } else { "anyai" };
         let dir = tempdir_for_test("anyai-extract-targz");
-        let bin_inside = dir.join("anyai");
-        std::fs::write(&bin_inside, b"#!/bin/sh\necho fake\n").unwrap();
+        let bin_inside = dir.join(bin_name);
+        std::fs::write(&bin_inside, b"fake-binary").unwrap();
         let archive = dir.join("anyai-test-x86_64.tar.gz");
         let status = std::process::Command::new("tar")
             .arg("-czf")
             .arg(&archive)
             .arg("-C")
             .arg(&dir)
-            .arg("anyai")
+            .arg(bin_name)
             .status()
             .expect("tar -czf");
         assert!(status.success(), "could not build test archive");
         std::fs::remove_file(&bin_inside).unwrap();
 
         let extracted = extract_binary_if_archived(&archive, &dir, false).expect("extraction");
-        assert_eq!(
-            extracted,
-            dir.join(if cfg!(windows) { "anyai.exe" } else { "anyai" })
-        );
-        if !cfg!(windows) {
-            assert!(extracted.exists());
-        }
+        assert_eq!(extracted, dir.join(bin_name));
+        assert!(extracted.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
