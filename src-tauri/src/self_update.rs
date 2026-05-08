@@ -731,7 +731,12 @@ fn human_bytes(n: u64) -> String {
 }
 
 fn expected_sha_for(sha_text: &str, asset_name: &str) -> Option<String> {
-    // Lines look like: "<hex>  <filename>" or "<hex> *<filename>".
+    // Lines look like: "<hex>  <filename>" or "<hex> *<filename>". The
+    // filename column may also be a relative path — Windows release builds
+    // (≤0.1.13) ran `sha256sum dist-bin/<name>.zip` from the repo root and
+    // baked `dist-bin/` into the recorded name. Match by basename so we
+    // tolerate that without re-uploading old releases.
+    let target = basename(asset_name);
     for line in sha_text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -741,7 +746,7 @@ fn expected_sha_for(sha_text: &str, asset_name: &str) -> Option<String> {
         let Some(hash) = parts.next() else { continue };
         let Some(name) = parts.next() else { continue };
         let name = name.trim_start_matches('*');
-        if name == asset_name {
+        if basename(name) == target {
             return Some(hash.to_string());
         }
     }
@@ -751,6 +756,10 @@ fn expected_sha_for(sha_text: &str, asset_name: &str) -> Option<String> {
         return Some(stripped.to_string());
     }
     None
+}
+
+fn basename(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 // ---------------------------------------------------------------------------
@@ -1111,6 +1120,28 @@ def456 *anyai-macos-aarch64.tar.gz
     fn expected_sha_returns_none_for_missing_entry() {
         let sums = "abc123  anyai-linux-x86_64.tar.gz\n";
         assert_eq!(expected_sha_for(sums, "nope.tar.gz"), None);
+    }
+
+    /// Regression: Windows release builds up through 0.1.13 ran
+    /// `sha256sum dist-bin/anyai-windows-x86_64.zip` from the repo root,
+    /// so the published .sha256 sidecar reads
+    /// `<hash>  dist-bin/anyai-windows-x86_64.zip`. The GitHub asset is
+    /// uploaded as the bare basename, so an exact match against the
+    /// recorded filename failed and the GUI/CLI surfaced
+    /// "SHA256SUMS does not list an entry for anyai-windows-x86_64.zip".
+    /// Lookup must compare basenames.
+    #[test]
+    fn expected_sha_matches_when_sums_line_has_path_prefix() {
+        let sums = "abc123  dist-bin/anyai-windows-x86_64.zip\n";
+        assert_eq!(
+            expected_sha_for(sums, "anyai-windows-x86_64.zip"),
+            Some("abc123".into())
+        );
+        let with_backslash = "abc123  dist-bin\\anyai-windows-x86_64.zip\n";
+        assert_eq!(
+            expected_sha_for(with_backslash, "anyai-windows-x86_64.zip"),
+            Some("abc123".into())
+        );
     }
 
     #[test]
