@@ -370,32 +370,36 @@ pub struct ModelInfo {
 }
 
 pub async fn list_models() -> Result<Vec<ModelInfo>> {
-    let out = Command::new("ollama")
-        .args(["list", "--json"])
-        .output()
-        .await
-        .context("ollama list")?;
+    // `ollama list` has no `--json` flag; cobra rejects unknown flags with a
+    // non-zero exit, which silently turned every "list installed models" call
+    // into Ok(vec![]). The Models tab showed nothing and the cleanup pass had
+    // nothing to evaluate, so pulled models piled up indefinitely. The HTTP
+    // API at /api/tags is the canonical structured-output surface.
+    let body = match reqwest_get("http://127.0.0.1:11434/api/tags").await {
+        Ok(b) => b,
+        Err(_) => return Ok(vec![]),
+    };
+    Ok(parse_tags_response(&body))
+}
 
-    if !out.status.success() {
-        return Ok(vec![]);
-    }
-
-    // `ollama list --json` outputs one JSON object per line with keys: name, size, ...
-    let mut models = Vec::new();
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            let name = v["name"].as_str().unwrap_or("").to_string();
-            let size = v["size"].as_u64().unwrap_or(0);
-            if !name.is_empty() {
-                models.push(ModelInfo { name, size });
-            }
+/// Parse the `/api/tags` response body. Pulled out of `list_models` so the
+/// JSON shape contract is testable without a running daemon.
+fn parse_tags_response(body: &str) -> Vec<ModelInfo> {
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) else {
+        return vec![];
+    };
+    let Some(arr) = parsed["models"].as_array() else {
+        return vec![];
+    };
+    let mut models = Vec::with_capacity(arr.len());
+    for entry in arr {
+        let name = entry["name"].as_str().unwrap_or("").to_string();
+        let size = entry["size"].as_u64().unwrap_or(0);
+        if !name.is_empty() {
+            models.push(ModelInfo { name, size });
         }
     }
-    Ok(models)
+    models
 }
 
 pub async fn delete_model(name: &str) -> Result<()> {
@@ -449,4 +453,48 @@ pub async fn chat_once(model: &str, messages: serde_json::Value) -> Result<Strin
         .as_str()
         .unwrap_or_default()
         .to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A real-world `/api/tags` response (trimmed) — wrapper object with a
+    /// `models` array, each entry carrying `name` and `size` (bytes).
+    #[test]
+    fn parse_tags_response_extracts_name_and_size() {
+        let body = r#"{
+          "models": [
+            { "name": "llama3.2:3b", "size": 2019393189, "modified_at": "2024-09-01T00:00:00Z" },
+            { "name": "qwen2.5:7b",  "size": 4683072932 }
+          ]
+        }"#;
+        let models = parse_tags_response(body);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].name, "llama3.2:3b");
+        assert_eq!(models[0].size, 2019393189);
+        assert_eq!(models[1].name, "qwen2.5:7b");
+        assert_eq!(models[1].size, 4683072932);
+    }
+
+    #[test]
+    fn parse_tags_response_returns_empty_on_garbage() {
+        assert!(parse_tags_response("").is_empty());
+        assert!(parse_tags_response("not json").is_empty());
+        assert!(parse_tags_response(r#"{"foo":"bar"}"#).is_empty());
+        assert!(parse_tags_response(r#"{"models":"not an array"}"#).is_empty());
+    }
+
+    #[test]
+    fn parse_tags_response_skips_entries_without_name() {
+        let body = r#"{"models":[{"size":100},{"name":"","size":1},{"name":"a","size":1}]}"#;
+        let models = parse_tags_response(body);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].name, "a");
+    }
+
+    #[test]
+    fn parse_tags_response_handles_empty_models_array() {
+        assert!(parse_tags_response(r#"{"models":[]}"#).is_empty());
+    }
 }
