@@ -26,42 +26,36 @@ export interface ManifestMode {
   tiers: ManifestTier[];
 }
 
+/**
+ * A model family — e.g. "gemma4", "qwen3". Owns its own per-mode tier table:
+ * a family is the unit of "what models do I run, sized to my hardware". Users
+ * pick an active family inside an active provider; the resolver walks
+ * `families[active_family].modes[mode].tiers` against the local hardware.
+ */
+export interface ManifestFamily {
+  /** Human-readable name shown in the UI ("Gemma 4"). */
+  label: string;
+  /** One-line blurb shown in the family picker. Optional. */
+  description?: string;
+  /** Mode picked when the user hasn't chosen one. */
+  default_mode: Mode;
+  modes: Record<string, ManifestMode>;
+}
+
 export interface Manifest {
   name: string;
   version: string;
   ttl_minutes?: number;
-  default_mode: Mode;
-  /** URLs of other manifests whose modes/tiers are merged into this one. */
+  /** Family picked when the user hasn't chosen one. */
+  default_family: string;
+  /** URLs of other manifests whose families are merged into this one. */
   imports?: string[];
-  modes: Record<string, ManifestMode>;
-}
-
-export interface Source {
-  name: string;
-  url: string;
+  families: Record<string, ManifestFamily>;
 }
 
 export interface Provider {
   name: string;
   url: string;
-  source: string | null;
-}
-
-export interface CatalogEntry {
-  name: string;
-  url: string;
-  description?: string;
-  /** URL of the file this entry was sourced from. Set by the resolver during merge. */
-  origin?: string;
-}
-
-export interface ProviderCatalog {
-  name: string;
-  description?: string;
-  ttl_minutes?: number;
-  /** URLs of other catalogs whose providers are merged into this one. */
-  imports?: string[];
-  providers: CatalogEntry[];
 }
 
 export interface ApiConfig {
@@ -84,6 +78,7 @@ export interface AutoUpdateConfig {
 
 export interface Config {
   active_provider: string;
+  active_family: string;
   active_mode: Mode;
   model_cleanup_days: number;
   kept_models: string[];
@@ -91,7 +86,6 @@ export interface Config {
   tracked_modes: Mode[];
   api: ApiConfig;
   auto_update: AutoUpdateConfig;
-  sources: Source[];
   providers: Provider[];
 }
 

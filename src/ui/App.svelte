@@ -5,7 +5,7 @@
   import Chat from "./Chat.svelte";
   import { loadConfig, updateConfig } from "../config";
   import { getActiveManifest } from "../providers";
-  import { resolveModel } from "../manifest";
+  import { resolveModel, pickFamily, familyModes } from "../manifest";
   import { runCleanup } from "../model-lifecycle";
   import { onModeSwap } from "../watcher";
   import type { HardwareProfile, Mode } from "../types";
@@ -18,18 +18,23 @@
   let hardware = $state<HardwareProfile | null>(null);
   let activeModel = $state("");
   let activeMode = $state<Mode>("text");
+  let activeFamilyName = $state("");
   let supportedModes = $state<Set<Mode>>(new Set(["text", "vision", "code", "transcribe"]));
   let error = $state("");
 
-  // Modes the active manifest actually has tiers for. Falls back to all four
-  // before the manifest loads so the bar isn't briefly all-disabled.
-  function modesIn(manifest: { modes: Record<string, unknown> } | null): Set<Mode> {
+  /**
+   * Modes the active family inside the active manifest actually has tiers
+   * for. Falls back to all four before the manifest loads so the bar isn't
+   * briefly all-disabled.
+   */
+  function modesForActiveFamily(
+    manifest: Awaited<ReturnType<typeof getActiveManifest>> | null,
+    familyName: string,
+  ): Set<Mode> {
     if (!manifest) return new Set(["text", "vision", "code", "transcribe"]);
-    const set = new Set<Mode>();
-    for (const m of ["text", "vision", "code", "transcribe"] as Mode[]) {
-      if (manifest.modes[m]) set.add(m);
-    }
-    return set;
+    const picked = pickFamily(manifest, familyName);
+    if (!picked) return new Set();
+    return familyModes(picked.family);
   }
 
   onMount(async () => {
@@ -40,13 +45,16 @@
       ]);
       hardware = hw;
       activeMode = config.active_mode;
+      activeFamilyName = config.active_family;
 
       // Background cleanup of stale models
       runCleanup().catch(() => {});
 
       const manifest = await getActiveManifest();
-      supportedModes = modesIn(manifest);
-      activeModel = resolveModel(hw, manifest, activeMode, config.mode_overrides);
+      const picked = pickFamily(manifest, config.active_family);
+      activeFamilyName = picked?.name ?? manifest.default_family ?? "";
+      supportedModes = modesForActiveFamily(manifest, activeFamilyName);
+      activeModel = resolveModel(hw, manifest, activeMode, config.mode_overrides, activeFamilyName);
 
       const ollamaInstalled = await invoke<boolean>("ollama_installed");
       if (!ollamaInstalled) {
@@ -67,8 +75,9 @@
         if (!hardware) return;
         if (e.mode !== activeMode) return;
         const [config, manifest] = await Promise.all([loadConfig(), getActiveManifest()]);
-        supportedModes = modesIn(manifest);
-        activeModel = resolveModel(hardware, manifest, activeMode, config.mode_overrides);
+        activeFamilyName = config.active_family;
+        supportedModes = modesForActiveFamily(manifest, activeFamilyName);
+        activeModel = resolveModel(hardware, manifest, activeMode, config.mode_overrides, activeFamilyName);
       });
     } catch (e) {
       // Surface the silenced startup error. Without this it's invisible:
@@ -94,8 +103,9 @@
     activeMode = mode;
     if (!hardware) return;
     const [config, manifest] = await Promise.all([loadConfig(), getActiveManifest()]);
-    supportedModes = modesIn(manifest);
-    activeModel = resolveModel(hardware, manifest, mode, config.mode_overrides);
+    activeFamilyName = config.active_family;
+    supportedModes = modesForActiveFamily(manifest, activeFamilyName);
+    activeModel = resolveModel(hardware, manifest, mode, config.mode_overrides, activeFamilyName);
 
     await updateConfig({ active_mode: mode });
   }
@@ -103,8 +113,9 @@
   async function onProviderChange() {
     if (!hardware) return;
     const [config, manifest] = await Promise.all([loadConfig(), getActiveManifest()]);
-    supportedModes = modesIn(manifest);
-    activeModel = resolveModel(hardware, manifest, activeMode, config.mode_overrides);
+    activeFamilyName = config.active_family;
+    supportedModes = modesForActiveFamily(manifest, activeFamilyName);
+    activeModel = resolveModel(hardware, manifest, activeMode, config.mode_overrides, activeFamilyName);
   }
 </script>
 
@@ -127,6 +138,7 @@
     <Chat
       {activeModel}
       {activeMode}
+      activeFamily={activeFamilyName}
       {supportedModes}
       {hardware}
       onModeChange={onModeChange}

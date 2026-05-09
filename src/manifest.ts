@@ -1,7 +1,7 @@
 import { fetch } from "@tauri-apps/plugin-http";
 import { readTextFile, writeTextFile, exists, mkdir } from "@tauri-apps/plugin-fs";
 import { homeDir } from "@tauri-apps/api/path";
-import type { Manifest, ManifestMode, HardwareProfile, Mode } from "./types";
+import type { Manifest, ManifestFamily, HardwareProfile, Mode } from "./types";
 import BUNDLED_MANIFEST_JSON from "../manifests/default.json";
 
 const DEFAULT_TTL_MINUTES = 360;
@@ -83,9 +83,9 @@ async function fetchOne(url: string): Promise<Manifest> {
  *
  * Merge semantics:
  *   - Imports are merged first (depth-first, document order).
- *   - The importing file's own modes/tiers are merged last and OVERRIDE any
- *     conflicting mode key from imports (closer publisher wins).
- *   - Top-level fields (`name`, `version`, `default_mode`, `ttl_minutes`)
+ *   - The importing file's own families are merged last and OVERRIDE any
+ *     conflicting family key from imports (closer publisher wins).
+ *   - Top-level fields (`name`, `version`, `default_family`, `ttl_minutes`)
  *     always come from the importing file.
  */
 export async function getManifest(url: string): Promise<Manifest> {
@@ -100,7 +100,7 @@ async function walk(url: string, visited: Set<string>): Promise<Manifest> {
   visited.add(url);
 
   const raw = await fetchOne(url);
-  const mergedModes: Record<string, ManifestMode> = {};
+  const mergedFamilies: Record<string, ManifestFamily> = {};
 
   for (const importUrl of raw.imports ?? []) {
     let imported: Manifest;
@@ -109,26 +109,44 @@ async function walk(url: string, visited: Set<string>): Promise<Manifest> {
     } catch {
       continue;
     }
-    for (const [key, mode] of Object.entries(imported.modes ?? {})) {
-      mergedModes[key] = mode;
+    for (const [key, family] of Object.entries(imported.families ?? {})) {
+      mergedFamilies[key] = family;
     }
   }
-  // Importing file wins on mode-key collision.
-  for (const [key, mode] of Object.entries(raw.modes ?? {})) {
-    mergedModes[key] = mode;
+  // Importing file wins on family-key collision.
+  for (const [key, family] of Object.entries(raw.families ?? {})) {
+    mergedFamilies[key] = family;
   }
 
   return {
     name: raw.name,
     version: raw.version,
     ttl_minutes: raw.ttl_minutes,
-    default_mode: raw.default_mode,
-    modes: mergedModes,
+    default_family: raw.default_family,
+    families: mergedFamilies,
   };
 }
 
 function emptyManifest(): Manifest {
-  return { name: "", version: "1", default_mode: "text", modes: {} };
+  return { name: "", version: "1", default_family: "", families: {} };
+}
+
+/**
+ * Pick a family from a manifest. Falls back to `default_family`, then to the
+ * first family in document order — so the resolver never returns null even
+ * when callers pass a stale/unknown family name.
+ */
+export function pickFamily(manifest: Manifest, requested?: string): { name: string; family: ManifestFamily } | null {
+  const keys = Object.keys(manifest.families);
+  if (keys.length === 0) return null;
+  const candidates = [requested, manifest.default_family, keys[0]].filter(
+    (k): k is string => typeof k === "string" && k.length > 0,
+  );
+  for (const k of candidates) {
+    const family = manifest.families[k];
+    if (family) return { name: k, family };
+  }
+  return { name: keys[0], family: manifest.families[keys[0]] };
 }
 
 export function resolveModel(
@@ -136,11 +154,16 @@ export function resolveModel(
   manifest: Manifest,
   mode: Mode,
   modeOverrides?: Partial<Record<Mode, string | null>>,
+  familyName?: string,
 ): string {
   const override = modeOverrides?.[mode];
   if (override) return override;
 
-  const modeSpec = manifest.modes[mode] ?? manifest.modes[manifest.default_mode];
+  const picked = pickFamily(manifest, familyName);
+  if (!picked) return "tinyllama";
+
+  const { family } = picked;
+  const modeSpec = family.modes[mode] ?? family.modes[family.default_mode];
   if (!modeSpec) return "tinyllama";
 
   const vram = effectiveVramGb(hardware);
@@ -170,14 +193,25 @@ function effectiveVramGb(hw: HardwareProfile): number {
   return 0;
 }
 
-/** All model tags recommended by a manifest across all tiers and modes. */
+/** All model tags recommended by a manifest across every family/mode/tier. */
 export function allRecommendedModels(manifest: Manifest): Set<string> {
   const models = new Set<string>();
-  for (const modeSpec of Object.values(manifest.modes)) {
-    for (const tier of modeSpec.tiers) {
-      models.add(tier.model);
-      models.add(tier.fallback);
+  for (const family of Object.values(manifest.families ?? {})) {
+    for (const modeSpec of Object.values(family.modes ?? {})) {
+      for (const tier of modeSpec.tiers) {
+        models.add(tier.model);
+        models.add(tier.fallback);
+      }
     }
   }
   return models;
+}
+
+/** Modes a specific family in a manifest defines tiers for. */
+export function familyModes(family: ManifestFamily): Set<Mode> {
+  const out = new Set<Mode>();
+  for (const m of ["text", "vision", "code", "transcribe"] as Mode[]) {
+    if (family.modes[m]) out.add(m);
+  }
+  return out;
 }

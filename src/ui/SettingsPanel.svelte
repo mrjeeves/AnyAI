@@ -1,11 +1,12 @@
 <script lang="ts">
   import ProvidersSection from "./settings/ProvidersSection.svelte";
+  import FamiliesSection from "./settings/FamiliesSection.svelte";
   import ModelsSection from "./settings/ModelsSection.svelte";
   import UpdatesSection from "./settings/UpdatesSection.svelte";
 
-  type Tab = "providers" | "models" | "updates";
+  type Tab = "providers" | "families" | "models" | "updates";
 
-  let { initialTab = "providers", onClose, onChanged } = $props<{
+  let { initialTab = "families", onClose, onChanged } = $props<{
     initialTab?: Tab;
     onClose: () => void;
     onChanged: () => void;
@@ -15,9 +16,10 @@
   let active = $state<Tab>(initialTab);
 
   const tabs: Array<{ id: Tab; label: string }> = [
+    { id: "families",  label: "Family" },
     { id: "providers", label: "Providers" },
-    { id: "models", label: "Models" },
-    { id: "updates", label: "Updates" },
+    { id: "models",    label: "Models" },
+    { id: "updates",   label: "Updates" },
   ];
 </script>
 
@@ -38,7 +40,9 @@
     </nav>
 
     <div class="content">
-      {#if active === "providers"}
+      {#if active === "families"}
+        <FamiliesSection {onChanged} />
+      {:else if active === "providers"}
         <ProvidersSection {onChanged} />
       {:else if active === "models"}
         <ModelsSection />

@@ -26,10 +26,12 @@
       const manifests = await getAllManifests();
       const set = new Set<string>();
       for (const { manifest } of manifests) {
-        for (const modeSpec of Object.values(manifest.modes)) {
-          for (const tier of modeSpec.tiers) {
-            set.add(tier.model);
-            set.add(tier.fallback);
+        for (const family of Object.values(manifest.families ?? {})) {
+          for (const modeSpec of Object.values(family.modes)) {
+            for (const tier of modeSpec.tiers) {
+              set.add(tier.model);
+              set.add(tier.fallback);
+            }
           }
         }
       }

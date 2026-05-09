@@ -10,6 +10,7 @@
   let {
     activeModel,
     activeMode,
+    activeFamily,
     supportedModes,
     hardware,
     onModeChange,
@@ -17,6 +18,7 @@
   } = $props<{
     activeModel: string;
     activeMode: Mode;
+    activeFamily: string;
     supportedModes: Set<Mode>;
     hardware: HardwareProfile | null;
     onModeChange: (mode: Mode) => void;
@@ -42,7 +44,7 @@
   let input = $state("");
   let streaming = $state(false);
   let activeStreamId = $state<string | null>(null);
-  let settingsTab = $state<"providers" | "models" | null>(null);
+  let settingsTab = $state<"providers" | "families" | "models" | null>(null);
   let messagesEl: HTMLElement;
 
   $effect(() => {
@@ -167,6 +169,7 @@
   <StatusBar
     model={activeModel}
     mode={activeMode}
+    family={activeFamily}
     onOpenSettings={(tab) => (settingsTab = tab)}
   />
 

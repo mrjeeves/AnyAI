@@ -12,7 +12,7 @@ Full reference manual for AnyAI. For a one-page overview and quick start, see [R
   - [Status](#status)
   - [Models](#models)
   - [Providers](#providers)
-  - [Sources](#sources)
+  - [Families](#families)
   - [Preload](#preload)
   - [Import & Export](#import--export)
   - [Update](#update)
@@ -153,7 +153,7 @@ The GUI also runs the API server on the same port by default — disable via `co
 | `anyai stop`       | Stop the managed Ollama process                        |
 | `anyai models`     | List / pin / override / prune pulled models            |
 | `anyai providers`  | Manage provider URLs                                   |
-| `anyai sources`    | Manage source catalog URLs                             |
+| `anyai families`   | Pick the model family inside the active provider      |
 | `anyai import`     | Import a config bundle                                 |
 | `anyai export`     | Export the current config                              |
 | `anyai update`     | Self-update: `status`, `check`, `apply`                |
@@ -190,20 +190,31 @@ anyai status --json
 
 ```
 Provider : AnyAI Default
+Family   : gemma4
 Mode     : text
 Ollama   : running
 VRAM     : 12.0 GB (nvidia)
 RAM      : 32.0 GB
 Disk free: 118.3 GB
+
+Families in AnyAI Default:
+ * gemma4         Gemma 4
+   qwen3          Qwen 3
+
+Recommended models for this hardware:
+  text       → gemma4:e4b
 ```
 
 ```jsonc
 // --json output
 {
   "active_provider": "AnyAI Default",
+  "active_family": "gemma4",
   "active_mode": "text",
   "ollama_running": true,
-  "hardware": { "vram_gb": 12.0, "ram_gb": 32.0, "disk_free_gb": 118.3, "gpu_type": "nvidia" }
+  "hardware": { "vram_gb": 12.0, "ram_gb": 32.0, "disk_free_gb": 118.3, "gpu_type": "nvidia" },
+  "families":  [ { "name": "gemma4", "label": "Gemma 4" }, { "name": "qwen3", "label": "Qwen 3" } ],
+  "recommendations": { "text": "gemma4:e4b" }
 }
 ```
 
@@ -262,31 +273,38 @@ anyai run
 ANYAI_PROFILE=https://example.com/minimal.json anyai run
 ```
 
-### Sources
+### Families
 
-A **source** is a URL returning a catalog of providers — like a package repository. Browse a source's providers, then add individual ones to your saved list.
+A **family** is a named bundle of model versions inside a provider's manifest — e.g. `gemma4`, `qwen3`. Each family owns its own per-mode tier table; AnyAI resolves the active family's tiers against your hardware to pick a model. The default provider ships two families (`gemma4`, `qwen3`); `gemma4` is the default.
 
 ```bash
-anyai sources                            # list saved sources
-anyai sources add <url> --name <name>
-anyai sources list <name>                # browse providers in a source
-anyai sources rm <name>
-anyai sources refresh [name]             # force re-fetch (clears TTL cache)
-anyai sources reset                      # re-merge bundled presets
+anyai families                           # list families in the active provider (* = active)
+anyai families use <name>                # set as active (hot-swap)
+anyai families show [name]               # print tiers for a family across all modes
+anyai families --json                    # machine-readable list
 ```
 
 ```bash
-anyai sources add https://deepseek.com/anyai/sources.json --name DeepSeek
-anyai sources list DeepSeek
-#   DeepSeek V3    — Flagship general-purpose
-#   DeepSeek R1    — Reasoning-focused
-#   DeepSeek Coder — Code generation
+anyai families
+# Families in AnyAI Default:
+#  * gemma4         Gemma 4
+#    qwen3          Qwen 3
 
-anyai providers add --from DeepSeek "DeepSeek R1"
-anyai providers use "DeepSeek R1"
+anyai families use qwen3
+anyai families show qwen3
+# qwen3  (Qwen 3)
+#   Alibaba Qwen 3 — strong multilingual and reasoning performance at every size.
+#   default mode: text
+#
+#   mode text:
+#     ≥ 24 GB VRAM · ≥ 48 GB RAM   qwen3.6:35b
+#     ≥ 16 GB VRAM · ≥ 32 GB RAM   qwen3.6:27b
+#     ≥  8 GB VRAM · ≥ 16 GB RAM   qwen3.5:9b
+#     ≥  4 GB VRAM · ≥  8 GB RAM   qwen3.5:1b
+#     ≥  0 GB VRAM · ≥  0 GB RAM   qwen3.5:1b
 ```
 
-When a source has [imports](#imports--merged-catalogs), `anyai sources list` shows entries from imported catalogs with a `[from <url>]` suffix.
+`anyai providers use <name>` automatically resets the active family to the new manifest's `default_family` — no stale-name fallthrough.
 
 ### Preload
 
@@ -304,17 +322,15 @@ Tracked modes are kept current automatically: when a manifest update changes the
 
 ### Import & Export
 
-The full config — sources, providers — is plain JSON. Share it however you want.
+The full config — providers — is plain JSON. Share it however you want.
 
 ```bash
 anyai export                       # JSON to stdout
 anyai export --url                 # base64-encoded anyai:import:... URL
-anyai export --sources-only
-anyai export --providers-only
 
 anyai import ./config.json
 anyai import https://gist.../config.json
-anyai import anyai:import:eyJzb3VyY2VzIjpbXSwicHJvdmlkZXJzIjpbXX0
+anyai import anyai:import:eyJwcm92aWRlcnMiOltdfQ
 ```
 
 Import is **always additive**. Existing entries (matched by name) are never overwritten. The GUI's provider panel also has an import field — paste any of the above formats directly.
@@ -365,10 +381,10 @@ Launch the GUI by running `anyai` with no arguments, or open the application bun
 - **Mode bar** — switch modes; the model hot-swaps without restarting the server.
 - No settings screen, no preferences, no model picker. Everything just works.
 
-**Provider panel** (click the model pill):
-- Lists saved providers grouped by domain. Click any provider to switch (model hot-swaps immediately).
-- "Add provider" — paste a URL and name.
-- Sources tab — browse source catalogs (with imports merged in) and add providers from them.
+**Settings panel** (click the model pill or the gear):
+- **Family tab** — pick which family inside the active provider AnyAI uses for recommendations. Each family card shows its full tier list with the tier picked for your hardware highlighted, so you can see exactly what's running and why.
+- **Providers tab** — list of saved providers. Click any provider to switch (model and family hot-swap immediately to the new manifest's default family).
+- **Models tab** — every pulled model with its size, recommendation status, and pin/override controls.
 
 **Model status panel** (click "⊞ Models"):
 - Every pulled model: size, which providers recommend it, age if unrecommended.
@@ -382,53 +398,34 @@ Launch the GUI by running `anyai` with no arguments, or open the application bun
 
 ### What is a Provider?
 
-A **URL** that returns a JSON [manifest](#manifest-format). The manifest maps hardware profiles to model recommendations across four modes. AnyAI fetches it, caches it (against the publisher-defined TTL), and uses it to pick the best model for your machine.
+A **URL** that returns a JSON [manifest](#manifest-format). The manifest publishes one or more **families** (e.g. `gemma4`, `qwen3`); each family carries its own per-mode tier table. AnyAI fetches the manifest, caches it against the publisher-defined TTL, and resolves `families[active_family].modes[active_mode]` against your hardware.
 
-Providers are saved by name in your local config; one is "active" at any time; switched via CLI or GUI without restarting anything.
+Providers are saved by name in your local config. One provider is active at a time; switching is hot — the model swaps without restarting anything.
 
-### What is a Source?
+### What is a Family?
 
-A **URL** that returns a catalog of providers — a list of `{ name, url, description }` entries. Sources let publishers ship multiple providers under one URL that users add once.
+A **family** is a model family inside a provider's manifest — Gemma 4, Qwen 3, etc. Picking the family is how the user picks "which model line do I want", letting AnyAI keep tiering by hardware. The user's choice of family is saved alongside the active provider; the resolver always walks `families[active_family].modes[active_mode].tiers`.
 
 ```
-User adds Source URL
-  └─ fetches catalog
-       ├─ "DeepSeek V3"    → https://deepseek.com/anyai/v3.json
-       ├─ "DeepSeek R1"    → https://deepseek.com/anyai/r1.json
-       └─ "DeepSeek Coder" → https://deepseek.com/anyai/coder.json
+Provider "AnyAI Default"
+  └─ default_family = "gemma4"
+       families:
+         ├─ gemma4   tiers: [31b → 26b → e4b → e2b]
+         └─ qwen3    tiers: [35b → 27b → 9b  → 1b ]
 ```
 
-Sources are cached locally against the publisher's `ttl_minutes` (default 24h). When stale, AnyAI silently re-fetches in the background.
+Default ships with `gemma4` as the active family. Switching families is one CLI call (`anyai families use qwen3`) or one click in the GUI's Family tab.
 
 ### Publishing your own
 
-**Publish a provider** — host any static JSON file in the [manifest format](#manifest-format). One file, any static host (GitHub Pages, S3, a Cloudflare Worker, your company intranet).
+Host any static JSON file in the [manifest format](#manifest-format). One file, any static host (GitHub Pages, S3, a Cloudflare Worker, your company intranet).
 
 ```bash
 anyai providers add https://ai.yourcompany.com/anyai-manifest.json --name "Company LLM"
 anyai providers use "Company LLM"
 ```
 
-**Publish a source** — host a JSON catalog:
-
-```json
-{
-  "name": "Your Org",
-  "description": "Company AI providers",
-  "ttl_minutes": 1440,
-  "providers": [
-    { "name": "Company LLM",  "url": "https://ai.yourco.com/manifest.json",      "description": "General chat" },
-    { "name": "Company Code", "url": "https://ai.yourco.com/code-manifest.json", "description": "Code assistant" }
-  ]
-}
-```
-
-```bash
-anyai sources add https://ai.yourco.com/anyai-sources.json --name "Your Org"
-anyai sources list "Your Org"
-```
-
-No account, no API key, no SDK. One static JSON file is the entire participation contract.
+A single manifest can expose multiple families — that's how you ship "use our 8B for fast, 70B for slow" choices behind one URL. The user picks which family to use; AnyAI tiers within it. No account, no API key, no SDK. One static JSON file is the entire participation contract.
 
 ---
 
@@ -437,98 +434,98 @@ No account, no API key, no SDK. One static JSON file is the entire participation
 ```jsonc
 {
   "name": "My Provider",         // display name
-  "version": "1",
+  "version": "4",
   "ttl_minutes": 360,            // how long AnyAI caches THIS file before re-fetching (default: 360).
                                  // Publisher's rate-limit signal — pick what fits your host.
-  "default_mode": "text",
+  "default_family": "gemma4",    // family used until the user picks one
 
-  "imports": [                   // optional: URLs to other manifests whose modes/tiers are merged in.
-    "https://example.com/base-tiers.json"
+  "imports": [                   // optional: URLs to other manifests whose families are merged in.
+    "https://example.com/base-families.json"
   ],
                                  // Each imported manifest is fetched + cached against ITS OWN ttl_minutes.
-                                 // Importing file wins on collision.
+                                 // Importing file wins on family-key collision.
 
-  "modes": {
-    "text": {
-      "label": "Text",
-      "tiers": [
-        // Tiers are walked top-to-bottom. First match wins.
-        // A tier matches if vram_gb >= min_vram_gb OR ram_gb >= min_ram_gb.
-        { "min_vram_gb": 24, "min_ram_gb": 48, "model": "qwen2.5:32b",  "fallback": "qwen2.5:14b" },
-        { "min_vram_gb": 12, "min_ram_gb": 24, "model": "qwen2.5:14b",  "fallback": "qwen2.5:7b"  },
-        { "min_vram_gb": 6,  "min_ram_gb": 12, "model": "qwen2.5:7b",   "fallback": "qwen2.5:3b"  },
-        { "min_vram_gb": 3,  "min_ram_gb": 6,  "model": "qwen2.5:3b",   "fallback": "tinyllama"   },
-        { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "tinyllama",    "fallback": "tinyllama"   }
-        // Always include a zero-threshold catch-all as the last tier.
-      ]
+  "families": {
+    "gemma4": {
+      "label": "Gemma 4",
+      "description": "Google Gemma 4 — versatile general-purpose models.",
+      "default_mode": "text",
+      "modes": {
+        "text": {
+          "label": "Text",
+          "tiers": [
+            // Tiers are walked top-to-bottom. First match wins.
+            // A tier matches if vram_gb >= min_vram_gb OR ram_gb >= min_ram_gb.
+            { "min_vram_gb": 20, "min_ram_gb": 40, "model": "gemma4:31b", "fallback": "gemma4:26b" },
+            { "min_vram_gb": 14, "min_ram_gb": 28, "model": "gemma4:26b", "fallback": "gemma4:e4b" },
+            { "min_vram_gb": 6,  "min_ram_gb": 12, "model": "gemma4:e4b", "fallback": "gemma4:e2b" },
+            { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "gemma4:e2b", "fallback": "gemma4:e2b" }
+            // Always include a zero-threshold catch-all as the last tier.
+          ]
+        }
+      }
     },
-    "vision": {
-      "label": "Vision",
-      "tiers": [
-        { "min_vram_gb": 12, "min_ram_gb": 16, "model": "qwen2.5vl:7b", "fallback": "llava:7b" },
-        { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "llava:7b",     "fallback": "llava:7b" }
-      ]
-    },
-    "code": {
-      "label": "Code",
-      "tiers": [
-        { "min_vram_gb": 12, "min_ram_gb": 24, "model": "qwen2.5-coder:14b", "fallback": "qwen2.5-coder:7b" },
-        { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "qwen2.5-coder:3b",  "fallback": "qwen2.5-coder:3b" }
-      ]
-    },
-    "transcribe": {
-      "label": "Transcribe",
-      "input": "audio",
-      "tiers": [
-        { "min_vram_gb": 8, "min_ram_gb": 16, "model": "whisper:large",  "fallback": "whisper:medium" },
-        { "min_vram_gb": 0, "min_ram_gb": 0,  "model": "whisper:base",   "fallback": "whisper:base"   }
-      ]
+    "qwen3": {
+      "label": "Qwen 3",
+      "default_mode": "text",
+      "modes": {
+        "text": {
+          "label": "Text",
+          "tiers": [
+            { "min_vram_gb": 24, "min_ram_gb": 48, "model": "qwen3.6:35b", "fallback": "qwen3.6:27b" },
+            { "min_vram_gb": 16, "min_ram_gb": 32, "model": "qwen3.6:27b", "fallback": "qwen3.5:9b"  },
+            { "min_vram_gb": 8,  "min_ram_gb": 16, "model": "qwen3.5:9b",  "fallback": "qwen3.5:1b"  },
+            { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "qwen3.5:1b",  "fallback": "qwen3.5:1b"  }
+          ]
+        }
+      }
     }
   }
 }
 ```
 
 **Rules:**
+- A family **must** define `default_mode` and at least one entry under `modes`.
 - `min_vram_gb` and `min_ram_gb` are checked with OR — either threshold qualifies.
 - Tiers walked top-to-bottom; first match wins.
 - Last tier should always be `min_vram_gb: 0, min_ram_gb: 0` as a catch-all.
 - `fallback` is tried if the primary model fails to pull.
-- Unknown modes and unknown fields are ignored — manifests are forward-compatible.
+- If the user's saved `active_family` doesn't exist in the manifest, the resolver falls back to `default_family`, then to the first family in document order.
+- Unknown fields are ignored — manifests are forward-compatible within the schema version.
 - `ttl_minutes` controls how long AnyAI caches **this file** before re-fetching (default 360). It is the publisher's rate-limit signal; AnyAI honours it.
-- `imports` lets a manifest pull modes/tiers from other manifests; each imported file obeys its own TTL and is cached separately.
+- `imports` lets a manifest pull families from other manifests; each imported file obeys its own TTL and is cached separately. Family-key collisions favour the importing file.
 
-Model tags are standard Ollama tags (e.g. `qwen2.5:14b`, `llama3.2:3b`). Anything in the [Ollama library](https://ollama.com/library) works.
+Model tags are standard Ollama tags (e.g. `gemma4:e4b`, `qwen3.5:9b`). Anything in the [Ollama library](https://ollama.com/library) works.
 
 ---
 
-## Imports & merged catalogs
+## Imports & merged manifests
 
-Both manifests and source catalogs accept an `imports` array of URLs to other files of the same kind:
+A manifest can `imports` other manifests by URL. Their families are merged into the importing file:
 
 ```jsonc
-// A source catalog at https://yourco.com/anyai/sources.json
+// A manifest at https://yourco.com/anyai/manifest.json
 {
   "name": "Your Org",
+  "version": "4",
   "ttl_minutes": 1440,
+  "default_family": "gemma4",
   "imports": [
-    "https://anyai.run/sources/index.json",         // pulls the AnyAI default catalog in
-    "https://partner.com/anyai/sources.json"        // and a partner's catalog
+    "https://anyai.run/manifests/default.json",     // pulls the AnyAI default families in
+    "https://partner.com/anyai/manifest.json"       // and a partner's family
   ],
-  "providers": [
-    { "name": "Company LLM", "url": "https://yourco.com/anyai/manifest.json" }
-  ]
+  "families": {
+    "company-llm": { "label": "Company LLM", "default_mode": "text", "modes": { /* … */ } }
+  }
 }
 ```
 
 **Resolution rules:**
 
-- Imports are walked recursively, depth-first, before the importing file's own entries are added.
+- Imports are walked recursively, depth-first, before the importing file's own families are added.
 - **Cycles are detected** by URL and broken silently — each URL appears once and only once in the merge.
-- **Each imported file has its own `ttl_minutes` and its own cache entry.** A daily top-level catalog importing an hourly catalog will see the hourly catalog refresh hourly without bumping the top-level fetch.
-- **Document order matters.** Imports are merged first, then the importing file's entries. On name collision, the importing file wins — the closer-to-you publisher gets the last word.
-- Each entry is tagged in the cache with the URL it came from, so the GUI / `sources list` can show "from `partner.com`" alongside the entry name.
-
-The same model applies to manifests: a small "tier scaffold" manifest can be imported by company-specific manifests that override only a few tiers.
+- **Each imported file has its own `ttl_minutes` and its own cache entry.** A daily top-level manifest importing an hourly manifest will see the hourly one refresh hourly without bumping the top-level fetch.
+- **Document order matters.** Imports are merged first, then the importing file's families. On family-key collision, the importing file wins — the closer-to-you publisher gets the last word.
 
 The "centralized" aspect of an org's setup is that one root JSON file. The decentralized aspect is that nothing forces it to be hosted in one place — federate by importing.
 
@@ -579,8 +576,8 @@ There are three distinct concepts. They are independent and do not interact.
 
 | Layer | What has a TTL | Who sets it | What happens when it expires |
 |-------|----------------|-------------|------------------------------|
-| **Source list** | Cached catalog from a source URL | Source publisher (`ttl_minutes`) | AnyAI silently re-fetches |
-| **Model list**  | Cached manifest from a provider URL | Provider publisher (`ttl_minutes`) | AnyAI silently re-fetches |
+| **Manifest** | Cached manifest from a provider URL | Provider publisher (`ttl_minutes`) | AnyAI silently re-fetches |
+| **Imported manifest** | Cached imports of the active manifest | Each import's publisher (`ttl_minutes`) | AnyAI silently re-fetches that one file |
 | **Model cleanup** | Pulled Ollama models no longer recommended | User (`model_cleanup_days`, default 1) | Model is deleted from disk |
 
 The first two are about freshness of remote data; the third is about disk cleanup.
@@ -589,7 +586,7 @@ The first two are about freshness of remote data; the third is about disk cleanu
 
 ### Model eviction
 
-A pulled model is **in use** if `resolveModel(your_hardware)` would return its tag for **any** provider across **all** your active sources and saved providers. AnyAI computes this set on every startup.
+A pulled model is **in use** if any saved provider's manifest mentions its tag in any family/mode/tier. AnyAI computes this set on every startup and after every provider/family change.
 
 When a model drops out of every provider's recommendation set, a clock starts. Once it's been unrecommended for longer than `model_cleanup_days` (default 1), it's deleted.
 
@@ -606,7 +603,7 @@ Startup:
 Cleanup triggers on:
 
 1. **App startup** — always.
-2. **Provider or source added/removed** — recomputes the recommendation set immediately.
+2. **Provider or family change** — recomputes the recommendation set immediately.
 3. **Pre-pull disk check** — if disk is tight, evicts unrecommended models before pulling.
 
 No model is ever deleted silently the moment you remove a provider. The clock starts when it becomes unrecommended; you have a full day (or whatever you set) before it's gone.
@@ -650,16 +647,17 @@ Every command supports `--json` for machine-readable output and `--quiet` to sup
 | `0` | Success |
 | `1` | User error (bad arguments, missing required config) |
 | `2` | Network or I/O error |
-| `3` | Not found (provider, source, or model doesn't exist) |
+| `3` | Not found (provider, family, or model doesn't exist) |
 | `4` | Resource conflict (e.g. removing the active provider) |
 
 Because the CLI is fully scriptable and `--json` outputs are stable, AnyAI can be set up or reconfigured by a running model:
 
 ```bash
-anyai sources list DeepSeek --json | jq '.providers[].name'
-anyai providers add --from DeepSeek "DeepSeek R1"
-anyai providers use "DeepSeek R1"
-anyai status --json | jq '{model, provider: .active_provider, hardware}'
+anyai providers add https://example.com/manifest.json --name "Example"
+anyai providers use "Example"
+anyai families --json | jq '.[].name'
+anyai families use qwen3
+anyai status --json | jq '{provider: .active_provider, family: .active_family, recommendations}'
 anyai run --mode code --quiet
 ```
 
@@ -675,27 +673,27 @@ AnyAI manages all its config files. You shouldn't need to open them — use the 
 
 ```
 ~/.anyai/
-├── config.json          # active provider, mode, cleanup, sources, providers, api, auto_update
+├── config.json          # active provider, active family, mode, cleanup, providers, api, auto_update
 ├── watcher.lock         # PID; cooperative process lock
 ├── updates/             # staged self-update binaries (<version>/anyai)
 └── cache/
-    ├── sources/         # cached source catalogs    (<hash>.json + fetched_at, per-URL)
     ├── manifests/       # cached provider manifests (<hash>.json + fetched_at, per-URL)
     └── model-status.json   # computed recommended-by set for all pulled models
 ```
 
-The `sources/` and `manifests/` caches store one entry per URL. When a file is reached via an `import`, it gets its own cache entry and obeys its own TTL.
+The `manifests/` cache stores one entry per URL. When a manifest reached via an `import`, it gets its own cache entry and obeys its own TTL.
 
 ### `~/.anyai/config.json`
 
 ```jsonc
 {
   "active_provider": "AnyAI Default",
+  "active_family": "gemma4",
   "active_mode": "text",
   "model_cleanup_days": 1,
-  "kept_models": ["qwen2.5:32b"],
+  "kept_models": ["qwen3.6:35b"],
   "mode_overrides": {
-    "code": "qwen2.5-coder:14b",
+    "code": "qwen3.5:9b",
     "transcribe": null
   },
   "api": {
@@ -711,19 +709,12 @@ The `sources/` and `manifests/` caches store one entry per URL. When a file is r
     "auto_apply": "patch",
     "check_interval_hours": 6
   },
-  "sources": [
-    { "name": "AnyAI",    "url": "https://anyai.run/sources/index.json" },
-    { "name": "DeepSeek", "url": "https://deepseek.com/anyai/sources.json" }
-  ],
   "providers": [
-    { "name": "AnyAI Default", "url": "https://anyai.run/manifest/default.json", "source": "AnyAI" },
-    { "name": "DeepSeek R1",   "url": "https://deepseek.com/anyai/r1.json",       "source": "DeepSeek" },
-    { "name": "Local Dev",     "url": "https://ai.internal/manifest.json",        "source": null }
+    { "name": "AnyAI Default", "url": "https://anyai.run/manifest/default.json" },
+    { "name": "Local Dev",     "url": "https://ai.internal/manifest.json" }
   ]
 }
 ```
-
-`source: null` = added directly by URL, not discovered via a source catalog.
 
 ---
 
@@ -765,35 +756,27 @@ cargo check --manifest-path src-tauri/Cargo.toml   # Rust
 See [ARCHITECTURE.md](ARCHITECTURE.md) for module-by-module roles. High level:
 
 ```
-src/             # TypeScript: config, manifest/source fetching with imports, lifecycle
+src/             # TypeScript: config, manifest fetching with imports, lifecycle
 src-tauri/src/   # Rust: API server, CLI, hardware/Ollama, resolver mirror, self-update
-manifests/       # bundled fallback manifest
-providers/       # bundled preset providers/sources (replace to repackage)
+manifests/       # bundled fallback manifest (with families)
+providers/       # bundled preset providers (replace to repackage)
 ```
 
 ---
 
 ## Repackaging for your org
 
-You don't need to fork the code — swap two JSON files and rebuild.
-
-**`providers/preset-sources.json`** — sources users start with:
-
-```json
-[
-  { "name": "Your Org", "url": "https://ai.yourco.com/anyai-sources.json" }
-]
-```
+You don't need to fork the code — swap one JSON file and rebuild.
 
 **`providers/preset.json`** — providers pre-loaded on first run:
 
 ```json
 [
-  { "name": "Company LLM",  "url": "https://ai.yourco.com/manifest.json",      "source": "Your Org" },
-  { "name": "Company Code", "url": "https://ai.yourco.com/code-manifest.json", "source": "Your Org" }
+  { "name": "Company LLM",  "url": "https://ai.yourco.com/manifest.json"      },
+  { "name": "Company Code", "url": "https://ai.yourco.com/code-manifest.json" }
 ]
 ```
 
 On first launch, AnyAI merges these into `~/.anyai/config.json`. Existing entries (by name) are never overwritten, so users who've customised their config are safe; defaults just appear in their list.
 
-Users can still add their own providers and sources on top. Company-provided entries have no special privilege — they're just pre-loaded defaults.
+Users can still add their own providers on top. Company-provided entries have no special privilege — they're just pre-loaded defaults.

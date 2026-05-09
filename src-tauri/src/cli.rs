@@ -9,8 +9,8 @@ pub async fn run(args: Vec<String>) -> Result<()> {
         Some("status") => cmd_status(&args[1..]).await,
         Some("stop") => cmd_stop().await,
         Some("models") => cmd_models(&args[1..]).await,
-        Some("sources") => cmd_sources(&args[1..]).await,
         Some("providers") => cmd_providers(&args[1..]).await,
+        Some("families") => cmd_families(&args[1..]).await,
         Some("import") => cmd_import(&args[1..]).await,
         Some("export") => cmd_export(&args[1..]).await,
         Some("update") => crate::self_update::cmd_update(&args[1..]).await,
@@ -44,11 +44,11 @@ COMMANDS:
   run           Start chat (terminal)
   serve         Start the OpenAI-compatible HTTP server
   preload       Pull and warm models for one or more modes
-  status        Show current state
+  status        Show current state (provider, family, recommended models)
   stop          Stop ollama serve
   models        Manage pulled models
-  sources       Manage provider sources
-  providers     Manage providers
+  providers     Manage providers (publishers of family manifests)
+  families      Pick the model family inside the active provider
   import <url>  Import config from URL or file
   export        Export config
   update        Update to the latest release (one shot: check + download + apply)
@@ -200,22 +200,45 @@ async fn chat_loop(model: &str, _mode: &str) -> Result<()> {
 async fn cmd_status(args: &[String]) -> Result<()> {
     let json = args.contains(&"--json".to_string());
     let hw = crate::hardware::detect()?;
+    let config = load_config()?;
 
-    let anyai_dir = crate::anyai_dir()?;
-    let config_path = anyai_dir.join("config.json");
-    let (active_provider, active_mode) = if config_path.exists() {
-        let config: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&config_path)?)?;
-        (
-            config["active_provider"]
-                .as_str()
-                .unwrap_or("(none)")
-                .to_string(),
-            config["active_mode"].as_str().unwrap_or("text").to_string(),
-        )
-    } else {
-        ("(none)".to_string(), "text".to_string())
-    };
+    let active_provider = config["active_provider"]
+        .as_str()
+        .unwrap_or("(none)")
+        .to_string();
+    let active_family = config["active_family"].as_str().unwrap_or("").to_string();
+    let active_mode = config["active_mode"].as_str().unwrap_or("text").to_string();
+
+    // Resolve recommendations for every tracked mode so the user can see the
+    // whole picture from one command — this is the headline feature of `status`.
+    let tracked: Vec<String> = config["tracked_modes"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_else(|| vec![active_mode.clone()]);
+
+    let mut recommendations: Vec<(String, Option<String>)> = Vec::new();
+    for m in &tracked {
+        let resolved = crate::resolver::resolve(m).await.ok();
+        recommendations.push((m.clone(), resolved));
+    }
+
+    // List the families the active provider exposes (if we can fetch its manifest).
+    let provider_url = crate::resolver::active_provider_url(&config);
+    let mut families: Vec<(String, String)> = Vec::new();
+    if let Some(url) = provider_url {
+        if let Ok(manifest) = crate::resolver::fetch_or_load_manifest(&url).await {
+            if let Some(fobj) = manifest["families"].as_object() {
+                for (name, family) in fobj {
+                    let label = family["label"].as_str().unwrap_or(name).to_string();
+                    families.push((name.clone(), label));
+                }
+            }
+        }
+    }
 
     let running = {
         let out = tokio::process::Command::new("curl")
@@ -226,17 +249,36 @@ async fn cmd_status(args: &[String]) -> Result<()> {
     };
 
     if json {
+        let recs_json: serde_json::Map<String, serde_json::Value> = recommendations
+            .iter()
+            .map(|(m, r)| {
+                (
+                    m.clone(),
+                    r.as_ref()
+                        .map(|s| serde_json::json!(s))
+                        .unwrap_or(serde_json::Value::Null),
+                )
+            })
+            .collect();
+        let fam_json: Vec<serde_json::Value> = families
+            .iter()
+            .map(|(k, l)| serde_json::json!({"name": k, "label": l}))
+            .collect();
         println!(
             "{}",
             serde_json::json!({
                 "active_provider": active_provider,
+                "active_family": active_family,
                 "active_mode": active_mode,
                 "ollama_running": running,
                 "hardware": hw,
+                "recommendations": recs_json,
+                "families": fam_json,
             })
         );
     } else {
         println!("Provider : {active_provider}");
+        println!("Family   : {active_family}");
         println!("Mode     : {active_mode}");
         println!("Ollama   : {}", if running { "running" } else { "stopped" });
         if let Some(soc) = hw.soc.as_deref() {
@@ -252,6 +294,22 @@ async fn cmd_status(args: &[String]) -> Result<()> {
         );
         println!("RAM      : {:.1} GB", hw.ram_gb);
         println!("Disk free: {:.1} GB", hw.disk_free_gb);
+
+        if !families.is_empty() {
+            println!("\nFamilies in {active_provider}:");
+            for (name, label) in &families {
+                let marker = if *name == active_family { "*" } else { " " };
+                println!(" {marker} {name:<14} {label}");
+            }
+        }
+
+        if !recommendations.is_empty() {
+            println!("\nRecommended models for this hardware:");
+            for (mode, resolved) in &recommendations {
+                let tag = resolved.as_deref().unwrap_or("(unresolved)");
+                println!("  {mode:<10} → {tag}");
+            }
+        }
     }
     Ok(())
 }
@@ -423,105 +481,6 @@ async fn cmd_models(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_sources(args: &[String]) -> Result<()> {
-    match args.first().map(|s| s.as_str()) {
-        None => {
-            let config = load_config()?;
-            let sources = config["sources"].as_array().cloned().unwrap_or_default();
-            for s in &sources {
-                println!(
-                    "  {}  {}",
-                    s["name"].as_str().unwrap_or("?"),
-                    s["url"].as_str().unwrap_or("?")
-                );
-            }
-        }
-        Some("add") => {
-            let url = args
-                .get(1)
-                .ok_or_else(|| anyhow!("usage: anyai sources add <url> --name <name>"))?;
-            let name = flag_value(args, "--name").unwrap_or_else(|| url.clone());
-            let mut config = load_config()?;
-            let sources = config["sources"]
-                .as_array_mut()
-                .ok_or_else(|| anyhow!("config missing sources array"))?;
-            if sources.iter().any(|s| s["name"].as_str() == Some(&name)) {
-                // Update URL
-                for s in sources.iter_mut() {
-                    if s["name"].as_str() == Some(&name) {
-                        s["url"] = serde_json::json!(url);
-                    }
-                }
-            } else {
-                sources.push(serde_json::json!({ "name": name, "url": url }));
-            }
-            save_config(&config)?;
-            println!("Source added: {name}");
-        }
-        Some("rm") => {
-            let name = args
-                .get(1)
-                .ok_or_else(|| anyhow!("usage: anyai sources rm <name>"))?;
-            let mut config = load_config()?;
-            if let Some(arr) = config["sources"].as_array_mut() {
-                arr.retain(|s| s["name"].as_str() != Some(name));
-            }
-            save_config(&config)?;
-            println!("Source removed: {name}");
-        }
-        Some("list") => {
-            let source_name = args
-                .get(1)
-                .ok_or_else(|| anyhow!("usage: anyai sources list <name>"))?;
-            let json = args.contains(&"--json".to_string());
-            let config = load_config()?;
-            let sources = config["sources"].as_array().cloned().unwrap_or_default();
-            let url = sources
-                .iter()
-                .find(|s| s["name"].as_str() == Some(source_name))
-                .and_then(|s| s["url"].as_str())
-                .ok_or_else(|| anyhow!("source '{source_name}' not found"))?
-                .to_string();
-            let v = crate::resolver::fetch_source_catalog(&url).await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&v)?);
-            } else {
-                for p in v["providers"].as_array().unwrap_or(&vec![]) {
-                    let origin = p["origin"].as_str().unwrap_or(&url);
-                    let suffix = if origin == url {
-                        String::new()
-                    } else {
-                        format!("  [from {origin}]")
-                    };
-                    println!(
-                        "  {}  —  {}{}",
-                        p["name"].as_str().unwrap_or("?"),
-                        p["description"].as_str().unwrap_or(""),
-                        suffix,
-                    );
-                }
-            }
-        }
-        Some("refresh") => {
-            println!("Sources refreshed (TTL-expired caches cleared)");
-            let cache_dir = crate::anyai_dir()?.join("cache/sources");
-            let _ = std::fs::remove_dir_all(&cache_dir);
-            let _ = std::fs::create_dir_all(&cache_dir);
-            // Also clear manifest caches so the next ensure pulls fresh data.
-            let manifest_cache = crate::anyai_dir()?.join("cache/manifests");
-            let _ = std::fs::remove_dir_all(&manifest_cache);
-            let _ = std::fs::create_dir_all(&manifest_cache);
-            crate::preload::ensure_tracked_models(false).await.ok();
-        }
-        Some("reset") => {
-            merge_preset_sources()?;
-            println!("Preset sources merged");
-        }
-        Some(unknown) => return Err(anyhow!("unknown sources subcommand: {unknown}")),
-    }
-    Ok(())
-}
-
 async fn cmd_providers(args: &[String]) -> Result<()> {
     match args.first().map(|s| s.as_str()) {
         None => {
@@ -539,7 +498,6 @@ async fn cmd_providers(args: &[String]) -> Result<()> {
                 .get(1)
                 .ok_or_else(|| anyhow!("usage: anyai providers add <url> --name <name>"))?;
             let name = flag_value(args, "--name").unwrap_or_else(|| url.clone());
-            let source = flag_value(args, "--source");
             let mut config = load_config()?;
             let providers = config["providers"]
                 .as_array_mut()
@@ -551,7 +509,7 @@ async fn cmd_providers(args: &[String]) -> Result<()> {
                     }
                 }
             } else {
-                providers.push(serde_json::json!({ "name": name, "url": url, "source": source }));
+                providers.push(serde_json::json!({ "name": name, "url": url }));
             }
             save_config(&config)?;
             println!("Provider added: {name}");
@@ -574,6 +532,22 @@ async fn cmd_providers(args: &[String]) -> Result<()> {
                 vec![]
             };
             config["active_provider"] = serde_json::json!(name);
+            // Reset active_family to whatever the new manifest considers default,
+            // so the resolver doesn't silently fall back to a stale name.
+            if let Some(url) = config["providers"]
+                .as_array()
+                .and_then(|a| a.iter().find(|p| p["name"].as_str() == Some(name)))
+                .and_then(|p| p["url"].as_str())
+                .map(str::to_string)
+            {
+                if let Ok(manifest) = crate::resolver::fetch_or_load_manifest(&url).await {
+                    if let Some(default_family) = manifest["default_family"].as_str() {
+                        if !default_family.is_empty() {
+                            config["active_family"] = serde_json::json!(default_family);
+                        }
+                    }
+                }
+            }
             save_config(&config)?;
             println!("Active provider: {name}");
 
@@ -620,17 +594,149 @@ async fn cmd_providers(args: &[String]) -> Result<()> {
                 .and_then(|p| p["url"].as_str())
                 .ok_or_else(|| anyhow!("provider '{target}' not found"))?
                 .to_string();
-            let out = tokio::process::Command::new("curl")
-                .args(["-sf", "--max-time", "10", &url])
-                .output()
-                .await?;
-            println!("{}", String::from_utf8_lossy(&out.stdout));
+            // Pretty-print the families this provider exposes; falling back to a
+            // raw fetch keeps `providers show <name>` debuggable when the
+            // manifest doesn't parse.
+            match crate::resolver::fetch_or_load_manifest(&url).await {
+                Ok(manifest) => {
+                    let active_family = config["active_family"].as_str().unwrap_or("");
+                    println!("{target}  ({url})");
+                    println!(
+                        "  default family : {}",
+                        manifest["default_family"].as_str().unwrap_or("?")
+                    );
+                    if let Some(fobj) = manifest["families"].as_object() {
+                        println!("  families:");
+                        for (name, family) in fobj {
+                            let marker = if name == active_family { "*" } else { " " };
+                            let label = family["label"].as_str().unwrap_or(name);
+                            println!("   {marker} {name:<14} {label}");
+                            if let Some(desc) = family["description"].as_str() {
+                                println!("       {desc}");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("(could not load manifest: {e})");
+                    let out = tokio::process::Command::new("curl")
+                        .args(["-sf", "--max-time", "10", &url])
+                        .output()
+                        .await?;
+                    println!("{}", String::from_utf8_lossy(&out.stdout));
+                }
+            }
         }
         Some("reset") => {
             merge_preset_providers()?;
             println!("Preset providers merged");
         }
         Some(unknown) => return Err(anyhow!("unknown providers subcommand: {unknown}")),
+    }
+    Ok(())
+}
+
+async fn cmd_families(args: &[String]) -> Result<()> {
+    let config = load_config()?;
+    let provider_url = crate::resolver::active_provider_url(&config)
+        .ok_or_else(|| anyhow!("no active provider; add one with `anyai providers add`"))?;
+    let manifest = crate::resolver::fetch_or_load_manifest(&provider_url).await?;
+    let active_family = config["active_family"].as_str().unwrap_or("").to_string();
+
+    match args.first().map(|s| s.as_str()) {
+        None | Some("--json") => {
+            let json = args.contains(&"--json".to_string());
+            let entries: Vec<(String, String, Option<String>)> = manifest["families"]
+                .as_object()
+                .map(|fobj| {
+                    fobj.iter()
+                        .map(|(name, f)| {
+                            (
+                                name.clone(),
+                                f["label"].as_str().unwrap_or(name).to_string(),
+                                f["description"].as_str().map(str::to_string),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if json {
+                let arr: Vec<_> = entries
+                    .iter()
+                    .map(|(name, label, desc)| {
+                        serde_json::json!({
+                            "name": name,
+                            "label": label,
+                            "description": desc,
+                            "active": *name == active_family,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&arr)?);
+            } else {
+                let provider_name = config["active_provider"].as_str().unwrap_or("(none)");
+                println!("Families in {provider_name}:");
+                for (name, label, desc) in &entries {
+                    let marker = if *name == active_family { "*" } else { " " };
+                    println!(" {marker} {name:<14} {label}");
+                    if let Some(d) = desc {
+                        println!("       {d}");
+                    }
+                }
+            }
+        }
+        Some("use") => {
+            let name = args
+                .get(1)
+                .ok_or_else(|| anyhow!("usage: anyai families use <name>"))?;
+            let exists = manifest["families"]
+                .as_object()
+                .map(|f| f.contains_key(name))
+                .unwrap_or(false);
+            if !exists {
+                return Err(anyhow!(
+                    "family '{name}' not found in active provider's manifest"
+                ));
+            }
+            let mut config = load_config()?;
+            config["active_family"] = serde_json::json!(name);
+            save_config(&config)?;
+            println!("Active family: {name}");
+            crate::preload::ensure_tracked_models(false).await.ok();
+        }
+        Some("show") => {
+            let target = args
+                .get(1)
+                .map(|s| s.as_str())
+                .unwrap_or(active_family.as_str());
+            let family = manifest["families"]
+                .get(target)
+                .ok_or_else(|| anyhow!("family '{target}' not found"))?;
+            let label = family["label"].as_str().unwrap_or(target);
+            println!("{target}  ({label})");
+            if let Some(desc) = family["description"].as_str() {
+                println!("  {desc}");
+            }
+            println!(
+                "  default mode: {}",
+                family["default_mode"].as_str().unwrap_or("text")
+            );
+            if let Some(modes) = family["modes"].as_object() {
+                for (mode_name, mode_spec) in modes {
+                    println!("\n  mode {mode_name}:");
+                    if let Some(tiers) = mode_spec["tiers"].as_array() {
+                        for tier in tiers {
+                            let vram = tier["min_vram_gb"].as_f64().unwrap_or(0.0);
+                            let ram = tier["min_ram_gb"].as_f64().unwrap_or(0.0);
+                            let model = tier["model"].as_str().unwrap_or("?");
+                            println!("    ≥{vram:>3.0} GB VRAM · ≥{ram:>3.0} GB RAM   {model}");
+                        }
+                    }
+                }
+            }
+        }
+        Some(unknown) => return Err(anyhow!("unknown families subcommand: {unknown}")),
     }
     Ok(())
 }
@@ -653,20 +759,6 @@ async fn cmd_import(args: &[String]) -> Result<()> {
         .map_err(|_| anyhow!("invalid config JSON at {url_or_path}"))?;
     let mut config = load_config()?;
 
-    // Merge sources by name
-    if let Some(new_sources) = imported["sources"].as_array() {
-        let existing = config["sources"]
-            .as_array_mut()
-            .ok_or_else(|| anyhow!("config missing sources"))?;
-        for s in new_sources {
-            let name = s["name"].as_str().unwrap_or("");
-            if !existing.iter().any(|e| e["name"].as_str() == Some(name)) {
-                existing.push(s.clone());
-                println!("+ source: {name}");
-            }
-        }
-    }
-
     // Merge providers by name
     if let Some(new_providers) = imported["providers"].as_array() {
         let existing = config["providers"]
@@ -688,17 +780,8 @@ async fn cmd_import(args: &[String]) -> Result<()> {
 
 async fn cmd_export(args: &[String]) -> Result<()> {
     let as_url = args.contains(&"--url".to_string());
-    let sources_only = args.contains(&"--sources-only".to_string());
-    let providers_only = args.contains(&"--providers-only".to_string());
-
     let config = load_config()?;
-    let mut export = serde_json::json!({});
-    if !providers_only {
-        export["sources"] = config["sources"].clone();
-    }
-    if !sources_only {
-        export["providers"] = config["providers"].clone();
-    }
+    let export = serde_json::json!({ "providers": config["providers"].clone() });
 
     if as_url {
         let encoded = base64_encode(&export.to_string());
@@ -783,27 +866,6 @@ pub fn load_config() -> Result<serde_json::Value> {
 
 fn save_config(config: &serde_json::Value) -> Result<()> {
     crate::resolver::save_config_value(config)
-}
-
-fn merge_preset_sources() -> Result<()> {
-    let preset_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../providers/preset-sources.json");
-    if !preset_path.exists() {
-        return Ok(());
-    }
-    let preset: Vec<serde_json::Value> =
-        serde_json::from_str(&std::fs::read_to_string(preset_path)?)?;
-    let mut config = load_config()?;
-    let sources = config["sources"]
-        .as_array_mut()
-        .ok_or_else(|| anyhow!("config missing sources"))?;
-    for s in preset {
-        let name = s["name"].as_str().unwrap_or("").to_string();
-        if !sources.iter().any(|e| e["name"].as_str() == Some(&name)) {
-            sources.push(s);
-        }
-    }
-    save_config(&config)
 }
 
 fn merge_preset_providers() -> Result<()> {

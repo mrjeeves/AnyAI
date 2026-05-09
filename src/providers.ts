@@ -1,6 +1,6 @@
 import { loadConfig, saveConfig } from "./config";
-import { getManifest } from "./manifest";
-import type { Provider, Manifest } from "./types";
+import { getManifest, pickFamily } from "./manifest";
+import type { Provider, Manifest, ManifestFamily } from "./types";
 
 export async function getProviders(): Promise<Provider[]> {
   const config = await loadConfig();
@@ -16,6 +16,22 @@ export async function getActiveManifest(): Promise<Manifest> {
   const provider = await getActiveProvider();
   if (!provider) return getManifest("bundled://default");
   return getManifest(provider.url);
+}
+
+/**
+ * Resolve the family the user has currently selected against the active
+ * manifest. Falls back to `default_family`, then to the first family in
+ * document order. Returns `null` only if the manifest has no families at all.
+ */
+export async function getActiveFamily(): Promise<{ name: string; family: ManifestFamily } | null> {
+  const [config, manifest] = await Promise.all([loadConfig(), getActiveManifest()]);
+  return pickFamily(manifest, config.active_family);
+}
+
+export async function setActiveFamily(name: string): Promise<void> {
+  const config = await loadConfig();
+  config.active_family = name;
+  await saveConfig(config);
 }
 
 export async function addProvider(provider: Provider): Promise<void> {
@@ -44,6 +60,17 @@ export async function setActiveProvider(name: string): Promise<void> {
     throw new Error(`Provider '${name}' not found`);
   }
   config.active_provider = name;
+  // Switching providers may invalidate the saved family — reset to the new
+  // manifest's default rather than letting the resolver fall back silently.
+  try {
+    const provider = config.providers.find((p) => p.name === name)!;
+    const manifest = await getManifest(provider.url);
+    const picked = pickFamily(manifest, config.active_family);
+    if (picked) config.active_family = picked.name;
+    else if (manifest.default_family) config.active_family = manifest.default_family;
+  } catch {
+    // Network or parse failure shouldn't block the provider swap; fall through.
+  }
   await saveConfig(config);
 }
 
