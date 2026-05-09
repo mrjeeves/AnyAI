@@ -209,7 +209,26 @@ fn main() {
     if cli_mode {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async {
-            if let Err(e) = cli::run(args[1..].to_vec()).await {
+            // Race the subcommand against Ctrl-C so we always reach the
+            // cleanup line below — `anyai run` blocks on stdin in a sync
+            // chat loop, and a bare Ctrl-C there would terminate the
+            // process before any Drop or post-await code runs, leaving
+            // the spawned `ollama serve` orphaned. Subcommands that
+            // install their own Ctrl-C handler (e.g. `anyai serve` for
+            // graceful axum shutdown) resolve this race themselves first.
+            let result = tokio::select! {
+                r = cli::run(args[1..].to_vec()) => r,
+                _ = tokio::signal::ctrl_c() => {
+                    eprintln!("\nShutting down…");
+                    Ok(())
+                }
+            };
+            // Mirrors the GUI's RunEvent::Exit handler. ollama::stop() is a
+            // no-op when AnyAI didn't spawn the daemon (the static
+            // OLLAMA_PROCESS slot is empty for user-managed installs), so
+            // this never disturbs an ollama the user started themselves.
+            let _ = ollama::stop().await;
+            if let Err(e) = result {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
