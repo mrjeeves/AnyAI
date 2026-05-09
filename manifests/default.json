@@ -1,6 +1,6 @@
 {
   "name": "AnyAI Default",
-  "version": "2",
+  "version": "3",
   "ttl_minutes": 360,
   "default_mode": "text",
   "modes": {
@@ -10,11 +10,11 @@
         { "min_vram_gb": 24, "min_ram_gb": 48, "model": "qwen3.6:35b", "fallback": "gemma4:31b"  },
         { "min_vram_gb": 20, "min_ram_gb": 40, "model": "gemma4:31b",  "fallback": "qwen3.6:27b" },
         { "min_vram_gb": 16, "min_ram_gb": 32, "model": "qwen3.6:27b", "fallback": "gemma4:26b"  },
-        { "min_vram_gb": 14, "min_ram_gb": 24, "model": "gemma4:26b",  "fallback": "qwen3.5:9b"  },
-        { "min_vram_gb": 6,  "min_ram_gb": 12, "model": "qwen3.5:9b",  "fallback": "gemma4:e4b"  },
-        { "min_vram_gb": 4,  "min_ram_gb": 10, "model": "gemma4:e4b",  "fallback": "qwen3.5:2b"  },
-        { "min_vram_gb": 2,  "min_ram_gb": 6,  "model": "qwen3.5:2b",  "fallback": "llama3.2:1b" },
-        { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "llama3.2:1b", "fallback": "llama3.2:1b" }
+        { "min_vram_gb": 14, "min_ram_gb": 28, "model": "gemma4:26b",  "fallback": "qwen3.5:9b"  },
+        { "min_vram_gb": 8,  "min_ram_gb": 16, "model": "qwen3.5:9b",   "fallback": "gemma4:e4b"    },
+        { "min_vram_gb": 6,  "min_ram_gb": 12, "model": "gemma4:e4b",   "fallback": "gemma3n:e2b"   },
+        { "min_vram_gb": 4,  "min_ram_gb": 8,  "model": "gemma3n:e2b",  "fallback": "llama3.2:1b"   },
+        { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "llama3.2:1b",  "fallback": "llama3.2:1b"   }
       ]
     }
   }

@@ -143,7 +143,7 @@ export function resolveModel(
   const modeSpec = manifest.modes[mode] ?? manifest.modes[manifest.default_mode];
   if (!modeSpec) return "tinyllama";
 
-  const vram = hardware.vram_gb ?? 0;
+  const vram = effectiveVramGb(hardware);
   const ram = hardware.ram_gb;
 
   for (const tier of modeSpec.tiers) {
@@ -152,6 +152,22 @@ export function resolveModel(
     }
   }
   return modeSpec.tiers.at(-1)!.model;
+}
+
+/**
+ * VRAM the resolver should credit toward `min_vram_gb` checks.
+ *
+ * Discrete GPUs (NVIDIA, AMD) own their VRAM separately from system RAM, so
+ * a 12 GB card lets the model live entirely off-CPU and the tier check is
+ * meaningful. On Apple Silicon and integrated GPUs, "VRAM" is just a slice
+ * of the same physical pool `ram_gb` already counts — crediting it again
+ * means an 8 GB Mac matches a tier wanting `vram>=6`, picks a 9 B model,
+ * and grinds at ~1 token / 10 s while the OS swaps. Treat non-discrete
+ * vram as 0 so those systems are tiered purely on `ram_gb`.
+ */
+function effectiveVramGb(hw: HardwareProfile): number {
+  if (hw.gpu_type === "nvidia" || hw.gpu_type === "amd") return hw.vram_gb ?? 0;
+  return 0;
 }
 
 /** All model tags recommended by a manifest across all tiers and modes. */
