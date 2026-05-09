@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getModelStatusWithMeta, keepModel, unkeepModel, setModeOverride, pruneNow } from "../../model-lifecycle";
+  import { getModelStatusWithMeta, keepModel, unkeepModel, setModeOverride, pruneNow, recomputeRecommendedSet } from "../../model-lifecycle";
   import { getAllManifests } from "../../providers";
   import { loadConfig } from "../../config";
   import type { Mode } from "../../types";
@@ -35,6 +35,11 @@
 
   async function reload() {
     loading = true;
+    // Refresh the recommended-by set against currently saved manifests before
+    // reading. Otherwise a model pulled this session — including the one the
+    // resolver just picked — keeps showing as "unrecommended" until the next
+    // cleanup pass writes the cache.
+    try { await recomputeRecommendedSet(); } catch {}
     models = await getModelStatusWithMeta();
     loading = false;
   }
