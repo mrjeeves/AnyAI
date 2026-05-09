@@ -97,7 +97,9 @@ async fn ollama_chat(model: String, messages: serde_json::Value) -> Result<Strin
 ///
 /// Channel scheme: `anyai://chat-stream/{stream_id}` — the frontend picks
 /// the id so it can subscribe before invoking, and so concurrent streams
-/// don't collide.
+/// don't collide. Frames carry exactly one of `delta` (visible content),
+/// `thinking_delta` (reasoning from thinking models), or `done: true` with
+/// a `cancelled` flag set when the stream ended via `ollama_chat_cancel`.
 #[tauri::command]
 async fn ollama_chat_stream(
     stream_id: String,
@@ -107,28 +109,43 @@ async fn ollama_chat_stream(
 ) -> Result<(), String> {
     use tauri::Emitter;
     let event = format!("anyai://chat-stream/{stream_id}");
-    let emit_window = window.clone();
-    let emit_event = event.clone();
+    let content_window = window.clone();
+    let content_event = event.clone();
+    let thinking_window = window.clone();
+    let thinking_event = event.clone();
     let done_window = window.clone();
     let done_event = event.clone();
     ollama::chat_stream(
+        &stream_id,
         &model,
         messages,
         move |delta| {
-            let _ = emit_window.emit(
-                &emit_event,
-                serde_json::json!({ "delta": delta, "done": false }),
+            let _ = content_window.emit(&content_event, serde_json::json!({ "delta": delta }));
+        },
+        move |delta| {
+            let _ = thinking_window.emit(
+                &thinking_event,
+                serde_json::json!({ "thinking_delta": delta }),
             );
         },
-        move || {
+        move |outcome| {
+            let cancelled = matches!(outcome, ollama::ChatStreamOutcome::Cancelled);
             let _ = done_window.emit(
                 &done_event,
-                serde_json::json!({ "delta": "", "done": true }),
+                serde_json::json!({ "done": true, "cancelled": cancelled }),
             );
         },
     )
     .await
+    .map(|_| ())
     .map_err(|e| e.to_string())
+}
+
+/// Abort an in-flight `ollama_chat_stream`. Idempotent: silently no-ops if
+/// the id isn't streaming (already finished, never started, etc.).
+#[tauri::command]
+async fn ollama_chat_cancel(stream_id: String) {
+    ollama::cancel_chat(&stream_id).await;
 }
 
 #[tauri::command]
@@ -219,6 +236,7 @@ fn main() {
             resolve_virtual_model,
             ollama_chat,
             ollama_chat_stream,
+            ollama_chat_cancel,
             update_status,
             update_check_now,
             update_apply_now,
