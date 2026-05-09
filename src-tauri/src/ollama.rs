@@ -420,6 +420,40 @@ pub async fn delete_model(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Effective context window for `model`, in tokens. Asks Ollama's
+/// `/api/show` and walks the `model_info` map for any key ending in
+/// `.context_length` (each architecture uses its own prefix:
+/// `gemma3.context_length`, `qwen3.context_length`, …). Falls back to 4096
+/// when the daemon doesn't report one — small enough that the saturation
+/// ring stays meaningful instead of pretending the budget is infinite.
+pub async fn model_context_length(model: &str) -> Result<u32> {
+    ensure_running().await?;
+    let client = reqwest::Client::builder()
+        .pool_idle_timeout(Duration::from_secs(30))
+        .build()
+        .context("reqwest client")?;
+    let resp = client
+        .post("http://127.0.0.1:11434/api/show")
+        .json(&serde_json::json!({ "model": model }))
+        .send()
+        .await
+        .context("POST /api/show")?;
+    if !resp.status().is_success() {
+        return Ok(4096);
+    }
+    let v: serde_json::Value = resp.json().await.context("parse /api/show")?;
+    if let Some(map) = v.get("model_info").and_then(|m| m.as_object()) {
+        for (k, val) in map {
+            if k.ends_with(".context_length") {
+                if let Some(n) = val.as_u64() {
+                    return Ok(n.min(u32::MAX as u64) as u32);
+                }
+            }
+        }
+    }
+    Ok(4096)
+}
+
 /// Outcome of a streamed chat call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatStreamOutcome {
@@ -571,17 +605,24 @@ pub async fn cancel_chat(stream_id: &str) {
 /// `http://tauri.localhost`) — the daemon answers 403. Calling Ollama from
 /// Rust via reqwest sidesteps that entirely: reqwest doesn't set an Origin
 /// header, so Ollama treats the request as same-origin and lets it through.
-pub async fn chat_once(model: &str, messages: serde_json::Value) -> Result<String> {
+pub async fn chat_once(
+    model: &str,
+    messages: serde_json::Value,
+    options: Option<serde_json::Value>,
+) -> Result<String> {
     ensure_running().await?;
     let client = reqwest::Client::builder()
         .pool_idle_timeout(Duration::from_secs(30))
         .build()
         .context("reqwest client")?;
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "messages": messages,
         "stream": false,
     });
+    if let Some(opts) = options {
+        body["options"] = opts;
+    }
     let resp = client
         .post("http://127.0.0.1:11434/api/chat")
         .json(&body)

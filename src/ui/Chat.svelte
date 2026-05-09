@@ -1,10 +1,17 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import ModeBar from "./ModeBar.svelte";
   import StatusBar from "./StatusBar.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
+  import {
+    loadConversation,
+    saveConversation,
+    newConversation,
+    generateTitle,
+    type Conversation,
+    type StoredMessage,
+  } from "../conversations";
   import type { HardwareProfile, Mode } from "../types";
 
   let {
@@ -13,22 +20,32 @@
     activeFamily,
     supportedModes,
     hardware,
+    sidebarOpen,
+    conversationId,
+    newChatCounter,
+    onToggleSidebar,
     onModeChange,
     onProviderChange,
+    onConversationChanged,
   } = $props<{
     activeModel: string;
     activeMode: Mode;
     activeFamily: string;
     supportedModes: Set<Mode>;
     hardware: HardwareProfile | null;
+    sidebarOpen: boolean;
+    conversationId: string | null;
+    /** Bumped by App when the user clicks "New chat". Watching this in an
+     *  effect lets the panel reset cleanly even when the chat is already
+     *  empty (so re-clicks still feel responsive). */
+    newChatCounter: number;
+    onToggleSidebar: () => void;
     onModeChange: (mode: Mode) => void;
     onProviderChange: () => void;
+    onConversationChanged: (id: string) => void;
   }>();
 
-  interface Message {
-    role: "user" | "assistant";
-    content: string;
-    thinking?: string;
+  interface Message extends StoredMessage {
     streaming?: boolean;
   }
 
@@ -47,11 +64,104 @@
   let settingsTab = $state<"providers" | "families" | "models" | "storage" | null>(null);
   let messagesEl: HTMLElement;
 
+  /** Loaded conversation snapshot. We keep the full record (id + metadata)
+   *  here so saves don't need to re-read the file just to preserve fields
+   *  the chat panel doesn't display. */
+  let activeConversation = $state<Conversation | null>(null);
+  /** Model context window (tokens). Refreshed when the model changes. 0 =
+   *  not yet known — ModeBar hides the saturation block in that case. */
+  let contextSize = $state(0);
+
+  // -----------------------------------------------------------------------
+  // Token estimation. Chars/4 is the standard rough-cut estimate for
+  // BPE-like tokenizers — accurate enough for a saturation indicator and
+  // free, vs. tokenizing on every keystroke. The exact prompt_eval_count
+  // from Ollama refines `contextSizeUsedExact` after each turn lands.
+  // -----------------------------------------------------------------------
+  function approxTokens(s: string): number {
+    if (!s) return 0;
+    // Round up so a tiny message still counts as ≥1 token.
+    return Math.ceil(s.length / 4);
+  }
+
+  const tokensUsed = $derived.by(() => {
+    let total = 0;
+    for (const m of messages) {
+      total += approxTokens(m.content);
+      if (m.thinking) total += approxTokens(m.thinking);
+    }
+    total += approxTokens(input);
+    return total;
+  });
+
   $effect(() => {
     // Scroll to bottom when messages change
     if (messagesEl) {
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
+  });
+
+  // Refresh context window whenever the active model changes. Failures
+  // (model missing, daemon not yet up) leave the indicator hidden.
+  $effect(() => {
+    const model = activeModel;
+    if (!model) {
+      contextSize = 0;
+      return;
+    }
+    let cancelled = false;
+    invoke<number>("ollama_model_context", { model })
+      .then((n) => {
+        if (!cancelled) contextSize = n || 0;
+      })
+      .catch(() => {
+        if (!cancelled) contextSize = 0;
+      });
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  // Load (or create) a conversation when the parent points us at one.
+  $effect(() => {
+    const id = conversationId;
+    if (!id) {
+      // null = empty chat (parent's "New chat" or initial mount).
+      activeConversation = null;
+      messages = [];
+      return;
+    }
+    let cancelled = false;
+    loadConversation(id).then((c) => {
+      if (cancelled) return;
+      if (!c) {
+        activeConversation = null;
+        messages = [];
+        return;
+      }
+      activeConversation = c;
+      messages = c.messages.map((m) => ({ ...m }));
+    });
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  // "New chat" button: parent bumps the counter, we drop local state.
+  // Skip the first run — Svelte fires the effect once at mount, and we
+  // don't want to clobber a conversation freshly loaded by the
+  // `conversationId` effect above.
+  let _seenInitialNewChat = false;
+  $effect(() => {
+    // Read the dep so Svelte tracks it.
+    void newChatCounter;
+    if (!_seenInitialNewChat) {
+      _seenInitialNewChat = true;
+      return;
+    }
+    activeConversation = null;
+    messages = [];
+    input = "";
   });
 
   /** Append `delta` to either `content` or `thinking` on the assistant
@@ -74,13 +184,46 @@
     return messages.length - 1;
   }
 
+  /** Persist the current message list under `activeConversation`, creating
+   *  the record on first save. Keeps disk in sync with whatever the user
+   *  sees, including thinking blocks. */
+  async function persist(): Promise<Conversation> {
+    let conv = activeConversation;
+    if (!conv) {
+      conv = newConversation(activeMode, activeModel, activeFamily);
+    } else {
+      // Track the latest model/family/mode used in this conversation.
+      conv.model = activeModel;
+      conv.family = activeFamily;
+      conv.mode = activeMode;
+    }
+    conv.messages = messages.map(({ role, content, thinking }) => {
+      const out: StoredMessage = { role, content };
+      if (thinking) out.thinking = thinking;
+      return out;
+    });
+    await saveConversation(conv);
+    activeConversation = conv;
+    onConversationChanged(conv.id);
+    return conv;
+  }
+
   async function send() {
     const text = input.trim();
     if (!text || streaming) return;
     input = "";
+    const wasFreshChat = messages.length === 0;
     const history = [...messages, { role: "user" as const, content: text }];
     messages = history;
     streaming = true;
+
+    // Save the user turn immediately so a crash mid-stream doesn't lose it.
+    let conv: Conversation | null = null;
+    try {
+      conv = await persist();
+    } catch (e) {
+      console.warn("save before send failed:", e);
+    }
 
     // Per-call channel so concurrent (or rapidly retried) streams can't
     // crosstalk. crypto.randomUUID is available in the Tauri WebView.
@@ -133,6 +276,31 @@
         messages = next;
       }
       unlisten?.();
+      try {
+        await persist();
+      } catch (e) {
+        console.warn("save after stream failed:", e);
+      }
+      // Auto-title: only on the very first user turn of a fresh
+      // conversation, and only if the title is still the placeholder.
+      // Runs out-of-band so it can't block the chat from feeling responsive.
+      if (wasFreshChat && conv && (conv.title === "New chat" || !conv.title)) {
+        const seed = text;
+        const model = activeModel;
+        generateTitle(model, seed)
+          .then(async (title) => {
+            const fresh = activeConversation;
+            if (!fresh) return;
+            // Only overwrite if the user hasn't manually renamed it in the
+            // sidebar between when we kicked off the call and now.
+            if (fresh.title === "New chat" || !fresh.title) {
+              fresh.title = title;
+              await saveConversation(fresh);
+              onConversationChanged(fresh.id);
+            }
+          })
+          .catch(() => {});
+      }
     }
   }
 
@@ -154,11 +322,16 @@
   }
 
   async function handleModeChange(mode: Mode) {
-    messages = []; // Clear history on mode switch
+    // Mode is part of the conversation record; switching modes implicitly
+    // starts a new chat so model behaviour and the saved transcript stay
+    // coherent (transcribe vs. text history have different shapes).
+    activeConversation = null;
+    messages = [];
     await onModeChange(mode);
   }
 
   async function handleProviderChange() {
+    activeConversation = null;
     messages = [];
     settingsTab = null;
     await onProviderChange();
@@ -170,6 +343,8 @@
     model={activeModel}
     mode={activeMode}
     family={activeFamily}
+    {sidebarOpen}
+    {onToggleSidebar}
     onOpenSettings={(tab) => (settingsTab = tab)}
   />
 
@@ -204,7 +379,13 @@
     {/if}
   </div>
 
-  <ModeBar current={activeMode} supported={supportedModes} onChange={handleModeChange} />
+  <ModeBar
+    current={activeMode}
+    supported={supportedModes}
+    {tokensUsed}
+    {contextSize}
+    onChange={handleModeChange}
+  />
 
   <div class="input-row">
     <textarea
@@ -231,7 +412,8 @@
 
 <style>
   .chat-shell {
-    height: 100vh;
+    flex: 1;
+    min-width: 0;
     display: flex;
     flex-direction: column;
     position: relative;

@@ -4,11 +4,18 @@
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import FirstRun from "./FirstRun.svelte";
   import Chat from "./Chat.svelte";
+  import Sidebar from "./Sidebar.svelte";
   import { loadConfig, updateConfig } from "../config";
   import { getActiveManifest } from "../providers";
   import { resolveModel, pickFamily, familyModes } from "../manifest";
   import { runCleanup } from "../model-lifecycle";
   import { onModeSwap } from "../watcher";
+  import {
+    listConversations,
+    deleteConversation,
+    renameConversation,
+    type ConversationMeta,
+  } from "../conversations";
   import type { HardwareProfile, Mode } from "../types";
 
   let unsubSwap: (() => void) | null = null;
@@ -52,6 +59,16 @@
   let supportedModes = $state<Set<Mode>>(new Set(["text", "vision", "code", "transcribe"]));
   let error = $state("");
 
+  // Sidebar state. We keep the conversation list at App scope so a fresh
+  // conversation created by Chat shows up across remounts.
+  let sidebarOpen = $state(true);
+  let conversations = $state<ConversationMeta[]>([]);
+  let activeConversationId = $state<string | null>(null);
+  /** Bumped to ask Chat to create a fresh conversation. Plain counter so
+   *  re-clicks of "New chat" still trigger a reset even when the chat is
+   *  already empty. */
+  let newChatCounter = $state(0);
+
   /**
    * Modes the active family inside the active manifest actually has tiers
    * for. Falls back to all four before the manifest loads so the bar isn't
@@ -65,6 +82,10 @@
     const picked = pickFamily(manifest, familyName);
     if (!picked) return new Set();
     return familyModes(picked.family);
+  }
+
+  async function refreshConversations() {
+    conversations = await listConversations();
   }
 
   onMount(async () => {
@@ -100,6 +121,9 @@
           view = "chat";
         }
       }
+
+      // Seed the sidebar early so it's ready when the chat view paints.
+      refreshConversations().catch(() => {});
 
       // Local heartbeat + remote-active subscription. Run alongside the chat
       // session: the heartbeat keeps the tracker from misclassifying the
@@ -180,6 +204,34 @@
       activeFamilyName,
     );
   }
+
+  function onSelectConversation(id: string) {
+    activeConversationId = id;
+  }
+
+  function onNewConversation() {
+    activeConversationId = null;
+    newChatCounter += 1;
+  }
+
+  async function onRenameConversation(id: string, title: string) {
+    await renameConversation(id, title);
+    await refreshConversations();
+  }
+
+  async function onDeleteConversation(id: string) {
+    await deleteConversation(id);
+    if (activeConversationId === id) {
+      activeConversationId = null;
+      newChatCounter += 1;
+    }
+    await refreshConversations();
+  }
+
+  function onConversationChanged(id: string) {
+    activeConversationId = id;
+    refreshConversations().catch(() => {});
+  }
 </script>
 
 <div class="app" class:curtained={remoteActive}>
@@ -194,15 +246,32 @@
     {#if error}
       <div class="error-banner">⚠ Startup failed: {error}</div>
     {/if}
-    <Chat
-      {activeModel}
-      {activeMode}
-      activeFamily={activeFamilyName}
-      {supportedModes}
-      {hardware}
-      {onModeChange}
-      {onProviderChange}
-    />
+    <div class="layout">
+      <Sidebar
+        open={sidebarOpen}
+        items={conversations}
+        activeId={activeConversationId}
+        onSelect={onSelectConversation}
+        onNew={onNewConversation}
+        onRename={onRenameConversation}
+        onDelete={onDeleteConversation}
+        onClose={() => (sidebarOpen = false)}
+      />
+      <Chat
+        {activeModel}
+        {activeMode}
+        activeFamily={activeFamilyName}
+        {supportedModes}
+        {hardware}
+        {sidebarOpen}
+        conversationId={activeConversationId}
+        {newChatCounter}
+        onToggleSidebar={() => (sidebarOpen = !sidebarOpen)}
+        onModeChange={onModeChange}
+        onProviderChange={onProviderChange}
+        onConversationChanged={onConversationChanged}
+      />
+    </div>
   {/if}
 
   {#if remoteActive}
@@ -254,6 +323,11 @@
     height: 100vh;
     display: flex;
     flex-direction: column;
+  }
+  .layout {
+    flex: 1;
+    display: flex;
+    min-height: 0;
   }
   .error-banner {
     background: #3a1717;
