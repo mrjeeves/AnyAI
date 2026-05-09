@@ -1,6 +1,6 @@
 [package]
 name = "anyai"
-version = "0.1.14"
+version = "0.1.5"
 description = "AnyAI — detect hardware, pick best local model, start it."
 authors = []
 license = "MIT"
