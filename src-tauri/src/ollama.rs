@@ -414,6 +414,76 @@ pub async fn delete_model(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Streamed chat completion. Calls `on_delta` for each token chunk and
+/// `on_done` once when the stream ends. Same CORS-bypass rationale as
+/// `chat_once`.
+pub async fn chat_stream<FD, FE>(
+    model: &str,
+    messages: serde_json::Value,
+    mut on_delta: FD,
+    on_done: FE,
+) -> Result<()>
+where
+    FD: FnMut(&str),
+    FE: FnOnce(),
+{
+    ensure_running().await?;
+    let client = reqwest::Client::builder()
+        .pool_idle_timeout(Duration::from_secs(30))
+        .build()
+        .context("reqwest client")?;
+    let body = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "stream": true,
+    });
+    let resp = client
+        .post("http://127.0.0.1:11434/api/chat")
+        .json(&body)
+        .send()
+        .await
+        .context("POST /api/chat")?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("ollama HTTP {status}: {text}"));
+    }
+
+    // Frames are NDJSON. Buffer + split on '\n' since chunks can carry
+    // partial frames or several at once (same shape as /api/pull).
+    let mut stream = resp.bytes_stream();
+    let mut buf: Vec<u8> = Vec::with_capacity(4 * 1024);
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("read /api/chat stream")?;
+        buf.extend_from_slice(&chunk);
+        while let Some(nl) = buf.iter().position(|b| *b == b'\n') {
+            let line = buf.drain(..=nl).collect::<Vec<u8>>();
+            let line = &line[..line.len() - 1];
+            if line.is_empty() {
+                continue;
+            }
+            let v: serde_json::Value = match serde_json::from_slice(line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+                return Err(anyhow!("ollama error: {err}"));
+            }
+            if let Some(delta) = v["message"]["content"].as_str() {
+                if !delta.is_empty() {
+                    on_delta(delta);
+                }
+            }
+            if v["done"].as_bool().unwrap_or(false) {
+                on_done();
+                return Ok(());
+            }
+        }
+    }
+    on_done();
+    Ok(())
+}
+
 /// One-shot non-streaming chat completion against the local Ollama daemon.
 ///
 /// Used by the Tauri GUI chat: going through the WebView's fetch fails on

@@ -92,6 +92,45 @@ async fn ollama_chat(model: String, messages: serde_json::Value) -> Result<Strin
         .map_err(|e| e.to_string())
 }
 
+/// Streamed counterpart of `ollama_chat`. Emits per-token deltas on the
+/// caller-supplied event channel so the GUI can paint incrementally.
+///
+/// Channel scheme: `anyai://chat-stream/{stream_id}` — the frontend picks
+/// the id so it can subscribe before invoking, and so concurrent streams
+/// don't collide.
+#[tauri::command]
+async fn ollama_chat_stream(
+    stream_id: String,
+    model: String,
+    messages: serde_json::Value,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
+    use tauri::Emitter;
+    let event = format!("anyai://chat-stream/{stream_id}");
+    let emit_window = window.clone();
+    let emit_event = event.clone();
+    let done_window = window.clone();
+    let done_event = event.clone();
+    ollama::chat_stream(
+        &model,
+        messages,
+        move |delta| {
+            let _ = emit_window.emit(
+                &emit_event,
+                serde_json::json!({ "delta": delta, "done": false }),
+            );
+        },
+        move || {
+            let _ = done_window.emit(
+                &done_event,
+                serde_json::json!({ "delta": "", "done": true }),
+            );
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn update_status() -> Result<self_update::UpdateStatus, String> {
     self_update::status().map_err(|e| e.to_string())
@@ -179,6 +218,7 @@ fn main() {
             ensure_tracked_models,
             resolve_virtual_model,
             ollama_chat,
+            ollama_chat_stream,
             update_status,
             update_check_now,
             update_apply_now,
