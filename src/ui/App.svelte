@@ -19,6 +19,23 @@
    *  local UI is curtained off and a non-dismissable toast is shown — single
    *  user only, so the desktop sits out until the remote disconnects. */
   let remoteActive = $state(false);
+  let kicking = $state(false);
+
+  async function kickRemote(disable: boolean) {
+    if (kicking) return;
+    kicking = true;
+    try {
+      const status = await invoke<{ remote_active: boolean }>("remote_ui_kick", { disable });
+      // The backend already drops remote sessions and refuses heartbeats
+      // for KICK_HOLDOFF; surface the resulting flag immediately so the
+      // curtain doesn't linger an extra event-loop tick.
+      remoteActive = !!status.remote_active;
+    } catch (e) {
+      console.error("kick failed:", e);
+    } finally {
+      kicking = false;
+    }
+  }
 
   /** Stable per-process session id so the tracker can distinguish multiple
    *  Tauri windows (rare but possible) from the genuine remote browsers. */
@@ -197,13 +214,23 @@
     -->
     <div class="remote-curtain" role="dialog" aria-modal="true" aria-label="In use remotely">
       <div class="remote-toast">
-        <span class="remote-dot"></span>
-        <div>
-          <div class="remote-title">In use remotely</div>
-          <div class="remote-sub">
-            Another device on your network is using AnyAI. Single-user, so this window is paused
-            until they disconnect.
+        <div class="remote-head">
+          <span class="remote-dot"></span>
+          <div>
+            <div class="remote-title">In use remotely</div>
+            <div class="remote-sub">
+              Another device on your network is using AnyAI. Single-user, so this window is paused
+              until they disconnect.
+            </div>
           </div>
+        </div>
+        <div class="remote-actions">
+          <button class="kick" onclick={() => kickRemote(false)} disabled={kicking}>
+            Kick
+          </button>
+          <button class="kick-hide" onclick={() => kickRemote(true)} disabled={kicking}>
+            Kick &amp; Hide
+          </button>
         </div>
       </div>
     </div>
@@ -287,7 +314,7 @@
   }
   .remote-toast {
     display: flex;
-    align-items: flex-start;
+    flex-direction: column;
     gap: 0.85rem;
     padding: 1rem 1.15rem;
     background: #131320;
@@ -297,6 +324,47 @@
     color: #e8e8e8;
     max-width: 32rem;
     margin: 1rem;
+  }
+  .remote-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.85rem;
+  }
+  .remote-actions {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+  .remote-actions button {
+    padding: 0.45rem 0.85rem;
+    border-radius: 7px;
+    font: inherit;
+    font-size: 0.8rem;
+    cursor: pointer;
+    border: 1px solid;
+  }
+  .remote-actions button:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .remote-actions .kick {
+    background: #1a1a2a;
+    border-color: #2a2a3a;
+    color: #e8e8e8;
+  }
+  .remote-actions .kick:hover:not(:disabled) {
+    background: #22223a;
+    border-color: #3a3a55;
+  }
+  .remote-actions .kick-hide {
+    background: #2a1818;
+    border-color: #4a2222;
+    color: #ffb4b4;
+  }
+  .remote-actions .kick-hide:hover:not(:disabled) {
+    background: #381e1e;
+    border-color: #5a2a2a;
   }
   .remote-dot {
     width: 10px;

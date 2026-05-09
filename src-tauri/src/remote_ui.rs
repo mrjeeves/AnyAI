@@ -40,6 +40,11 @@ use tokio_util::sync::CancellationToken;
 /// curtain prematurely.
 const SESSION_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// How long a kick blocks new remote heartbeats. Long enough that a phone
+/// can't simply pull-to-refresh and beat the local user back into the UI;
+/// short enough that the user doesn't have to think about clearing it.
+const KICK_HOLDOFF: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SessionKind {
     Local,
@@ -55,6 +60,10 @@ struct Session {
 #[derive(Default)]
 struct Tracker {
     sessions: HashMap<String, Session>,
+    /// While `Some` and in the future, remote heartbeats are rejected and
+    /// existing remote sessions stay cleared. Set by `kick()`; expires
+    /// naturally after `KICK_HOLDOFF`.
+    kick_until: Option<Instant>,
 }
 
 impl Tracker {
@@ -68,11 +77,22 @@ impl Tracker {
         );
     }
 
+    fn is_kicked(&self) -> bool {
+        self.kick_until.map(|t| Instant::now() < t).unwrap_or(false)
+    }
+
     /// Drop expired entries and report whether any *remote* session is alive.
     fn sweep_and_remote_active(&mut self) -> bool {
         let now = Instant::now();
         self.sessions
             .retain(|_, s| now.duration_since(s.last_seen) <= SESSION_TIMEOUT);
+        // Clear the kick window once it's elapsed so the field doesn't
+        // linger forever as a stale "kicked at X" marker.
+        if let Some(t) = self.kick_until {
+            if now >= t {
+                self.kick_until = None;
+            }
+        }
         self.sessions
             .values()
             .any(|s| s.kind == SessionKind::Remote)
@@ -136,6 +156,21 @@ pub fn register_local_heartbeat(session_id: &str) {
         .lock()
         .unwrap()
         .touch(session_id, SessionKind::Local);
+    refresh_active();
+}
+
+/// Boot every remote session out of the tracker and refuse new ones for
+/// `KICK_HOLDOFF`. The browser shell sees a 403 from `/api/heartbeat` and
+/// flips into a "you were disconnected" state instead of silently
+/// reconnecting on the next 5s tick.
+pub fn kick() {
+    {
+        let s = state();
+        let mut t = s.tracker.lock().unwrap();
+        t.sessions
+            .retain(|_, sess| sess.kind != SessionKind::Remote);
+        t.kick_until = Some(Instant::now() + KICK_HOLDOFF);
+    }
     refresh_active();
 }
 
@@ -311,17 +346,21 @@ struct HeartbeatBody {
     session_id: String,
 }
 
-async fn api_heartbeat(
-    State(_): State<AppState>,
-    Json(body): Json<HeartbeatBody>,
-) -> impl IntoResponse {
-    state()
-        .tracker
-        .lock()
-        .unwrap()
-        .touch(&body.session_id, SessionKind::Remote);
+async fn api_heartbeat(State(_): State<AppState>, Json(body): Json<HeartbeatBody>) -> Response {
+    {
+        let s = state();
+        let mut t = s.tracker.lock().unwrap();
+        if t.is_kicked() {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "kicked", "message": "Disconnected by host" })),
+            )
+                .into_response();
+        }
+        t.touch(&body.session_id, SessionKind::Remote);
+    }
     refresh_active();
-    Json(json!({ "ok": true }))
+    Json(json!({ "ok": true })).into_response()
 }
 
 #[derive(Serialize)]
@@ -354,14 +393,21 @@ async fn api_chat(
     _headers: HeaderMap,
     Json(body): Json<ChatBody>,
 ) -> Response {
-    if let Some(sid) = &body.session_id {
-        state()
-            .tracker
-            .lock()
-            .unwrap()
-            .touch(sid, SessionKind::Remote);
-        refresh_active();
+    {
+        let s = state();
+        let mut t = s.tracker.lock().unwrap();
+        if t.is_kicked() {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "kicked", "message": "Disconnected by host" })),
+            )
+                .into_response();
+        }
+        if let Some(sid) = &body.session_id {
+            t.touch(sid, SessionKind::Remote);
+        }
     }
+    refresh_active();
     let resolved = match crate::resolver::translate_virtual(&body.model).await {
         Ok(r) => r,
         Err(e) => {
@@ -409,14 +455,21 @@ async fn api_chat_stream(
     _headers: HeaderMap,
     Json(body): Json<ChatBody>,
 ) -> Response {
-    if let Some(sid) = &body.session_id {
-        state()
-            .tracker
-            .lock()
-            .unwrap()
-            .touch(sid, SessionKind::Remote);
-        refresh_active();
+    {
+        let s = state();
+        let mut t = s.tracker.lock().unwrap();
+        if t.is_kicked() {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "kicked", "message": "Disconnected by host" })),
+            )
+                .into_response();
+        }
+        if let Some(sid) = &body.session_id {
+            t.touch(sid, SessionKind::Remote);
+        }
     }
+    refresh_active();
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<
         std::result::Result<Event, std::convert::Infallible>,
