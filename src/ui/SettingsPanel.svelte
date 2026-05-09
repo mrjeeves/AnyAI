@@ -3,9 +3,10 @@
   import FamiliesSection from "./settings/FamiliesSection.svelte";
   import ModelsSection from "./settings/ModelsSection.svelte";
   import StorageSection from "./settings/StorageSection.svelte";
+  import HardwareSection from "./settings/HardwareSection.svelte";
   import UpdatesSection from "./settings/UpdatesSection.svelte";
 
-  type Tab = "providers" | "families" | "models" | "storage" | "updates";
+  type Tab = "providers" | "families" | "models" | "storage" | "hardware" | "updates";
 
   let { initialTab = "families", onClose, onChanged } = $props<{
     initialTab?: Tab;
@@ -21,6 +22,7 @@
     { id: "providers", label: "Providers" },
     { id: "models",    label: "Models" },
     { id: "storage",   label: "Storage" },
+    { id: "hardware",  label: "Hardware" },
     { id: "updates",   label: "Updates" },
   ];
 </script>
@@ -50,6 +52,8 @@
         <ModelsSection />
       {:else if active === "storage"}
         <StorageSection setActive={(t) => (active = t)} />
+      {:else if active === "hardware"}
+        <HardwareSection setActive={(t) => (active = t)} />
       {:else if active === "updates"}
         <UpdatesSection />
       {/if}
