@@ -227,6 +227,35 @@
         .msg .body.streaming::after,
         details.thinking[data-active="true"] > summary::after { animation: none; }
       }
+
+      .kicked-overlay {
+        position: fixed; inset: 0;
+        background: rgba(7, 7, 12, .92);
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+        z-index: 9999;
+        display: flex; align-items: center; justify-content: center;
+        padding: 1rem;
+      }
+      .kicked-card {
+        max-width: 22rem;
+        background: #1a1313;
+        border: 1px solid #4a2222;
+        border-radius: 12px;
+        padding: 1.1rem 1.25rem;
+        text-align: center;
+      }
+      .kicked-title {
+        font-size: 1rem;
+        font-weight: 600;
+        color: #ffb4b4;
+        margin-bottom: .35rem;
+      }
+      .kicked-sub {
+        font-size: .85rem;
+        color: #c9a;
+        line-height: 1.5;
+      }
     </style>
   </head>
   <body>
@@ -265,17 +294,42 @@
       const messages = [];
       let inflight = null;
 
+      let heartbeatTimer = null;
+      let kicked = false;
+
       async function heartbeat() {
         try {
-          await fetch("/api/heartbeat", {
+          const r = await fetch("/api/heartbeat", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ session_id: SESSION_ID }),
           });
+          if (r.status === 403) {
+            // Host pressed "Kick" / "Kick & Hide" — stop reconnecting and
+            // show the disconnect overlay until the user closes the tab.
+            handleKicked();
+          }
         } catch {}
       }
       heartbeat();
-      setInterval(heartbeat, 5000);
+      heartbeatTimer = setInterval(heartbeat, 5000);
+
+      function handleKicked() {
+        if (kicked) return;
+        kicked = true;
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
+        if (inflight) inflight.abort();
+        const overlay = document.createElement("div");
+        overlay.className = "kicked-overlay";
+        overlay.innerHTML =
+          '<div class="kicked-card">' +
+          '<div class="kicked-title">Disconnected</div>' +
+          '<div class="kicked-sub">The host kicked this device. Close this tab to release the connection.</div>' +
+          "</div>";
+        document.body.appendChild(overlay);
+        sendBtn.disabled = true;
+        input.disabled = true;
+      }
 
       async function loadModels() {
         try {
@@ -377,6 +431,11 @@
           });
         } catch (e) {
           if (e.name !== "AbortError") handlers.onError(String(e));
+          handlers.onDone();
+          return;
+        }
+        if (r.status === 403) {
+          handleKicked();
           handlers.onDone();
           return;
         }

@@ -216,6 +216,24 @@ fn remote_ui_local_heartbeat(session_id: String) {
     remote_ui::register_local_heartbeat(&session_id);
 }
 
+/// Disconnect every remote browser. With `disable: true` also persists
+/// `remote_ui.enabled = false` and tears down the listening socket so the
+/// kicked device can't reconnect at all (matches "Kick & Hide" in the
+/// curtain). With `disable: false` the server stays up; the tracker
+/// rejects new heartbeats for a brief holdoff window so a quick refresh
+/// from the phone doesn't slip past the kick.
+#[tauri::command]
+async fn remote_ui_kick(disable: bool) -> Result<RemoteUiStatus, String> {
+    remote_ui::kick();
+    if disable {
+        let mut cfg = resolver::load_config_value().map_err(|e| e.to_string())?;
+        cfg["remote_ui"]["enabled"] = serde_json::json!(false);
+        resolver::save_config_value(&cfg).map_err(|e| e.to_string())?;
+        remote_ui::stop().await;
+    }
+    remote_ui_status()
+}
+
 #[tauri::command]
 fn update_status() -> Result<self_update::UpdateStatus, String> {
     self_update::status().map_err(|e| e.to_string())
@@ -331,6 +349,7 @@ fn main() {
             remote_ui_set_enabled,
             remote_ui_qr,
             remote_ui_local_heartbeat,
+            remote_ui_kick,
         ])
         .setup(|app| {
             // If the configured 800x600 window can't fit on this monitor —
