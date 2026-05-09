@@ -111,7 +111,25 @@ fn update_apply_now(app: tauri::AppHandle) {
     app.restart();
 }
 
+/// WebKitGTK's DMA-BUF zero-copy renderer produces scrambled / torn frames
+/// on Raspberry Pi GPUs under Wayland — the window draws but content is
+/// unreadable, looking like the graphics "don't fit on screen." Disabling
+/// DMABUF falls back to a software-composited path that renders correctly.
+/// We only flip this on Linux + aarch64 because that's where the breakage
+/// lives; x86_64 desktops keep the fast path. Honors a user-set value so
+/// anyone wanting to re-enable DMABUF on hardware that doesn't have the
+/// bug can still do so via `WEBKIT_DISABLE_DMABUF_RENDERER=0 anyai`.
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+fn workaround_pi_webkit_dmabuf() {
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+}
+
 fn main() {
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    workaround_pi_webkit_dmabuf();
+
     // If invoked from CLI with arguments, handle as CLI and exit before starting GUI.
     let args: Vec<String> = std::env::args().collect();
     let cli_mode = args.len() > 1;
