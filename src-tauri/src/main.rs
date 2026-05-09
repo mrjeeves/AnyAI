@@ -4,6 +4,7 @@
 mod api;
 mod api_models;
 mod cli;
+mod conversations;
 mod hardware;
 mod ollama;
 mod preload;
@@ -105,6 +106,23 @@ async fn ollama_model_context(model: String) -> Result<u32, String> {
     ollama::model_context_length(&model)
         .await
         .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Active conversation — shared local ↔ remote pointer to the conversation
+// the user currently has open. The desktop UI sets it on every sidebar
+// click so a remote phone connecting mid-session lands on the same
+// transcript; the remote sets it for the inverse handoff when it closes.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn get_active_conversation() -> Option<String> {
+    remote_ui::active_conversation_now()
+}
+
+#[tauri::command]
+fn set_active_conversation(id: Option<String>) {
+    remote_ui::set_active_conversation(id);
 }
 
 /// Streamed counterpart of `ollama_chat`. Emits per-token deltas on the
@@ -357,6 +375,8 @@ fn main() {
             ollama_chat_stream,
             ollama_chat_cancel,
             ollama_model_context,
+            get_active_conversation,
+            set_active_conversation,
             update_status,
             update_check_now,
             update_apply_now,
@@ -446,6 +466,27 @@ fn main() {
                         }
                         let active = *rx.borrow();
                         let _ = app_handle.emit("anyai://remote-active-changed", active);
+                    }
+                });
+            }
+
+            // Bridge `remote_ui::subscribe_active_conversation()` → Tauri
+            // event. The desktop UI listens so a conversation switch made
+            // by the remote phone lands on the desktop sidebar without a
+            // refresh. Same shape as the curtain bridge above.
+            {
+                use tauri::Emitter;
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut rx = remote_ui::subscribe_active_conversation();
+                    let initial = rx.borrow().clone();
+                    let _ = app_handle.emit("anyai://active-conversation-changed", initial);
+                    loop {
+                        if rx.changed().await.is_err() {
+                            break;
+                        }
+                        let id = rx.borrow().clone();
+                        let _ = app_handle.emit("anyai://active-conversation-changed", id);
                     }
                 });
             }

@@ -228,6 +228,169 @@
         details.thinking[data-active="true"] > summary::after { animation: none; }
       }
 
+      /* ----- Sidebar (conversations) ----- */
+      .layout {
+        position: relative;
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+      }
+      .sidebar {
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: min(82vw, 280px);
+        background: #0b0b0b;
+        border-right: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        z-index: 30;
+        transform: translateX(-100%);
+        transition: transform .18s ease;
+        padding-top: var(--safe-top);
+      }
+      .sidebar.open { transform: translateX(0); }
+      .sidebar-head {
+        display: flex; align-items: center; gap: .35rem;
+        padding: .5rem .55rem;
+        border-bottom: 1px solid #161616;
+      }
+      .sidebar-head .new {
+        flex: 1;
+        display: flex; align-items: center; gap: .45rem;
+        background: none;
+        border: 1px solid #2a2a2a;
+        color: #ccc;
+        padding: .45rem .6rem;
+        border-radius: 8px;
+        font: inherit;
+        font-size: .85rem;
+        cursor: pointer;
+        min-height: 38px;
+      }
+      .sidebar-head .new:hover { border-color: #3a3a55; color: #fff; background: #131320; }
+      .sidebar-head .close {
+        background: none; border: none;
+        color: #777; cursor: pointer;
+        padding: .35rem .45rem;
+        border-radius: 6px;
+        font-size: 1.05rem;
+        line-height: 1;
+      }
+      .sidebar-head .close:hover { background: #1a1a1a; color: #ccc; }
+      .sidebar-list {
+        flex: 1;
+        overflow-y: auto;
+        padding: .35rem .25rem .75rem;
+        -webkit-overflow-scrolling: touch;
+      }
+      .sidebar-list .group {
+        font-size: .68rem;
+        text-transform: uppercase;
+        letter-spacing: .04em;
+        color: #555;
+        padding: .55rem .65rem .25rem;
+      }
+      .sidebar-list .row {
+        display: flex; align-items: center; gap: .35rem;
+        padding: .45rem .5rem;
+        margin: 1px 0;
+        border-radius: 7px;
+        color: #bbb;
+        font-size: .87rem;
+        cursor: pointer;
+        position: relative;
+      }
+      .sidebar-list .row:hover { background: #161616; color: #e8e8e8; }
+      .sidebar-list .row.active { background: #1c1c2e; color: #fff; }
+      .sidebar-list .row .title {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .sidebar-list .row .kebab {
+        background: none; border: none;
+        color: #555;
+        cursor: pointer;
+        padding: .25rem .35rem;
+        border-radius: 5px;
+        font-size: 1rem;
+        line-height: 1;
+        opacity: 0;
+        transition: opacity .12s;
+      }
+      .sidebar-list .row:hover .kebab,
+      .sidebar-list .row.active .kebab { opacity: 1; }
+      /* On touch devices the kebab is the only way to reach Rename / Delete
+         (no hover state), so always show it. */
+      @media (pointer: coarse) {
+        .sidebar-list .row .kebab { opacity: 1; }
+      }
+      .sidebar-list .rename {
+        flex: 1;
+        background: #1a1a1a;
+        border: 1px solid #3a3a55;
+        color: #fff;
+        padding: .25rem .4rem;
+        border-radius: 5px;
+        font: inherit;
+        font-size: .85rem;
+        min-width: 0;
+      }
+      .sidebar-list .rename:focus { outline: none; border-color: var(--accent); }
+      .sidebar-list .empty-row {
+        color: #555; font-size: .8rem;
+        text-align: center; padding: 1rem;
+      }
+      .sidebar-scrim {
+        position: absolute;
+        inset: 0;
+        background: rgba(0, 0, 0, .35);
+        z-index: 25;
+      }
+      .menu {
+        position: fixed;
+        z-index: 60;
+        background: #131320;
+        border: 1px solid #2a2a3a;
+        border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, .5);
+        padding: .25rem;
+        display: flex; flex-direction: column;
+        min-width: 140px;
+      }
+      .menu button {
+        text-align: left;
+        background: none; border: none;
+        color: #e8e8e8;
+        font: inherit;
+        font-size: .85rem;
+        padding: .5rem .65rem;
+        border-radius: 5px;
+        cursor: pointer;
+      }
+      .menu button:hover { background: #1f1f33; }
+      .menu button.danger { color: #ff8b8b; }
+      .menu button.danger:hover { background: #2a1818; }
+      .menu-scrim {
+        position: fixed; inset: 0;
+        z-index: 55;
+        background: transparent;
+      }
+
+      .hamburger {
+        background: none;
+        border: none;
+        color: #888;
+        cursor: pointer;
+        padding: .35rem .45rem;
+        border-radius: 6px;
+        line-height: 1;
+        font-size: 1.1rem;
+      }
+      .hamburger:hover { background: #1a1a1a; color: #ccc; }
+
       .kicked-overlay {
         position: fixed; inset: 0;
         background: rgba(7, 7, 12, .92);
@@ -261,19 +424,30 @@
   <body>
     <div class="app">
       <header>
+        <button class="hamburger" id="hamburger" aria-label="Show conversations" title="Conversations">☰</button>
         <div class="brand">AnyAI <small>remote</small></div>
         <select class="model" id="model"></select>
       </header>
-      <main id="log">
-        <div class="empty" id="empty">
-          You're chatting with this AnyAI instance over the LAN.<br />
-          Send a message to start.
-        </div>
-      </main>
-      <footer>
-        <textarea id="input" rows="1" placeholder="Message…"></textarea>
-        <button class="send" id="send">Send</button>
-      </footer>
+      <div class="layout">
+        <aside class="sidebar" id="sidebar" aria-hidden="true">
+          <div class="sidebar-head">
+            <button class="new" id="newChatBtn">+ New chat</button>
+            <button class="close" id="closeSidebar" aria-label="Hide conversations">×</button>
+          </div>
+          <div class="sidebar-list" id="sidebarList"></div>
+        </aside>
+        <div class="sidebar-scrim" id="sidebarScrim" hidden></div>
+        <main id="log">
+          <div class="empty" id="empty">
+            You're chatting with this AnyAI instance over the LAN.<br />
+            Send a message to start.
+          </div>
+        </main>
+        <footer>
+          <textarea id="input" rows="1" placeholder="Message…"></textarea>
+          <button class="send" id="send">Send</button>
+        </footer>
+      </div>
     </div>
     <script>
       const SESSION_ID = (() => {
@@ -291,11 +465,25 @@
       const input = document.getElementById("input");
       const sendBtn = document.getElementById("send");
       const modelSel = document.getElementById("model");
+      const hamburger = document.getElementById("hamburger");
+      const sidebar = document.getElementById("sidebar");
+      const sidebarScrim = document.getElementById("sidebarScrim");
+      const closeSidebar = document.getElementById("closeSidebar");
+      const sidebarList = document.getElementById("sidebarList");
+      const newChatBtn = document.getElementById("newChatBtn");
       const messages = [];
       let inflight = null;
 
+      // Conversation state. activeId mirrors the backend pointer; conv is the
+      // full record (including any thinking blocks loaded from disk). Both go
+      // null while the user is on a fresh "New chat" surface.
+      let activeId = null;
+      let conv = null;
+      let conversations = [];
+
       let heartbeatTimer = null;
       let kicked = false;
+      let initialActiveLoaded = false;
 
       async function heartbeat() {
         try {
@@ -308,6 +496,15 @@
             // Host pressed "Kick" / "Kick & Hide" — stop reconnecting and
             // show the disconnect overlay until the user closes the tab.
             handleKicked();
+            return;
+          }
+          // First successful heartbeat: load whatever conversation the
+          // local desktop had open so the phone lands on the same
+          // transcript instead of an empty chat.
+          if (!initialActiveLoaded) {
+            initialActiveLoaded = true;
+            loadActiveFromServer();
+            loadConversations();
           }
         } catch {}
       }
@@ -536,16 +733,20 @@
         if (!text || inflight) return;
         input.value = "";
         input.style.height = "auto";
+        const wasFreshChat = messages.length === 0;
         appendUserMsg(text);
         messages.push({ role: "user", content: text });
         const slot = appendAssistantBubble();
         let assistantContent = "";
         let assistantThinking = "";
+        const modelAtSend = modelSel.value || "anyai-text";
         setSending(true);
         await streamChat(
           {
-            model: modelSel.value || "anyai-text",
-            messages,
+            model: modelAtSend,
+            // The Ollama API rejects unknown fields like `thinking`, so strip
+            // to `{role, content}` before sending the history upstream.
+            messages: messages.map((m) => ({ role: m.role, content: m.content })),
             session_id: SESSION_ID,
           },
           {
@@ -573,11 +774,13 @@
               appendErrorMsg(msg);
               messages.pop();
             },
-            onDone() {
+            async onDone() {
               slot.body.classList.remove("streaming");
               slot.thinkDetails.dataset.active = "false";
               if (assistantContent) {
-                messages.push({ role: "assistant", content: assistantContent });
+                const stored = { role: "assistant", content: assistantContent };
+                if (assistantThinking) stored.thinking = assistantThinking;
+                messages.push(stored);
               } else if (slot.wrap.parentNode) {
                 // Empty assistant bubble (e.g. user aborted before any token)
                 slot.wrap.remove();
@@ -585,9 +788,434 @@
               }
               setSending(false);
               input.focus();
+              // Persist the conversation. On the very first turn create a
+              // fresh record (id, timestamps, model snapshot); on later
+              // turns just refresh `messages` + `updated_at`.
+              try {
+                await persistConversation(modelAtSend);
+              } catch (e) {
+                console.warn("persist failed", e);
+              }
+              // Auto-title runs out-of-band so it can't block the input
+              // from coming back. Only fires on the first turn of a new
+              // chat where the title is still the placeholder.
+              if (wasFreshChat && conv && (conv.title === "New chat" || !conv.title)) {
+                generateTitleAsync(modelAtSend, text);
+              }
             },
           },
         );
+      }
+
+      // -------------------------------------------------------------------
+      // Conversation persistence (calls the LAN HTTP endpoints; the local
+      // desktop UI talks to the same files via Tauri commands).
+      // -------------------------------------------------------------------
+
+      function newConvId() {
+        return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+      }
+
+      async function api(path, opts) {
+        const r = await fetch(path, opts);
+        if (r.status === 403) {
+          handleKicked();
+          throw new Error("kicked");
+        }
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        if (r.status === 204) return null;
+        const ct = r.headers.get("content-type") || "";
+        return ct.includes("json") ? r.json() : r.text();
+      }
+
+      async function persistConversation(modelTag) {
+        const now = new Date().toISOString();
+        if (!conv) {
+          conv = {
+            id: newConvId(),
+            title: "New chat",
+            mode: "text",
+            model: modelTag,
+            family: "",
+            created_at: now,
+            updated_at: now,
+            messages: [],
+          };
+          activeId = conv.id;
+        } else {
+          conv.model = modelTag;
+        }
+        conv.messages = messages.map((m) => {
+          const out = { role: m.role, content: m.content };
+          if (m.thinking) out.thinking = m.thinking;
+          return out;
+        });
+        conv.updated_at = now;
+        await api(`/api/conversations/${conv.id}`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(conv),
+        });
+        await setActiveServer(conv.id);
+        await loadConversations();
+      }
+
+      function cleanTitle(raw) {
+        if (!raw) return "";
+        let t = String(raw).replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+        t = t.replace(/^title\s*[:\-]\s*/i, "").trim();
+        t = t.replace(/^["'`]+|["'`]+$/g, "").trim();
+        t = t.split(/\r?\n/, 1)[0].trim();
+        if (t.length > 60) t = t.slice(0, 60).trimEnd() + "…";
+        return t;
+      }
+      function fallbackTitle(seed) {
+        const flat = String(seed).replace(/\s+/g, " ").trim();
+        return flat.length > 48 ? flat.slice(0, 48).trimEnd() + "…" : flat || "New chat";
+      }
+
+      async function generateTitleAsync(model, seed) {
+        const trimmed = String(seed || "").trim().slice(0, 240);
+        if (!trimmed || !conv) return;
+        const targetId = conv.id;
+        let title;
+        try {
+          const j = await api("/api/chat", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              model,
+              session_id: SESSION_ID,
+              messages: [
+                {
+                  role: "user",
+                  content:
+                    "Write a 3-5 word title for a chat that opens with the message below. " +
+                    "Reply with ONLY the title — no quotes, no punctuation, no preamble.\n\n" +
+                    trimmed,
+                },
+              ],
+              options: { num_predict: 16, temperature: 0.3 },
+            }),
+          });
+          title = cleanTitle(j && j.content) || fallbackTitle(trimmed);
+        } catch {
+          title = fallbackTitle(trimmed);
+        }
+        // The user may have renamed it via the kebab menu while we waited;
+        // only overwrite if the title is still the placeholder.
+        if (!conv || conv.id !== targetId) return;
+        if (conv.title && conv.title !== "New chat") return;
+        conv.title = title;
+        conv.updated_at = new Date().toISOString();
+        try {
+          await api(`/api/conversations/${conv.id}`, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(conv),
+          });
+          await loadConversations();
+        } catch {}
+      }
+
+      async function setActiveServer(id) {
+        try {
+          await api("/api/active-conversation", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ id: id || null }),
+          });
+        } catch {}
+      }
+
+      async function loadActiveFromServer() {
+        try {
+          const j = await api("/api/active-conversation");
+          if (j && j.id) await switchToConversation(j.id);
+        } catch {}
+      }
+
+      async function loadConversations() {
+        try {
+          const j = await api("/api/conversations");
+          conversations = (j && j.items) || [];
+          renderSidebar();
+        } catch {}
+      }
+
+      // -------------------------------------------------------------------
+      // Switching / clearing / rendering
+      // -------------------------------------------------------------------
+
+      function clearChatSurface() {
+        // Tear down every message bubble; the .empty placeholder is
+        // re-created lazily by appendUserMsg / appendAssistantBubble.
+        log.innerHTML = "";
+        log.appendChild(empty);
+        messages.length = 0;
+      }
+
+      function renderHistoricalMessage(m) {
+        if (m.role === "user") {
+          appendUserMsg(m.content);
+          return;
+        }
+        if (empty.parentNode) empty.remove();
+        const wrap = document.createElement("div");
+        wrap.className = "msg assistant";
+        if (m.thinking) {
+          const det = document.createElement("details");
+          det.className = "thinking";
+          const sum = document.createElement("summary");
+          sum.textContent = "Thoughts";
+          const body = document.createElement("div");
+          body.className = "think-body";
+          body.textContent = m.thinking;
+          det.appendChild(sum);
+          det.appendChild(body);
+          wrap.appendChild(det);
+        }
+        const body = document.createElement("span");
+        body.className = "body";
+        body.textContent = m.content;
+        wrap.appendChild(body);
+        log.appendChild(wrap);
+        scrollToBottom(true);
+      }
+
+      async function switchToConversation(id) {
+        if (!id) {
+          conv = null;
+          activeId = null;
+          clearChatSurface();
+          renderSidebar();
+          return;
+        }
+        try {
+          const c = await api(`/api/conversations/${id}`);
+          conv = c;
+          activeId = c.id;
+          clearChatSurface();
+          for (const m of c.messages || []) {
+            messages.push({ role: m.role, content: m.content, thinking: m.thinking });
+            renderHistoricalMessage(m);
+          }
+          renderSidebar();
+        } catch {
+          // Fall back to a clean slate if the file vanished mid-switch.
+          conv = null;
+          activeId = null;
+          clearChatSurface();
+          renderSidebar();
+        }
+      }
+
+      // -------------------------------------------------------------------
+      // Sidebar UI
+      // -------------------------------------------------------------------
+
+      function setSidebarOpen(open) {
+        sidebar.classList.toggle("open", open);
+        sidebar.setAttribute("aria-hidden", String(!open));
+        sidebarScrim.hidden = !open;
+      }
+
+      hamburger.addEventListener("click", () => setSidebarOpen(true));
+      closeSidebar.addEventListener("click", () => setSidebarOpen(false));
+      sidebarScrim.addEventListener("click", () => setSidebarOpen(false));
+
+      newChatBtn.addEventListener("click", async () => {
+        setSidebarOpen(false);
+        conv = null;
+        activeId = null;
+        clearChatSurface();
+        renderSidebar();
+        await setActiveServer(null);
+      });
+
+      function groupConversations(list) {
+        const now = Date.now();
+        const day = 86400000;
+        const buckets = [
+          { label: "Today", rows: [] },
+          { label: "Yesterday", rows: [] },
+          { label: "Previous 7 days", rows: [] },
+          { label: "Older", rows: [] },
+        ];
+        for (const c of list) {
+          const t = c.updated_at ? Date.parse(c.updated_at) : 0;
+          const age = now - t;
+          if (age < day) buckets[0].rows.push(c);
+          else if (age < 2 * day) buckets[1].rows.push(c);
+          else if (age < 7 * day) buckets[2].rows.push(c);
+          else buckets[3].rows.push(c);
+        }
+        return buckets.filter((b) => b.rows.length > 0);
+      }
+
+      function renderSidebar() {
+        sidebarList.innerHTML = "";
+        if (!conversations || conversations.length === 0) {
+          const e = document.createElement("div");
+          e.className = "empty-row";
+          e.textContent = "No conversations yet.";
+          sidebarList.appendChild(e);
+          return;
+        }
+        for (const g of groupConversations(conversations)) {
+          const lab = document.createElement("div");
+          lab.className = "group";
+          lab.textContent = g.label;
+          sidebarList.appendChild(lab);
+          for (const c of g.rows) sidebarList.appendChild(renderRow(c));
+        }
+      }
+
+      function renderRow(c) {
+        const row = document.createElement("div");
+        row.className = "row" + (c.id === activeId ? " active" : "");
+        row.dataset.id = c.id;
+
+        const title = document.createElement("span");
+        title.className = "title";
+        title.textContent = c.title || "Untitled";
+        row.appendChild(title);
+
+        const kebab = document.createElement("button");
+        kebab.className = "kebab";
+        kebab.textContent = "⋯";
+        kebab.setAttribute("aria-label", "More actions");
+        kebab.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const r = kebab.getBoundingClientRect();
+          openMenu(r.left, r.bottom + 4, c.id);
+        });
+        row.appendChild(kebab);
+
+        row.addEventListener("click", async () => {
+          setSidebarOpen(false);
+          await switchToConversation(c.id);
+          await setActiveServer(c.id);
+        });
+        row.addEventListener("contextmenu", (e) => {
+          e.preventDefault();
+          openMenu(e.clientX, e.clientY, c.id);
+        });
+        return row;
+      }
+
+      // -------------------------------------------------------------------
+      // Kebab / context menu (Rename, Delete)
+      // -------------------------------------------------------------------
+
+      let menuEl = null;
+      let menuScrimEl = null;
+      function openMenu(x, y, id) {
+        closeMenu();
+        menuScrimEl = document.createElement("div");
+        menuScrimEl.className = "menu-scrim";
+        menuScrimEl.addEventListener("click", closeMenu);
+        menuScrimEl.addEventListener("contextmenu", (e) => {
+          e.preventDefault();
+          closeMenu();
+        });
+        document.body.appendChild(menuScrimEl);
+
+        menuEl = document.createElement("div");
+        menuEl.className = "menu";
+        const w = 160;
+        const h = 88;
+        menuEl.style.left = Math.min(Math.max(0, x), window.innerWidth - w - 8) + "px";
+        menuEl.style.top = Math.min(Math.max(0, y), window.innerHeight - h - 8) + "px";
+
+        const renameBtn = document.createElement("button");
+        renameBtn.textContent = "Rename";
+        renameBtn.addEventListener("click", () => {
+          closeMenu();
+          startRename(id);
+        });
+        menuEl.appendChild(renameBtn);
+
+        const delBtn = document.createElement("button");
+        delBtn.className = "danger";
+        delBtn.textContent = "Delete";
+        delBtn.addEventListener("click", async () => {
+          closeMenu();
+          const c = conversations.find((x) => x.id === id);
+          if (!confirm('Delete "' + (c && c.title ? c.title : "this conversation") + '"? This can\'t be undone.')) return;
+          try {
+            await api(`/api/conversations/${id}`, { method: "DELETE" });
+          } catch {}
+          if (activeId === id) {
+            conv = null;
+            activeId = null;
+            clearChatSurface();
+            await setActiveServer(null);
+          }
+          await loadConversations();
+        });
+        menuEl.appendChild(delBtn);
+
+        document.body.appendChild(menuEl);
+      }
+
+      function closeMenu() {
+        if (menuEl) { menuEl.remove(); menuEl = null; }
+        if (menuScrimEl) { menuScrimEl.remove(); menuScrimEl = null; }
+      }
+
+      async function startRename(id) {
+        const row = sidebarList.querySelector('[data-id="' + cssEscape(id) + '"]');
+        if (!row) return;
+        const titleSpan = row.querySelector(".title");
+        if (!titleSpan) return;
+        const c = conversations.find((x) => x.id === id);
+        const inp = document.createElement("input");
+        inp.className = "rename";
+        inp.value = (c && c.title) || "";
+        titleSpan.replaceWith(inp);
+        inp.focus();
+        inp.select();
+        let done = false;
+        const finish = async (commit) => {
+          if (done) return;
+          done = true;
+          const t = inp.value.trim();
+          if (commit && t) {
+            try {
+              const full = await api(`/api/conversations/${id}`);
+              full.title = t.slice(0, 80);
+              full.updated_at = new Date().toISOString();
+              await api(`/api/conversations/${id}`, {
+                method: "PUT",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify(full),
+              });
+              if (activeId === id && conv) {
+                conv.title = full.title;
+                conv.updated_at = full.updated_at;
+              }
+            } catch {}
+          }
+          await loadConversations();
+        };
+        inp.addEventListener("blur", () => finish(true));
+        inp.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            finish(true);
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            finish(false);
+          }
+        });
+      }
+
+      /** Tiny CSS.escape polyfill — older mobile browsers (Safari pre-13.1)
+       *  don't have it, and our id format includes hyphens / digits. */
+      function cssEscape(s) {
+        if (typeof CSS !== "undefined" && CSS.escape) return CSS.escape(s);
+        return String(s).replace(/[^a-zA-Z0-9_-]/g, "\\$&");
       }
     </script>
   </body>

@@ -136,6 +136,30 @@ export async function renameConversation(id: string, title: string): Promise<voi
   await saveConversation(c);
 }
 
+/**
+ * Read the shared active-conversation pointer from the backend. Mirror of
+ * what the LAN remote pings via `GET /api/active-conversation` — both
+ * surfaces use the same pointer so the two can hand off seamlessly.
+ */
+export async function getActiveConversationId(): Promise<string | null> {
+  try {
+    const id = await invoke<string | null>("get_active_conversation");
+    return id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Push a new active-conversation id to the backend (or `null` to clear).
+ *  Idempotent on the backend — duplicate sets don't refire the change event. */
+export async function setActiveConversationId(id: string | null): Promise<void> {
+  try {
+    await invoke("set_active_conversation", { id });
+  } catch {
+    // Best-effort: a transient backend hiccup shouldn't block the UI.
+  }
+}
+
 export function newConversation(mode: Mode, model: string, family: string): Conversation {
   const now = new Date().toISOString();
   return {

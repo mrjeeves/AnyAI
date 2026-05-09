@@ -14,12 +14,15 @@
     listConversations,
     deleteConversation,
     renameConversation,
+    getActiveConversationId,
+    setActiveConversationId,
     type ConversationMeta,
   } from "../conversations";
   import type { HardwareProfile, Mode } from "../types";
 
   let unsubSwap: (() => void) | null = null;
   let unsubRemote: UnlistenFn | null = null;
+  let unsubActiveConv: UnlistenFn | null = null;
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
   /** True when another device is using the UI over the LAN. While true the
@@ -68,6 +71,14 @@
    *  re-clicks of "New chat" still trigger a reset even when the chat is
    *  already empty. */
   let newChatCounter = $state(0);
+
+  /**
+   * Skip the next `anyai://active-conversation-changed` event because we
+   * just fired the underlying setActive ourselves. Without this every
+   * local sidebar click would round-trip through the backend → event →
+   * effect and we'd reload state we already just set.
+   */
+  let suppressNextActiveEvent = false;
 
   /**
    * Modes the active family inside the active manifest actually has tiers
@@ -137,11 +148,59 @@
       }, 5000);
       try {
         unsubRemote = await listen<boolean>("anyai://remote-active-changed", (evt) => {
-          remoteActive = !!evt.payload;
+          const next = !!evt.payload;
+          const wasActive = remoteActive;
+          remoteActive = next;
+          // The remote browser just disconnected. It may have created /
+          // renamed / deleted conversations and may have left the active
+          // pointer on a different one — refresh both so the desktop
+          // lands on whatever the phone last had open.
+          if (wasActive && !next) {
+            refreshConversations().catch(() => {});
+            getActiveConversationId()
+              .then((id) => {
+                if (id !== activeConversationId) {
+                  // Mark the upcoming setActive as our own so we don't
+                  // bounce through the event handler again.
+                  suppressNextActiveEvent = true;
+                  activeConversationId = id;
+                }
+              })
+              .catch(() => {});
+          }
         });
         // Seed initial state so we don't need to wait for the first event.
         const status = await invoke<{ remote_active: boolean }>("remote_ui_status");
         remoteActive = !!status.remote_active;
+      } catch {}
+
+      // Pick up active-conversation switches made by the remote (or by
+      // any other process holding the same backend pointer). Local-driven
+      // switches are filtered via `suppressNextActiveEvent` so they
+      // don't trigger a redundant reload.
+      try {
+        unsubActiveConv = await listen<string | null>(
+          "anyai://active-conversation-changed",
+          (evt) => {
+            if (suppressNextActiveEvent) {
+              suppressNextActiveEvent = false;
+              return;
+            }
+            const next = (evt.payload as string | null) ?? null;
+            if (next !== activeConversationId) {
+              activeConversationId = next;
+              if (next === null) newChatCounter += 1;
+              refreshConversations().catch(() => {});
+            }
+          },
+        );
+        // Restore the last active conversation on launch — feels nicer
+        // than always landing on an empty New chat surface.
+        const lastActive = await getActiveConversationId();
+        if (lastActive) {
+          suppressNextActiveEvent = true;
+          activeConversationId = lastActive;
+        }
       } catch {}
 
       unsubSwap = await onModeSwap(async (e) => {
@@ -172,6 +231,7 @@
   onDestroy(() => {
     unsubSwap?.();
     unsubRemote?.();
+    unsubActiveConv?.();
     if (heartbeatTimer) clearInterval(heartbeatTimer);
   });
 
@@ -206,12 +266,17 @@
   }
 
   function onSelectConversation(id: string) {
+    if (activeConversationId === id) return;
     activeConversationId = id;
+    suppressNextActiveEvent = true;
+    setActiveConversationId(id);
   }
 
   function onNewConversation() {
     activeConversationId = null;
     newChatCounter += 1;
+    suppressNextActiveEvent = true;
+    setActiveConversationId(null);
   }
 
   async function onRenameConversation(id: string, title: string) {
@@ -224,12 +289,18 @@
     if (activeConversationId === id) {
       activeConversationId = null;
       newChatCounter += 1;
+      suppressNextActiveEvent = true;
+      setActiveConversationId(null);
     }
     await refreshConversations();
   }
 
   function onConversationChanged(id: string) {
-    activeConversationId = id;
+    if (activeConversationId !== id) {
+      activeConversationId = id;
+      suppressNextActiveEvent = true;
+      setActiveConversationId(id);
+    }
     refreshConversations().catch(() => {});
   }
 </script>
