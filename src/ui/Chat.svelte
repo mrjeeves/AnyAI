@@ -44,7 +44,7 @@
   let input = $state("");
   let streaming = $state(false);
   let activeStreamId = $state<string | null>(null);
-  let settingsTab = $state<"providers" | "families" | "models" | null>(null);
+  let settingsTab = $state<"providers" | "families" | "models" | "storage" | null>(null);
   let messagesEl: HTMLElement;
 
   $effect(() => {

@@ -7,6 +7,14 @@ async function configPath(): Promise<string> {
   return `${home}/.anyai/config.json`;
 }
 
+/** Default location for persisted chats / artifacts. Lives under the same
+ *  `~/.anyai/` tree as the rest of AnyAI's state so a single directory holds
+ *  everything the user might want to back up or wipe. */
+async function defaultConversationDir(): Promise<string> {
+  const home = await homeDir();
+  return `${home}/.anyai/conversations`;
+}
+
 const DEFAULT_API: ApiConfig = {
   enabled: true,
   host: "127.0.0.1",
@@ -30,6 +38,8 @@ const DEFAULT_CONFIG: Config = {
   kept_models: [],
   mode_overrides: {},
   tracked_modes: ["text"],
+  // Filled at first load via defaultConversationDir() — needs an async homeDir().
+  conversation_dir: "",
   api: { ...DEFAULT_API },
   auto_update: { ...DEFAULT_AUTO_UPDATE },
   providers: [
@@ -49,6 +59,9 @@ export async function loadConfig(): Promise<Config> {
     if (await exists(path)) {
       const raw = JSON.parse(await readTextFile(path));
       _cached = mergeDefaults(raw);
+      if (!_cached.conversation_dir) {
+        _cached.conversation_dir = await defaultConversationDir();
+      }
       // Persist any defaults we filled in so subsequent loads are consistent.
       await saveConfig(_cached);
       return _cached;
@@ -57,6 +70,7 @@ export async function loadConfig(): Promise<Config> {
     // Corrupt config — reset.
   }
   _cached = structuredClone(DEFAULT_CONFIG);
+  _cached.conversation_dir = await defaultConversationDir();
   await saveConfig(_cached);
   return _cached;
 }

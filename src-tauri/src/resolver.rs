@@ -430,6 +430,9 @@ pub fn active_provider_url(config: &Value) -> Option<String> {
 }
 
 pub fn default_config_value() -> Value {
+    let conv_dir = crate::anyai_dir()
+        .map(|d| d.join("conversations").to_string_lossy().into_owned())
+        .unwrap_or_default();
     serde_json::json!({
         "active_provider": "AnyAI Default",
         "active_family": "gemma4",
@@ -438,6 +441,7 @@ pub fn default_config_value() -> Value {
         "kept_models": [],
         "mode_overrides": {},
         "tracked_modes": ["text"],
+        "conversation_dir": conv_dir,
         "api": {
             "enabled": true,
             "host": "127.0.0.1",
@@ -503,6 +507,13 @@ pub fn merge_defaults(mut config: Value) -> Value {
     // Fill active_family on legacy configs (predates the families schema).
     if config["active_family"].as_str().unwrap_or("").is_empty() {
         config["active_family"] = serde_json::json!("gemma4");
+    }
+    // Fill conversation_dir on legacy configs (predates the Storage tab).
+    if config["conversation_dir"].as_str().unwrap_or("").is_empty() {
+        if let Ok(d) = crate::anyai_dir() {
+            config["conversation_dir"] =
+                serde_json::json!(d.join("conversations").to_string_lossy());
+        }
     }
     config
 }
