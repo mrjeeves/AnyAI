@@ -166,6 +166,26 @@ fn main() {
             update_apply_now,
         ])
         .setup(|app| {
+            // If the configured 800x600 window can't fit on this monitor —
+            // e.g. the official 7" Pi DSI screen at 800x480 — start
+            // maximized so the user doesn't lose the bottom of the UI off
+            // the edge of the screen. Compares physical pixels on both
+            // sides; the +80 reserves room for a taskbar / dock the
+            // monitor reports as part of its full size.
+            {
+                use tauri::Manager;
+                if let Some(window) = app.get_webview_window("main") {
+                    if let (Ok(outer), Ok(Some(monitor))) =
+                        (window.outer_size(), window.current_monitor())
+                    {
+                        let m = monitor.size();
+                        if outer.width > m.width || outer.height + 80 > m.height {
+                            let _ = window.maximize();
+                        }
+                    }
+                }
+            }
+
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let _ = ensure_config_dir(&app_handle);
