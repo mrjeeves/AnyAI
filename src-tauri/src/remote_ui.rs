@@ -19,7 +19,7 @@
 
 use anyhow::{anyhow, Result};
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -105,16 +105,25 @@ struct State_ {
     tracker: Mutex<Tracker>,
     active_tx: watch::Sender<bool>,
     active_rx: watch::Receiver<bool>,
+    /// Currently-open conversation id, shared across local + remote so the
+    /// two surfaces can hand off seamlessly (remote inherits whatever the
+    /// local had open at connect time; local picks up where remote left off
+    /// when the curtain comes down).
+    conv_tx: watch::Sender<Option<String>>,
+    conv_rx: watch::Receiver<Option<String>>,
 }
 
 fn state() -> &'static State_ {
     static S: OnceLock<State_> = OnceLock::new();
     S.get_or_init(|| {
         let (tx, rx) = watch::channel(false);
+        let (ctx, crx) = watch::channel(None);
         State_ {
             tracker: Mutex::new(Tracker::default()),
             active_tx: tx,
             active_rx: rx,
+            conv_tx: ctx,
+            conv_rx: crx,
         }
     })
 }
@@ -145,6 +154,35 @@ pub fn remote_active_now() -> bool {
     let s = state();
     let active = s.tracker.lock().unwrap().sweep_and_remote_active();
     active
+}
+
+/// Currently-open conversation id (shared local ↔ remote). `None` means
+/// no conversation is selected — the chat panel renders an empty "New
+/// chat" surface in that case.
+pub fn active_conversation_now() -> Option<String> {
+    state().conv_rx.borrow().clone()
+}
+
+/// Update the shared active-conversation id. No-op if the value is
+/// already equal — keeps the watch channel from firing redundant change
+/// events that the GUI would round-trip back into the same render.
+pub fn set_active_conversation(id: Option<String>) {
+    let s = state();
+    let _ = s.conv_tx.send_if_modified(|cur| {
+        if *cur != id {
+            *cur = id;
+            true
+        } else {
+            false
+        }
+    });
+}
+
+/// Subscribe to active-conversation changes. main.rs bridges this to the
+/// `anyai://active-conversation-changed` Tauri event so the desktop UI
+/// can react to switches the remote made without polling.
+pub fn subscribe_active_conversation() -> watch::Receiver<Option<String>> {
+    state().conv_rx.clone()
 }
 
 /// The GUI calls this on mount and on each focus to keep the local session
@@ -283,6 +321,17 @@ pub async fn start(port: u16) -> Result<u16> {
         .route("/api/models", get(api_models))
         .route("/api/chat", post(api_chat))
         .route("/api/chat/stream", post(api_chat_stream))
+        .route("/api/conversations", get(api_list_conversations))
+        .route(
+            "/api/conversations/:id",
+            get(api_get_conversation)
+                .put(api_put_conversation)
+                .delete(api_delete_conversation),
+        )
+        .route(
+            "/api/active-conversation",
+            get(api_get_active).post(api_post_active),
+        )
         .with_state(state);
 
     let addr: SocketAddr = SocketAddr::new("0.0.0.0".parse().unwrap(), port);
@@ -386,6 +435,10 @@ struct ChatBody {
     messages: Value,
     #[serde(default)]
     session_id: Option<String>,
+    /// Optional Ollama options map (e.g. `{"num_predict": 16}` for the
+    /// title-generation call). Forwarded verbatim to /api/chat.
+    #[serde(default)]
+    options: Option<Value>,
 }
 
 async fn api_chat(
@@ -418,7 +471,7 @@ async fn api_chat(
                 .into_response()
         }
     };
-    let reply = match crate::ollama::chat_once(&resolved, body.messages, None).await {
+    let reply = match crate::ollama::chat_once(&resolved, body.messages, body.options).await {
         Ok(s) => s,
         Err(e) => {
             return (
@@ -540,6 +593,117 @@ async fn api_chat_stream(
     Sse::new(stream)
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Conversation HTTP endpoints — exposed only on the LAN-bound remote UI
+// server. The local desktop UI hits the conversations module through Tauri
+// commands instead.
+// ---------------------------------------------------------------------------
+
+/// Reject any conversation request from a kicked / not-yet-heartbeated
+/// remote browser. Mirrors the gating on /api/chat — without this, a
+/// "kicked" tab could still browse the conversation list.
+fn ensure_remote_allowed() -> Result<(), Response> {
+    let s = state();
+    let t = s.tracker.lock().unwrap();
+    if t.is_kicked() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "kicked", "message": "Disconnected by host" })),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
+async fn api_list_conversations() -> Response {
+    if let Err(r) = ensure_remote_allowed() {
+        return r;
+    }
+    match crate::conversations::list() {
+        Ok(items) => Json(json!({ "items": items })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn api_get_conversation(Path(id): Path<String>) -> Response {
+    if let Err(r) = ensure_remote_allowed() {
+        return r;
+    }
+    match crate::conversations::load(&id) {
+        Ok(Some(c)) => Json(c).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn api_put_conversation(
+    Path(id): Path<String>,
+    Json(mut body): Json<crate::conversations::Conversation>,
+) -> Response {
+    if let Err(r) = ensure_remote_allowed() {
+        return r;
+    }
+    // Trust the URL id over a mismatched body id — easier to reason about
+    // than letting a stray field rename a conversation behind the user's back.
+    body.id = id;
+    match crate::conversations::save(&body) {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn api_delete_conversation(Path(id): Path<String>) -> Response {
+    if let Err(r) = ensure_remote_allowed() {
+        return r;
+    }
+    // Clear the active-conversation pointer if it referenced what we just
+    // deleted — otherwise the local desktop would hop onto a missing file
+    // when it inherits the remote's selection.
+    if state().conv_rx.borrow().as_deref() == Some(id.as_str()) {
+        set_active_conversation(None);
+    }
+    match crate::conversations::delete(&id) {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn api_get_active() -> Response {
+    if let Err(r) = ensure_remote_allowed() {
+        return r;
+    }
+    Json(json!({ "id": active_conversation_now() })).into_response()
+}
+
+#[derive(Deserialize)]
+struct ActiveBody {
+    id: Option<String>,
+}
+
+async fn api_post_active(Json(body): Json<ActiveBody>) -> Response {
+    if let Err(r) = ensure_remote_allowed() {
+        return r;
+    }
+    set_active_conversation(body.id);
+    Json(json!({ "ok": true })).into_response()
 }
 
 /// Cheap unique-enough id without pulling in a uuid crate. Combines the
