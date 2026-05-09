@@ -179,7 +179,13 @@ async fn run_check(force: bool) -> Result<()> {
     let cmp = compare_semver(current, &latest_version);
     if cmp != std::cmp::Ordering::Less {
         if force {
-            println!("Already at latest ({current}); newest published is {latest_version}.");
+            if cmp == std::cmp::Ordering::Equal {
+                println!("Already on the latest version ({current}).");
+            } else {
+                println!(
+                    "Already up to date — you're on {current} (latest published: {latest_version})."
+                );
+            }
         }
         return Ok(());
     }
@@ -274,22 +280,6 @@ pub fn status() -> Result<UpdateStatus> {
         InstallKind::PackageManager => "package_manager",
     };
 
-    let pending_path = crate::anyai_dir()?.join("updates/pending.json");
-    let pending = if pending_path.exists() {
-        match std::fs::read_to_string(&pending_path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        {
-            Some(v) => Some(PendingUpdate {
-                version: v["version"].as_str().unwrap_or("?").to_string(),
-                staged_at: v["staged_at"].as_str().unwrap_or("?").to_string(),
-            }),
-            None => None,
-        }
-    } else {
-        None
-    };
-
     Ok(UpdateStatus {
         current_version: env!("CARGO_PKG_VERSION").to_string(),
         install_kind: install_kind.to_string(),
@@ -298,8 +288,48 @@ pub fn status() -> Result<UpdateStatus> {
         auto_apply: au["auto_apply"].as_str().unwrap_or("patch").to_string(),
         check_interval_hours: au["check_interval_hours"].as_f64().unwrap_or(6.0),
         last_check_unix: read_last_check(),
-        pending,
+        pending: read_pending_or_clean()?,
     })
+}
+
+/// Read `~/.anyai/updates/pending.json` and return it only if it actually
+/// represents an upgrade over the running binary. A stale entry left behind
+/// after a manual install or a release rollback (e.g. user is now on 0.1.14
+/// but pending still references 0.1.5) is silently deleted — otherwise the
+/// GUI would keep displaying a misleading "Update staged" banner forever
+/// even though `check_now()` correctly reports up-to-date.
+fn read_pending_or_clean() -> Result<Option<PendingUpdate>> {
+    read_pending_or_clean_at(
+        &crate::anyai_dir()?.join("updates/pending.json"),
+        env!("CARGO_PKG_VERSION"),
+    )
+}
+
+fn read_pending_or_clean_at(path: &Path, current: &str) -> Result<Option<PendingUpdate>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = std::fs::remove_file(path);
+            return Ok(None);
+        }
+    };
+    let v: Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = std::fs::remove_file(path);
+            return Ok(None);
+        }
+    };
+    let version = v["version"].as_str().unwrap_or("?").to_string();
+    let staged_at = v["staged_at"].as_str().unwrap_or("?").to_string();
+    if compare_semver(&version, current) != std::cmp::Ordering::Greater {
+        let _ = std::fs::remove_file(path);
+        return Ok(None);
+    }
+    Ok(Some(PendingUpdate { version, staged_at }))
 }
 
 fn read_last_check() -> Option<i64> {
@@ -993,8 +1023,13 @@ async fn run_update_now() -> Result<()> {
         .map(|s| s.trim_start_matches('v').to_string())
         .ok_or_else(|| anyhow!("release missing tag_name"))?;
 
-    if compare_semver(current, &latest) != std::cmp::Ordering::Less {
-        println!("Already at the latest version ({latest}).");
+    let cmp = compare_semver(current, &latest);
+    if cmp != std::cmp::Ordering::Less {
+        if cmp == std::cmp::Ordering::Equal {
+            println!("Already on the latest version ({latest}).");
+        } else {
+            println!("Already up to date — you're on {current} (latest published: {latest}).");
+        }
         stamp_check_now()?;
         return Ok(());
     }
@@ -1023,16 +1058,9 @@ async fn print_status() -> Result<()> {
             InstallKind::PackageManager => "package-manager (self-update disabled)",
         }
     );
-    let pending = crate::anyai_dir()?.join("updates/pending.json");
-    if pending.exists() {
-        let v: Value = serde_json::from_str(&std::fs::read_to_string(&pending)?)?;
-        println!(
-            "Pending         : {} staged at {}",
-            v["version"].as_str().unwrap_or("?"),
-            v["staged_at"].as_str().unwrap_or("?")
-        );
-    } else {
-        println!("Pending         : none");
+    match read_pending_or_clean()? {
+        Some(p) => println!("Pending         : {} staged at {}", p.version, p.staged_at),
+        None => println!("Pending         : none"),
     }
     Ok(())
 }
@@ -1396,6 +1424,78 @@ abc123  anyai-linux-x86_64.tar.gz
         std::fs::write(&raw, b"raw binary").unwrap();
         let out = extract_binary_if_archived(&raw, &dir, false).expect("passthrough");
         assert_eq!(out, raw);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn write_pending(path: &Path, version: &str) {
+        std::fs::write(
+            path,
+            serde_json::json!({
+                "version": version,
+                "staged_at": "2026-01-01T00:00:00Z",
+                "path": "/tmp/anyai-staged",
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn read_pending_returns_none_when_file_missing() {
+        let dir = tempdir_for_test("anyai-pending-missing");
+        let p = dir.join("pending.json");
+        let got = read_pending_or_clean_at(&p, "0.1.5").expect("ok");
+        assert!(got.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_pending_returns_entry_when_strictly_newer() {
+        let dir = tempdir_for_test("anyai-pending-newer");
+        let p = dir.join("pending.json");
+        write_pending(&p, "0.2.0");
+        let got = read_pending_or_clean_at(&p, "0.1.5")
+            .expect("ok")
+            .expect("some");
+        assert_eq!(got.version, "0.2.0");
+        assert!(p.exists(), "valid pending must not be deleted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression: the GUI's Updates panel was rendering a stale
+    /// "Update staged 0.1.5" banner even after the user had installed
+    /// 0.1.14 by other means, because `status()` returned the pending
+    /// entry verbatim without comparing it to the running version.
+    #[test]
+    fn read_pending_clears_stale_entry_when_current_is_ahead() {
+        let dir = tempdir_for_test("anyai-pending-stale");
+        let p = dir.join("pending.json");
+        write_pending(&p, "0.1.5");
+        let got = read_pending_or_clean_at(&p, "0.1.14").expect("ok");
+        assert!(got.is_none());
+        assert!(!p.exists(), "stale pending must be deleted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_pending_clears_entry_for_already_applied_version() {
+        let dir = tempdir_for_test("anyai-pending-equal");
+        let p = dir.join("pending.json");
+        write_pending(&p, "0.1.14");
+        let got = read_pending_or_clean_at(&p, "0.1.14").expect("ok");
+        assert!(got.is_none());
+        assert!(!p.exists(), "already-applied pending must be deleted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_pending_clears_corrupt_json() {
+        let dir = tempdir_for_test("anyai-pending-corrupt");
+        let p = dir.join("pending.json");
+        std::fs::write(&p, b"{not valid json").unwrap();
+        let got = read_pending_or_clean_at(&p, "0.1.5").expect("ok");
+        assert!(got.is_none());
+        assert!(!p.exists(), "corrupt pending must be deleted");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

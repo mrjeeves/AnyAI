@@ -161,7 +161,12 @@
           {:else if outcome.kind === "package_manager"}
             Package-manager install — self-update deferred to the system updater.
           {:else if outcome.kind === "up_to_date"}
-            Already at the latest version ({outcome.latest}).
+            {#if outcome.current === outcome.latest}
+              Already on the latest version ({outcome.latest}).
+            {:else}
+              You're on <strong>{outcome.current}</strong> — ahead of latest published
+              ({outcome.latest}).
+            {/if}
           {:else if outcome.kind === "staged"}
             <strong>{outcome.version}</strong> downloaded and staged. Restart to apply.
           {:else if outcome.kind === "policy_blocked"}
