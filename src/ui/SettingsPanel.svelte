@@ -43,7 +43,7 @@
 
     <div class="content">
       {#if active === "families"}
-        <FamiliesSection {onChanged} />
+        <FamiliesSection {onChanged} {onClose} />
       {:else if active === "providers"}
         <ProvidersSection {onChanged} />
       {:else if active === "models"}

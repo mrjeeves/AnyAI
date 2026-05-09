@@ -6,7 +6,10 @@
   import { loadConfig, invalidateConfigCache } from "../../config";
   import type { HardwareProfile, Manifest, ManifestFamily, Mode, OllamaModel } from "../../types";
 
-  let { onChanged } = $props<{ onChanged: () => void }>();
+  let { onChanged, onClose } = $props<{
+    onChanged: () => void;
+    onClose: () => void;
+  }>();
 
   let manifest = $state<Manifest | null>(null);
   let providerName = $state("");
@@ -19,6 +22,11 @@
    *  user can't be surprised by a quietly-downloaded gigabyte. */
   let pulledSizes = $state<Record<string, number>>({});
   let loading = $state(true);
+
+  /** When non-null, render the detail page for this family instead of the
+   *  list. This is a navigation surface inside the Family tab — back button
+   *  takes the user to the list, the side-tabs take them out of the tab. */
+  let detailFamily = $state<string | null>(null);
 
   onMount(load);
 
@@ -46,11 +54,18 @@
     }
   }
 
-  async function switchFamily(name: string) {
+  async function activate(name: string) {
     await setActiveFamily(name);
     invalidateConfigCache();
     activeFamily = name;
     onChanged();
+    // onChanged closes the settings panel from the parent; this stays a
+    // single-call action so the user lands directly in chat with the
+    // freshly-activated family.
+  }
+
+  function startChatting() {
+    onClose();
   }
 
   function familyEntries(m: Manifest): Array<[string, ManifestFamily]> {
@@ -76,6 +91,17 @@
     const order: Mode[] = ["text", "vision", "code", "transcribe"];
     return order.filter((m) => !!family.modes[m]);
   }
+
+  function familyOrFirst(name: string | null): { name: string; family: ManifestFamily } | null {
+    if (!manifest) return null;
+    const entries = familyEntries(manifest);
+    if (entries.length === 0) return null;
+    if (name) {
+      const found = entries.find(([k]) => k === name);
+      if (found) return { name: found[0], family: found[1] };
+    }
+    return { name: entries[0][0], family: entries[0][1] };
+  }
 </script>
 
 <div class="section">
@@ -83,123 +109,203 @@
     <p class="loading">Loading…</p>
   {:else if !manifest}
     <p class="empty">No active provider — pick one in the Providers tab.</p>
-  {:else}
+  {:else if detailFamily === null}
+    <!-- LIST VIEW -->
     <div class="head">
       <p class="lede">
-        From <strong>{providerName}</strong> · pick a model family. Each family
-        lists every mode it supports; the highlighted tier is what runs on this
-        machine for that mode.
+        From <strong>{providerName}</strong>. Tap a family to inspect its tiers
+        and activate it.
       </p>
     </div>
 
     <div class="list">
       {#each familyEntries(manifest) as [name, family]}
         {@const isActive = name === activeFamily}
-        {@const modes = modesIn(family)}
-        <div class="family-card" class:active={isActive}>
-          <button class="card-head" onclick={() => switchFamily(name)} title="Use {family.label}">
-            <div class="card-titles">
-              <span class="card-title">
+        {@const picked = pickedTag(name, activeMode)}
+        <button class="row" class:active={isActive} onclick={() => (detailFamily = name)}>
+          <div class="row-main">
+            <div class="row-titles">
+              <span class="row-title">
                 {#if isActive}<span class="check">✓</span>{/if}
                 {family.label}
               </span>
-              <span class="card-key">{name}</span>
+              <span class="row-key">{name}</span>
             </div>
             {#if family.description}
-              <p class="card-desc">{family.description}</p>
+              <p class="row-desc">{family.description}</p>
             {/if}
-          </button>
-
-          {#if modes.length === 0}
-            <p class="empty-note">This family declares no modes.</p>
-          {:else}
-            {#each modes as modeName}
-              {@const modeSpec = family.modes[modeName]!}
-              {@const picked = pickedTag(name, modeName)}
-              {@const isActiveCell = isActive && modeName === activeMode}
-              <div class="mode-block">
-                <div class="mode-head">
-                  <span class="mode-name">{modeSpec.label || modeName}</span>
-                  {#if isActiveCell}
-                    <span class="mode-tag active-mode">your active mode</span>
-                  {/if}
-                </div>
-                <div class="tier-list" aria-label="{family.label} {modeName} tiers">
-                  {#each modeSpec.tiers as tier}
-                    {@const hit = tier.model === picked}
-                    <div class="tier" class:hit class:hit-active={hit && isActiveCell}>
-                      <span class="tier-spec">
-                        ≥ {tier.min_vram_gb} GB VRAM · ≥ {tier.min_ram_gb ?? 0} GB RAM
-                      </span>
-                      <span class="tier-model">{tier.model}</span>
-                      <span class="tier-size" class:dim={!pulledSizes[tier.model]}>
-                        {pulledSizes[tier.model] ? gbLabel(pulledSizes[tier.model]) : "not pulled"}
-                      </span>
-                      {#if hit && isActiveCell}
-                        <span class="tier-badge">picked for your hardware</span>
-                      {:else if hit}
-                        <span class="tier-badge soft">would pick</span>
-                      {:else}
-                        <span class="tier-badge-spacer"></span>
-                      {/if}
-                    </div>
-                  {/each}
-                </div>
-              </div>
-            {/each}
-          {/if}
-        </div>
+            {#if picked}
+              <p class="row-picked">
+                Picks <code>{picked}</code> for your hardware
+                {#if pulledSizes[picked]}
+                  · <span class="dim">{gbLabel(pulledSizes[picked])} on disk</span>
+                {:else}
+                  · <span class="dim">not pulled</span>
+                {/if}
+              </p>
+            {/if}
+          </div>
+          <span class="chevron" aria-hidden="true">›</span>
+        </button>
       {/each}
       {#if familyEntries(manifest).length === 0}
         <p class="empty">This provider's manifest exposes no families.</p>
       {/if}
     </div>
+  {:else}
+    <!-- DETAIL VIEW -->
+    {@const picked = familyOrFirst(detailFamily)}
+    {#if !picked}
+      <p class="empty">Family not found.</p>
+    {:else}
+      {@const isActive = picked.name === activeFamily}
+      {@const modes = modesIn(picked.family)}
+      <div class="detail-head">
+        <button class="back" onclick={() => (detailFamily = null)} aria-label="Back to families">
+          ← Families
+        </button>
+        <div class="detail-titles">
+          <span class="detail-title">
+            {#if isActive}<span class="check">✓</span>{/if}
+            {picked.family.label}
+          </span>
+          <span class="detail-key">{picked.name}</span>
+        </div>
+        {#if picked.family.description}
+          <p class="detail-desc">{picked.family.description}</p>
+        {/if}
+      </div>
+
+      <div class="detail-body">
+        {#if modes.length === 0}
+          <p class="empty-note">This family declares no modes.</p>
+        {:else}
+          {#each modes as modeName}
+            {@const modeSpec = picked.family.modes[modeName]!}
+            {@const pickedModel = pickedTag(picked.name, modeName)}
+            {@const isActiveCell = isActive && modeName === activeMode}
+            <div class="mode-block">
+              <div class="mode-head">
+                <span class="mode-name">{modeSpec.label || modeName}</span>
+                {#if isActiveCell}
+                  <span class="mode-tag active-mode">your active mode</span>
+                {/if}
+              </div>
+              <div class="tier-list" aria-label="{picked.family.label} {modeName} tiers">
+                {#each modeSpec.tiers as tier}
+                  {@const hit = tier.model === pickedModel}
+                  <div class="tier" class:hit class:hit-active={hit && isActiveCell}>
+                    <span class="tier-spec">
+                      ≥ {tier.min_vram_gb} GB VRAM · ≥ {tier.min_ram_gb ?? 0} GB RAM
+                    </span>
+                    <span class="tier-model">{tier.model}</span>
+                    <span class="tier-size" class:dim={!pulledSizes[tier.model]}>
+                      {pulledSizes[tier.model] ? gbLabel(pulledSizes[tier.model]) : "not pulled"}
+                    </span>
+                    {#if hit && isActiveCell}
+                      <span class="tier-badge">picked for your hardware</span>
+                    {:else if hit}
+                      <span class="tier-badge soft">would pick</span>
+                    {:else}
+                      <span class="tier-badge-spacer"></span>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/each}
+        {/if}
+      </div>
+
+      <div class="detail-footer">
+        {#if isActive}
+          <button class="primary" onclick={startChatting}>Start Chatting →</button>
+        {:else}
+          <button class="primary" onclick={() => activate(picked.name)}>
+            Activate {picked.family.label}
+          </button>
+        {/if}
+      </div>
+    {/if}
   {/if}
 </div>
 
 <style>
   .section { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+  code { font-family: monospace; font-size: .76rem; color: #aaa; background: #1a1a22; padding: 0 .25rem; border-radius: 3px; }
+
+  /* List view */
   .head { padding: .75rem 1rem; border-bottom: 1px solid #1e1e1e; flex-shrink: 0; }
   .lede { font-size: .78rem; color: #888; line-height: 1.5; }
   .lede strong { color: #ccc; font-weight: 600; }
-  .list { flex: 1; overflow-y: auto; padding: .75rem; display: flex; flex-direction: column; gap: .6rem; min-height: 0; }
-  .family-card {
-    border: 1px solid #1e1e1e;
-    background: #131318;
-    border-radius: 8px;
-    overflow: hidden;
-  }
-  .family-card.active {
-    border-color: #6e6ef7;
-    background: #181828;
-  }
-  .card-head {
+  .list { flex: 1; overflow-y: auto; padding: .75rem; display: flex; flex-direction: column; gap: .5rem; min-height: 0; }
+  .row {
     width: 100%;
     text-align: left;
-    background: none;
-    border: none;
-    padding: .65rem .85rem .55rem;
-    cursor: pointer;
+    background: #131318;
+    border: 1px solid #1e1e1e;
+    border-radius: 8px;
+    padding: .75rem .9rem;
     color: #ccc;
-    display: flex; flex-direction: column; gap: .2rem;
+    cursor: pointer;
+    display: flex; align-items: center; gap: .75rem;
   }
-  .card-head:hover { background: #1a1a22; }
-  .card-titles { display: flex; align-items: baseline; gap: .55rem; }
-  .card-title { font-size: .92rem; font-weight: 600; color: #e8e8e8; }
-  .card-key { font-family: monospace; font-size: .72rem; color: #555; }
-  .card-desc { font-size: .76rem; color: #888; line-height: 1.45; }
+  .row:hover { background: #181820; border-color: #2a2a2a; }
+  .row.active { border-color: #6e6ef7; background: #181828; }
+  .row-main { flex: 1; display: flex; flex-direction: column; gap: .2rem; min-width: 0; }
+  .row-titles { display: flex; align-items: baseline; gap: .55rem; }
+  .row-title { font-size: .92rem; font-weight: 600; color: #e8e8e8; }
+  .row-key { font-family: monospace; font-size: .72rem; color: #555; }
+  .row-desc { font-size: .76rem; color: #888; line-height: 1.45; }
+  .row-picked { font-size: .73rem; color: #888; }
+  .row-picked .dim { color: #555; }
+  .chevron {
+    color: #555;
+    font-size: 1.2rem;
+    line-height: 1;
+    flex-shrink: 0;
+  }
   .check { color: #6e6ef7; margin-right: .15rem; }
 
+  /* Detail view */
+  .detail-head {
+    padding: .65rem 1rem .75rem;
+    border-bottom: 1px solid #1e1e1e;
+    flex-shrink: 0;
+    display: flex; flex-direction: column; gap: .35rem;
+  }
+  .back {
+    align-self: flex-start;
+    background: none; border: none;
+    color: #6e6ef7; cursor: pointer;
+    font-size: .78rem;
+    padding: .15rem 0;
+  }
+  .back:hover { color: #8a8af7; }
+  .detail-titles { display: flex; align-items: baseline; gap: .55rem; }
+  .detail-title { font-size: 1.05rem; font-weight: 600; color: #e8e8e8; }
+  .detail-key { font-family: monospace; font-size: .78rem; color: #666; }
+  .detail-desc { font-size: .82rem; color: #999; line-height: 1.5; }
+
+  .detail-body {
+    flex: 1; overflow-y: auto; padding: .5rem .75rem 1rem;
+    display: flex; flex-direction: column; gap: .6rem;
+    min-height: 0;
+  }
+
   .mode-block {
-    border-top: 1px solid #1e1e1e;
+    border: 1px solid #1e1e1e;
     background: #0f0f14;
+    border-radius: 7px;
+    overflow: hidden;
   }
   .mode-head {
     display: flex; align-items: center; gap: .55rem;
-    padding: .35rem .85rem .25rem;
+    padding: .4rem .85rem .3rem;
     font-size: .72rem; color: #777;
     text-transform: uppercase;
     letter-spacing: .05em;
+    border-bottom: 1px solid #18181f;
   }
   .mode-name { color: #aaa; }
   .mode-tag {
@@ -213,22 +319,20 @@
   }
   .mode-tag.active-mode { color: #b3b3ff; }
 
-  .tier-list {
-    display: flex; flex-direction: column;
-  }
+  .tier-list { display: flex; flex-direction: column; }
   .tier {
     display: grid;
     grid-template-columns: 1fr 1fr 70px auto;
     gap: .5rem;
     align-items: center;
-    padding: .3rem .85rem;
-    font-size: .74rem;
+    padding: .35rem .85rem;
+    font-size: .76rem;
     border-top: 1px solid #181820;
   }
   .tier:first-child { border-top: none; }
   .tier-spec { color: #555; }
   .tier-model { font-family: monospace; color: #aaa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .tier-size { font-family: monospace; color: #888; text-align: right; font-size: .7rem; }
+  .tier-size { font-family: monospace; color: #888; text-align: right; font-size: .72rem; }
   .tier-size.dim { color: #444; font-family: inherit; font-style: italic; }
   .tier.hit { background: #15151c; }
   .tier.hit .tier-spec { color: #777; }
@@ -245,6 +349,26 @@
   }
   .tier-badge.soft { color: #555; }
   .tier-badge-spacer { min-width: 9rem; }
+
+  .detail-footer {
+    flex-shrink: 0;
+    padding: .75rem 1rem;
+    border-top: 1px solid #1e1e1e;
+    background: #0d0d0d;
+    display: flex;
+    justify-content: flex-end;
+  }
+  .primary {
+    padding: .5rem 1.1rem;
+    background: #6e6ef7;
+    color: #fff;
+    border: none;
+    border-radius: 7px;
+    cursor: pointer;
+    font-size: .85rem;
+    font-weight: 500;
+  }
+  .primary:hover { background: #5a5ae0; }
 
   .loading, .empty, .empty-note {
     color: #555; font-size: .82rem; text-align: center; padding: 1rem;
