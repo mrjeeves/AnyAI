@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import FirstRun from "./FirstRun.svelte";
   import Chat from "./Chat.svelte";
   import { loadConfig, updateConfig } from "../config";
@@ -11,6 +12,18 @@
   import type { HardwareProfile, Mode } from "../types";
 
   let unsubSwap: (() => void) | null = null;
+  let unsubRemote: UnlistenFn | null = null;
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
+  /** True when another device is using the UI over the LAN. While true the
+   *  local UI is curtained off and a non-dismissable toast is shown — single
+   *  user only, so the desktop sits out until the remote disconnects. */
+  let remoteActive = $state(false);
+
+  /** Stable per-process session id so the tracker can distinguish multiple
+   *  Tauri windows (rare but possible) from the genuine remote browsers. */
+  const localSessionId =
+    "local-" + Math.random().toString(36).slice(2, 10) + "-" + Date.now().toString(36);
 
   type View = "loading" | "first-run" | "chat";
 
@@ -71,13 +84,38 @@
         }
       }
 
+      // Local heartbeat + remote-active subscription. Run alongside the chat
+      // session: the heartbeat keeps the tracker from misclassifying the
+      // local window as gone, and the listener flips the curtain in <1s when
+      // a phone hits the LAN URL.
+      try {
+        await invoke("remote_ui_local_heartbeat", { sessionId: localSessionId });
+      } catch {}
+      heartbeatTimer = setInterval(() => {
+        invoke("remote_ui_local_heartbeat", { sessionId: localSessionId }).catch(() => {});
+      }, 5000);
+      try {
+        unsubRemote = await listen<boolean>("anyai://remote-active-changed", (evt) => {
+          remoteActive = !!evt.payload;
+        });
+        // Seed initial state so we don't need to wait for the first event.
+        const status = await invoke<{ remote_active: boolean }>("remote_ui_status");
+        remoteActive = !!status.remote_active;
+      } catch {}
+
       unsubSwap = await onModeSwap(async (e) => {
         if (!hardware) return;
         if (e.mode !== activeMode) return;
         const [config, manifest] = await Promise.all([loadConfig(), getActiveManifest()]);
         activeFamilyName = config.active_family;
         supportedModes = modesForActiveFamily(manifest, activeFamilyName);
-        activeModel = resolveModel(hardware, manifest, activeMode, config.mode_overrides, activeFamilyName);
+        activeModel = resolveModel(
+          hardware,
+          manifest,
+          activeMode,
+          config.mode_overrides,
+          activeFamilyName,
+        );
       });
     } catch (e) {
       // Surface the silenced startup error. Without this it's invisible:
@@ -92,6 +130,8 @@
 
   onDestroy(() => {
     unsubSwap?.();
+    unsubRemote?.();
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
   });
 
   async function onFirstRunComplete() {
@@ -115,22 +155,24 @@
     const [config, manifest] = await Promise.all([loadConfig(), getActiveManifest()]);
     activeFamilyName = config.active_family;
     supportedModes = modesForActiveFamily(manifest, activeFamilyName);
-    activeModel = resolveModel(hardware, manifest, activeMode, config.mode_overrides, activeFamilyName);
+    activeModel = resolveModel(
+      hardware,
+      manifest,
+      activeMode,
+      config.mode_overrides,
+      activeFamilyName,
+    );
   }
 </script>
 
-<div class="app">
+<div class="app" class:curtained={remoteActive}>
   {#if view === "loading"}
     <div class="splash">
       <div class="spinner"></div>
       <p>Detecting hardware…</p>
     </div>
   {:else if view === "first-run"}
-    <FirstRun
-      {hardware}
-      {activeModel}
-      onComplete={onFirstRunComplete}
-    />
+    <FirstRun {hardware} {activeModel} onComplete={onFirstRunComplete} />
   {:else}
     {#if error}
       <div class="error-banner">⚠ Startup failed: {error}</div>
@@ -141,14 +183,39 @@
       activeFamily={activeFamilyName}
       {supportedModes}
       {hardware}
-      onModeChange={onModeChange}
-      onProviderChange={onProviderChange}
+      {onModeChange}
+      {onProviderChange}
     />
+  {/if}
+
+  {#if remoteActive}
+    <!--
+      Curtain renders above everything in the app so accidental clicks /
+      keystrokes don't reach the chat while a remote device drives it. We
+      don't offer multi-user yet, so two people typing into the same chat
+      would interleave and silently corrupt history.
+    -->
+    <div class="remote-curtain" role="dialog" aria-modal="true" aria-label="In use remotely">
+      <div class="remote-toast">
+        <span class="remote-dot"></span>
+        <div>
+          <div class="remote-title">In use remotely</div>
+          <div class="remote-sub">
+            Another device on your network is using AnyAI. Single-user, so this window is paused
+            until they disconnect.
+          </div>
+        </div>
+      </div>
+    </div>
   {/if}
 </div>
 
 <style>
-  :global(*, *::before, *::after) { box-sizing: border-box; margin: 0; padding: 0; }
+  :global(*, *::before, *::after) {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
   :global(body) {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     background: #0f0f0f;
@@ -156,13 +223,17 @@
     height: 100vh;
     overflow: hidden;
   }
-  .app { height: 100vh; display: flex; flex-direction: column; }
+  .app {
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
   .error-banner {
     background: #3a1717;
     color: #ffb4b4;
     border-bottom: 1px solid #5a2424;
-    padding: .5rem .85rem;
-    font-size: .8rem;
+    padding: 0.5rem 0.85rem;
+    font-size: 0.8rem;
     font-family: -apple-system, BlinkMacSystemFont, monospace;
     word-break: break-all;
   }
@@ -176,11 +247,86 @@
     color: #888;
   }
   .spinner {
-    width: 28px; height: 28px;
+    width: 28px;
+    height: 28px;
     border: 3px solid #333;
     border-top-color: #6e6ef7;
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
   }
-  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* Curtain: full-bleed scrim that swallows pointer + keyboard while a
+     remote device is driving the UI. Sits above the settings panel too
+     so opening Settings → Remote on the desktop doesn't accidentally
+     punch through. */
+  .remote-curtain {
+    position: fixed;
+    inset: 0;
+    background: rgba(7, 7, 12, 0.82);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: curtain-in 0.18s ease-out;
+  }
+  @keyframes curtain-in {
+    from {
+      opacity: 0;
+      backdrop-filter: blur(0);
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  .remote-toast {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.85rem;
+    padding: 1rem 1.15rem;
+    background: #131320;
+    border: 1px solid #2a2a55;
+    border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+    color: #e8e8e8;
+    max-width: 32rem;
+    margin: 1rem;
+  }
+  .remote-dot {
+    width: 10px;
+    height: 10px;
+    background: #6e6ef7;
+    border-radius: 50%;
+    margin-top: 0.35rem;
+    box-shadow: 0 0 12px #6e6ef7aa;
+    animation: pulse 1.6s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+  @keyframes pulse {
+    0%,
+    100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+    50% {
+      opacity: 0.55;
+      transform: scale(0.85);
+    }
+  }
+  .remote-title {
+    font-size: 0.92rem;
+    font-weight: 600;
+  }
+  .remote-sub {
+    font-size: 0.78rem;
+    color: #9a9ab8;
+    margin-top: 0.25rem;
+    line-height: 1.5;
+  }
 </style>

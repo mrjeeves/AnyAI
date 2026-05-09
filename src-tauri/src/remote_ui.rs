@@ -1,0 +1,388 @@
+//! Remote UI: a minimal browser-shell chat surface served on the LAN.
+//!
+//! Off by default. When toggled on (Settings → Remote), this module starts an
+//! axum server bound to `0.0.0.0:<port>` that exposes:
+//!
+//!   * `GET  /`                       — the embedded single-page chat shell
+//!   * `POST /api/chat`               — non-streaming proxy to Ollama
+//!   * `POST /api/heartbeat`          — registers a remote browser session
+//!   * `GET  /api/models`             — list virtual models for the picker
+//!
+//! The local Tauri UI also calls `register_local_heartbeat` so the tracker can
+//! distinguish "the desktop is open" from "a phone is on /". When at least one
+//! remote session has heartbeated within `REMOTE_TIMEOUT`, `remote_active`
+//! flips to true; the GUI listens and curtains itself off.
+//!
+//! Single-user by design: AnyAI doesn't multiplex chats yet, so showing the
+//! local user a curtain prevents two people stomping on each other.
+
+use anyhow::{anyhow, Result};
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
+
+/// A remote browser session is considered alive if it heartbeated within this
+/// window. Slightly longer than the 5s frontend interval so a single missed
+/// tick (network hiccup, tab backgrounded for a moment) doesn't drop the
+/// curtain prematurely.
+const SESSION_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SessionKind {
+    Local,
+    Remote,
+}
+
+#[derive(Debug, Clone)]
+struct Session {
+    kind: SessionKind,
+    last_seen: Instant,
+}
+
+#[derive(Default)]
+struct Tracker {
+    sessions: HashMap<String, Session>,
+}
+
+impl Tracker {
+    fn touch(&mut self, id: &str, kind: SessionKind) {
+        self.sessions.insert(
+            id.to_string(),
+            Session {
+                kind,
+                last_seen: Instant::now(),
+            },
+        );
+    }
+
+    /// Drop expired entries and report whether any *remote* session is alive.
+    fn sweep_and_remote_active(&mut self) -> bool {
+        let now = Instant::now();
+        self.sessions
+            .retain(|_, s| now.duration_since(s.last_seen) <= SESSION_TIMEOUT);
+        self.sessions
+            .values()
+            .any(|s| s.kind == SessionKind::Remote)
+    }
+}
+
+/// Process-global tracker + status broadcaster. Lazily initialised on first
+/// access so unit tests / CLI invocations don't pay for the channel.
+struct State_ {
+    tracker: Mutex<Tracker>,
+    active_tx: watch::Sender<bool>,
+    active_rx: watch::Receiver<bool>,
+}
+
+fn state() -> &'static State_ {
+    static S: OnceLock<State_> = OnceLock::new();
+    S.get_or_init(|| {
+        let (tx, rx) = watch::channel(false);
+        State_ {
+            tracker: Mutex::new(Tracker::default()),
+            active_tx: tx,
+            active_rx: rx,
+        }
+    })
+}
+
+/// Re-evaluate "is a remote browser using the UI right now?" and notify
+/// listeners when the answer changed. Idempotent.
+fn refresh_active() {
+    let s = state();
+    let active = s.tracker.lock().unwrap().sweep_and_remote_active();
+    let _ = s.active_tx.send_if_modified(|cur| {
+        if *cur != active {
+            *cur = active;
+            true
+        } else {
+            false
+        }
+    });
+}
+
+/// Subscribe to changes of the "remote_active" flag. Caller awaits
+/// `rx.changed()` and reads `*rx.borrow()`. Used by the Tauri command that
+/// streams the flag to the GUI.
+pub fn subscribe_active() -> watch::Receiver<bool> {
+    state().active_rx.clone()
+}
+
+pub fn remote_active_now() -> bool {
+    let s = state();
+    let active = s.tracker.lock().unwrap().sweep_and_remote_active();
+    active
+}
+
+/// The GUI calls this on mount and on each focus to keep the local session
+/// alive in the tracker. Without it, the GUI's heartbeat gap would let the
+/// curtain show even when nobody else is connected.
+pub fn register_local_heartbeat(session_id: &str) {
+    state()
+        .tracker
+        .lock()
+        .unwrap()
+        .touch(session_id, SessionKind::Local);
+    refresh_active();
+}
+
+// ---------------------------------------------------------------------------
+// LAN IP enumeration
+// ---------------------------------------------------------------------------
+
+/// Best-effort enumeration of usable LAN IPv4 addresses for the QR code /
+/// "visit this URL" copy. Uses the same trick `hostname -I` does on Linux:
+/// open a UDP socket "to" a public address and read back the local end. No
+/// packets are actually sent. Returning a Vec lets callers show every IP on a
+/// multi-NIC box (e.g. wifi + ethernet both on different subnets).
+pub fn lan_ipv4_addresses() -> Vec<String> {
+    let mut out = Vec::new();
+    // Primary route — the IP we'd use to reach the internet.
+    if let Some(ip) = primary_lan_ipv4() {
+        out.push(ip);
+    }
+    // Plus any other private IPv4s on the host (useful when the laptop is on
+    // wifi *and* tethered ethernet, etc.). Best-effort via `ip -4 addr`/
+    // `ifconfig` parsing would be heavy; we rely on the UDP-trick + a second
+    // pass against `224.0.0.1` to surface a different interface in some setups.
+    if let Some(ip) = secondary_lan_ipv4() {
+        if !out.contains(&ip) {
+            out.push(ip);
+        }
+    }
+    out
+}
+
+fn primary_lan_ipv4() -> Option<String> {
+    udp_local_ip("8.8.8.8:80")
+}
+
+fn secondary_lan_ipv4() -> Option<String> {
+    udp_local_ip("224.0.0.1:80")
+}
+
+fn udp_local_ip(target: &str) -> Option<String> {
+    use std::net::UdpSocket;
+    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect(target).ok()?;
+    let local = sock.local_addr().ok()?;
+    match local.ip() {
+        IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_unspecified() => Some(v4.to_string()),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// QR code SVG
+// ---------------------------------------------------------------------------
+
+/// Render `text` as an SVG QR code. Returns a self-contained `<svg>` string
+/// the GUI can drop into the DOM. Uses the `qrcode` crate's built-in SVG
+/// renderer — we don't need PNG / raster output anywhere.
+pub fn qr_svg(text: &str) -> Result<String> {
+    use qrcode::render::svg;
+    use qrcode::QrCode;
+    let code = QrCode::new(text.as_bytes()).map_err(|e| anyhow!("qr encode: {e}"))?;
+    let svg = code
+        .render::<svg::Color<'_>>()
+        .min_dimensions(220, 220)
+        .dark_color(svg::Color("#e8e8e8"))
+        .light_color(svg::Color("#0d0d0d"))
+        .build();
+    Ok(svg)
+}
+
+// ---------------------------------------------------------------------------
+// Server lifecycle
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct AppState {}
+
+struct RunningServer {
+    cancel: CancellationToken,
+    port: u16,
+}
+
+static SERVER: OnceLock<Mutex<Option<RunningServer>>> = OnceLock::new();
+
+fn server_slot() -> &'static Mutex<Option<RunningServer>> {
+    SERVER.get_or_init(|| Mutex::new(None))
+}
+
+/// Start the remote UI server on `0.0.0.0:port`. If a server is already
+/// running on a different port, it's stopped first. Idempotent for the same
+/// port (no-op when already running there). Returns the port actually bound.
+pub async fn start(port: u16) -> Result<u16> {
+    {
+        let slot = server_slot().lock().unwrap();
+        if let Some(running) = slot.as_ref() {
+            if running.port == port {
+                return Ok(port);
+            }
+        }
+    }
+    stop().await;
+
+    let cancel = CancellationToken::new();
+    let cancel_for_task = cancel.clone();
+    let state = AppState {};
+
+    let router = Router::new()
+        .route("/", get(serve_index))
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/api/heartbeat", post(api_heartbeat))
+        .route("/api/models", get(api_models))
+        .route("/api/chat", post(api_chat))
+        .with_state(state);
+
+    let addr: SocketAddr = SocketAddr::new("0.0.0.0".parse().unwrap(), port);
+    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+        anyhow!(
+            "could not bind remote-ui on {addr}: {e} (try a different port in Settings → Remote)"
+        )
+    })?;
+    eprintln!("remote-ui: listening on http://{addr}");
+
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router)
+            .with_graceful_shutdown(async move { cancel_for_task.cancelled().await })
+            .await;
+    });
+
+    *server_slot().lock().unwrap() = Some(RunningServer { cancel, port });
+    // A start with no remote sessions yet should not flip the flag, but we
+    // refresh in case stale entries had been left behind.
+    refresh_active();
+    Ok(port)
+}
+
+/// Stop the remote UI server if running. Safe to call when not running.
+pub async fn stop() {
+    let prev = server_slot().lock().unwrap().take();
+    if let Some(s) = prev {
+        s.cancel.cancel();
+    }
+    // Drop any "remote" sessions in the tracker so the flag clears immediately
+    // instead of waiting out SESSION_TIMEOUT.
+    {
+        let s = state();
+        let mut t = s.tracker.lock().unwrap();
+        t.sessions
+            .retain(|_, sess| sess.kind != SessionKind::Remote);
+    }
+    refresh_active();
+}
+
+pub fn is_running() -> bool {
+    server_slot().lock().unwrap().is_some()
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+const INDEX_HTML: &str = include_str!("remote_ui/index.html");
+
+async fn serve_index() -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/html; charset=utf-8")
+        .body(Body::from(INDEX_HTML))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+#[derive(Deserialize)]
+struct HeartbeatBody {
+    session_id: String,
+}
+
+async fn api_heartbeat(
+    State(_): State<AppState>,
+    Json(body): Json<HeartbeatBody>,
+) -> impl IntoResponse {
+    state()
+        .tracker
+        .lock()
+        .unwrap()
+        .touch(&body.session_id, SessionKind::Remote);
+    refresh_active();
+    Json(json!({ "ok": true }))
+}
+
+#[derive(Serialize)]
+struct ModelEntry {
+    id: String,
+    label: String,
+}
+
+async fn api_models() -> impl IntoResponse {
+    let mut data = Vec::new();
+    for mode in crate::resolver::KNOWN_MODES {
+        data.push(ModelEntry {
+            id: format!("{}{}", crate::resolver::VIRTUAL_PREFIX, mode),
+            label: format!("anyai · {mode}"),
+        });
+    }
+    Json(json!({ "models": data }))
+}
+
+#[derive(Deserialize)]
+struct ChatBody {
+    model: String,
+    messages: Value,
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+async fn api_chat(
+    State(_): State<AppState>,
+    _headers: HeaderMap,
+    Json(body): Json<ChatBody>,
+) -> Response {
+    if let Some(sid) = &body.session_id {
+        state()
+            .tracker
+            .lock()
+            .unwrap()
+            .touch(sid, SessionKind::Remote);
+        refresh_active();
+    }
+    let resolved = match crate::resolver::translate_virtual(&body.model).await {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("bad model: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    let reply = match crate::ollama::chat_once(&resolved, body.messages).await {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("ollama: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    Json(json!({
+        "model": body.model,
+        "resolved": resolved,
+        "content": reply,
+    }))
+    .into_response()
+}
