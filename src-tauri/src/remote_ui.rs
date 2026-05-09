@@ -5,6 +5,7 @@
 //!
 //!   * `GET  /`                       — the embedded single-page chat shell
 //!   * `POST /api/chat`               — non-streaming proxy to Ollama
+//!   * `POST /api/chat/stream`        — SSE stream of `delta` / `thinking` frames
 //!   * `POST /api/heartbeat`          — registers a remote browser session
 //!   * `GET  /api/models`             — list virtual models for the picker
 //!
@@ -20,6 +21,7 @@ use anyhow::{anyhow, Result};
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -245,6 +247,7 @@ pub async fn start(port: u16) -> Result<u16> {
         .route("/api/heartbeat", post(api_heartbeat))
         .route("/api/models", get(api_models))
         .route("/api/chat", post(api_chat))
+        .route("/api/chat/stream", post(api_chat_stream))
         .with_state(state);
 
     let addr: SocketAddr = SocketAddr::new("0.0.0.0".parse().unwrap(), port);
@@ -385,4 +388,117 @@ async fn api_chat(
         "content": reply,
     }))
     .into_response()
+}
+
+/// Streamed counterpart of `api_chat` over Server-Sent Events. Each token
+/// arrives as a `data: {...}\n\n` frame so the browser can paint
+/// incrementally — same UX as the desktop UI. Emits three frame shapes:
+///
+/// ```text
+///   data: {"thinking":"…"}
+///   data: {"delta":"…"}
+///   data: {"done":true}
+/// ```
+///
+/// Errors arrive as `event: error\ndata: {"message":"…"}` then `done`. Using
+/// SSE rather than chunked JSON keeps the browser-side code trivial — no
+/// custom NDJSON parser, just `EventSource` (or a fetch-stream loop on
+/// platforms where EventSource lacks POST support).
+async fn api_chat_stream(
+    State(_): State<AppState>,
+    _headers: HeaderMap,
+    Json(body): Json<ChatBody>,
+) -> Response {
+    if let Some(sid) = &body.session_id {
+        state()
+            .tracker
+            .lock()
+            .unwrap()
+            .touch(sid, SessionKind::Remote);
+        refresh_active();
+    }
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<
+        std::result::Result<Event, std::convert::Infallible>,
+    >();
+
+    // Resolve before spawning so a bad model id surfaces as the first SSE
+    // frame rather than a flat HTTP 400 (the browser shell already has the
+    // SSE listener wired up at this point).
+    let resolved = match crate::resolver::translate_virtual(&body.model).await {
+        Ok(r) => r,
+        Err(e) => {
+            let err_event = Event::default()
+                .event("error")
+                .data(json!({ "message": format!("bad model: {e}") }).to_string());
+            let _ = tx.send(Ok(err_event));
+            let _ = tx.send(Ok(
+                Event::default().data(json!({ "done": true }).to_string())
+            ));
+            let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx);
+            return Sse::new(stream)
+                .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+                .into_response();
+        }
+    };
+
+    // Each browser request gets its own stream id — we don't currently
+    // expose cancel from the remote UI, but the stream registry needs a
+    // unique key so concurrent chats from different tabs don't collide.
+    let stream_id = format!("remote-{}", uuid_like());
+    let messages = body.messages;
+
+    let tx_thinking = tx.clone();
+    let tx_content = tx.clone();
+    let tx_done = tx.clone();
+    tokio::spawn(async move {
+        let result = crate::ollama::chat_stream(
+            &stream_id,
+            &resolved,
+            messages,
+            move |delta| {
+                let _ = tx_content.send(Ok(
+                    Event::default().data(json!({ "delta": delta }).to_string())
+                ));
+            },
+            move |delta| {
+                let _ = tx_thinking.send(Ok(
+                    Event::default().data(json!({ "thinking": delta }).to_string())
+                ));
+            },
+            move |_outcome| {
+                let _ = tx_done.send(Ok(
+                    Event::default().data(json!({ "done": true }).to_string())
+                ));
+            },
+        )
+        .await;
+        if let Err(e) = result {
+            let _ = tx.send(Ok(Event::default()
+                .event("error")
+                .data(json!({ "message": e.to_string() }).to_string())));
+            let _ = tx.send(Ok(
+                Event::default().data(json!({ "done": true }).to_string())
+            ));
+        }
+    });
+
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx);
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response()
+}
+
+/// Cheap unique-enough id without pulling in a uuid crate. Combines the
+/// monotonic Instant offset with a tiny per-call counter so two streams
+/// started in the same nanosecond still differ.
+fn uuid_like() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    format!("{now_ns:x}-{n:x}")
 }

@@ -2,99 +2,231 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+    />
     <meta name="theme-color" content="#0f0f0f" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="format-detection" content="telephone=no" />
     <title>AnyAI · Remote</title>
     <style>
-      * { box-sizing: border-box; margin: 0; padding: 0; }
+      :root {
+        --bg: #0f0f0f;
+        --bg-elev: #131313;
+        --bg-elev-2: #161616;
+        --border: #1e1e1e;
+        --border-strong: #2a2a3a;
+        --text: #e8e8e8;
+        --text-dim: #888;
+        --text-faint: #555;
+        --accent: #6e6ef7;
+        --accent-soft: #1a1a2a;
+        --safe-bottom: env(safe-area-inset-bottom, 0px);
+        --safe-top: env(safe-area-inset-top, 0px);
+      }
+      * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
       html, body {
         height: 100%;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-        background: #0f0f0f;
-        color: #e8e8e8;
+        background: var(--bg);
+        color: var(--text);
         overflow: hidden;
+        font-size: 16px;
+        line-height: 1.5;
       }
-      .app { display: flex; flex-direction: column; height: 100dvh; }
+      body { overscroll-behavior: none; }
+      /* dvh keeps the layout aligned with the visible viewport when the
+         mobile keyboard opens; falls back to vh on older browsers. */
+      .app {
+        display: flex; flex-direction: column;
+        height: 100vh;
+        height: 100dvh;
+      }
       header {
         flex-shrink: 0;
         display: flex; align-items: center; justify-content: space-between;
         gap: .75rem;
-        padding: .65rem .9rem;
-        border-bottom: 1px solid #1e1e1e;
+        padding: calc(.65rem + var(--safe-top)) .9rem .65rem;
+        border-bottom: 1px solid var(--border);
         background: #0d0d0d;
       }
-      .brand { font-weight: 600; font-size: .95rem; letter-spacing: .01em; }
-      .brand small { color: #6e6ef7; font-weight: 500; margin-left: .35rem; }
+      .brand { font-weight: 600; font-size: 1rem; letter-spacing: .01em; }
+      .brand small { color: var(--accent); font-weight: 500; margin-left: .35rem; font-size: .82rem; }
       select.model {
-        background: #131313;
+        background: var(--bg-elev);
         border: 1px solid #222;
         color: #ccc;
         font: inherit;
-        font-size: .8rem;
-        padding: .3rem .5rem;
-        border-radius: 6px;
+        font-size: .85rem;
+        padding: .4rem .6rem;
+        border-radius: 7px;
+        max-width: 50vw;
+        min-height: 36px;
       }
       main {
         flex: 1;
         min-height: 0;
         overflow-y: auto;
+        overflow-x: hidden;
+        -webkit-overflow-scrolling: touch;
         padding: 1rem .9rem 1.5rem;
         display: flex; flex-direction: column; gap: .65rem;
+        scroll-padding-bottom: 4rem;
       }
       .msg {
-        max-width: 86%;
-        padding: .55rem .75rem;
-        border-radius: 9px;
-        font-size: .9rem;
-        line-height: 1.45;
+        max-width: min(86%, 42rem);
+        padding: .65rem .85rem;
+        border-radius: 14px;
+        font-size: 1rem;
+        line-height: 1.5;
         white-space: pre-wrap;
         word-wrap: break-word;
+        overflow-wrap: anywhere;
       }
-      .msg.user { align-self: flex-end; background: #1a1a2a; }
-      .msg.assistant { align-self: flex-start; background: #161616; border: 1px solid #1e1e1e; }
-      .msg.error { align-self: stretch; background: #2a1414; border: 1px solid #3a1d1d; color: #ffb4b4; font-size: .8rem; }
+      .msg.user {
+        align-self: flex-end;
+        background: var(--accent-soft);
+        border-bottom-right-radius: 4px;
+      }
+      .msg.assistant {
+        align-self: flex-start;
+        background: var(--bg-elev-2);
+        border: 1px solid var(--border);
+        border-bottom-left-radius: 4px;
+      }
+      .msg.error {
+        align-self: stretch;
+        background: #2a1414;
+        border: 1px solid #3a1d1d;
+        color: #ffb4b4;
+        font-size: .85rem;
+        max-width: 100%;
+      }
+      .msg .body { display: block; }
+      .msg .body.streaming::after {
+        content: "▌";
+        margin-left: 1px;
+        color: var(--text-dim);
+        animation: blink 1s steps(2, jump-none) infinite;
+      }
+      @keyframes blink { 50% { opacity: 0; } }
       .empty {
         margin: auto;
         text-align: center;
-        color: #555;
-        font-size: .85rem;
+        color: var(--text-faint);
+        font-size: .9rem;
         padding: 2rem 1rem;
       }
+
+      /* Collapsible "Thoughts" panel — same shape as the desktop UI's
+         <details>-based block. Open by default while streaming so the user
+         sees the model thinking; the user can collapse afterwards. */
+      details.thinking {
+        margin-bottom: .35rem;
+        background: #101218;
+        border: 1px solid #1a1f2e;
+        border-radius: 9px;
+        font-size: .82rem;
+      }
+      details.thinking > summary {
+        list-style: none;
+        cursor: pointer;
+        padding: .45rem .7rem;
+        color: var(--text-dim);
+        display: flex; align-items: center; gap: .4rem;
+        user-select: none;
+      }
+      details.thinking > summary::-webkit-details-marker { display: none; }
+      details.thinking > summary::before {
+        content: "▸";
+        color: var(--text-faint);
+        font-size: .7rem;
+        transition: transform .15s;
+      }
+      details.thinking[open] > summary::before { transform: rotate(90deg); }
+      details.thinking .think-body {
+        padding: 0 .7rem .55rem 1.4rem;
+        color: #9aa;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        overflow-wrap: anywhere;
+        line-height: 1.55;
+      }
+      details.thinking[data-active="true"] > summary {
+        color: var(--accent);
+      }
+      details.thinking[data-active="true"] > summary::after {
+        content: "";
+        width: 6px; height: 6px;
+        border-radius: 50%;
+        background: var(--accent);
+        margin-left: auto;
+        animation: pulse-dot 1.4s ease-in-out infinite;
+      }
+      @keyframes pulse-dot { 50% { opacity: .4; } }
+
       footer {
         flex-shrink: 0;
-        border-top: 1px solid #1e1e1e;
+        border-top: 1px solid var(--border);
         background: #0d0d0d;
-        padding: .55rem .65rem calc(.55rem + env(safe-area-inset-bottom));
+        padding: .55rem .65rem calc(.55rem + var(--safe-bottom));
         display: flex; gap: .5rem; align-items: flex-end;
       }
       textarea {
         flex: 1;
         resize: none;
-        background: #131313;
+        background: var(--bg-elev);
         border: 1px solid #222;
-        color: #e8e8e8;
+        color: var(--text);
+        font: inherit;
+        font-size: 1rem;
+        padding: .65rem .8rem;
+        border-radius: 12px;
+        max-height: 9rem;
+        min-height: 44px;
+        line-height: 1.45;
+      }
+      textarea:focus { outline: none; border-color: var(--border-strong); }
+      button.send, button.stop {
+        background: var(--accent-soft);
+        border: 1px solid var(--border-strong);
+        color: var(--text);
+        padding: 0 1.05rem;
+        border-radius: 12px;
         font: inherit;
         font-size: .9rem;
-        padding: .55rem .65rem;
-        border-radius: 8px;
-        max-height: 8rem;
-        min-height: 2.4rem;
-        line-height: 1.4;
-      }
-      textarea:focus { outline: none; border-color: #3a3a55; }
-      button.send {
-        background: #1a1a2a;
-        border: 1px solid #2a2a3a;
-        color: #e8e8e8;
-        padding: .55rem .85rem;
-        border-radius: 8px;
-        font-size: .85rem;
         cursor: pointer;
         align-self: flex-end;
+        height: 44px;
+        min-width: 64px;
+        flex-shrink: 0;
       }
-      button.send:hover:not(:disabled) { background: #22223a; border-color: #3a3a55; }
+      button.send:hover:not(:disabled),
+      button.stop:hover:not(:disabled) {
+        background: #22223a;
+        border-color: #3a3a55;
+      }
       button.send:disabled { opacity: .4; cursor: default; }
-      .status { font-size: .72rem; color: #666; }
+      button.stop {
+        background: #2a1818;
+        border-color: #4a2222;
+        color: #ffb4b4;
+      }
+
+      /* Phone tweaks: tighten paddings on narrow screens but keep the
+         touch targets large enough to hit comfortably (44px min). */
+      @media (max-width: 480px) {
+        header { padding: calc(.55rem + var(--safe-top)) .65rem .55rem; }
+        main { padding: .85rem .65rem 1.25rem; gap: .55rem; }
+        .msg { max-width: 92%; padding: .6rem .75rem; }
+        select.model { font-size: .78rem; padding: .3rem .45rem; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .msg .body.streaming::after,
+        details.thinking[data-active="true"] > summary::after { animation: none; }
+      }
     </style>
   </head>
   <body>
@@ -110,7 +242,7 @@
         </div>
       </main>
       <footer>
-        <textarea id="input" rows="1" placeholder="Message…" autofocus></textarea>
+        <textarea id="input" rows="1" placeholder="Message…"></textarea>
         <button class="send" id="send">Send</button>
       </footer>
     </div>
@@ -131,6 +263,7 @@
       const sendBtn = document.getElementById("send");
       const modelSel = document.getElementById("model");
       const messages = [];
+      let inflight = null;
 
       async function heartbeat() {
         try {
@@ -164,59 +297,238 @@
       }
       loadModels();
 
-      function appendMsg(role, content) {
+      // -------------------------------------------------------------------
+      // Rendering helpers
+      // -------------------------------------------------------------------
+
+      function nearBottom() {
+        const slack = 80;
+        return log.scrollTop + log.clientHeight + slack >= log.scrollHeight;
+      }
+      function scrollToBottom(force) {
+        if (force || nearBottom()) {
+          log.scrollTop = log.scrollHeight;
+        }
+      }
+
+      function appendUserMsg(text) {
         if (empty.parentNode) empty.remove();
         const el = document.createElement("div");
-        el.className = "msg " + role;
-        el.textContent = content;
+        el.className = "msg user";
+        el.textContent = text;
         log.appendChild(el);
-        log.scrollTop = log.scrollHeight;
-        return el;
+        scrollToBottom(true);
+      }
+
+      function appendAssistantBubble() {
+        if (empty.parentNode) empty.remove();
+        const wrap = document.createElement("div");
+        wrap.className = "msg assistant";
+
+        const thinkDetails = document.createElement("details");
+        thinkDetails.className = "thinking";
+        thinkDetails.open = true;
+        thinkDetails.dataset.active = "true";
+        thinkDetails.style.display = "none"; // shown lazily on first thinking token
+
+        const thinkSummary = document.createElement("summary");
+        thinkSummary.textContent = "Thinking…";
+        const thinkBody = document.createElement("div");
+        thinkBody.className = "think-body";
+
+        thinkDetails.appendChild(thinkSummary);
+        thinkDetails.appendChild(thinkBody);
+
+        const body = document.createElement("span");
+        body.className = "body streaming";
+
+        wrap.appendChild(thinkDetails);
+        wrap.appendChild(body);
+        log.appendChild(wrap);
+        scrollToBottom(true);
+        return { wrap, thinkDetails, thinkSummary, thinkBody, body };
+      }
+
+      function appendErrorMsg(text) {
+        if (empty.parentNode) empty.remove();
+        const el = document.createElement("div");
+        el.className = "msg error";
+        el.textContent = "Error: " + text;
+        log.appendChild(el);
+        scrollToBottom(true);
+      }
+
+      // -------------------------------------------------------------------
+      // Streaming via SSE-over-fetch. We can't use EventSource because it
+      // only supports GET; the chat payload needs POST. A fetch-stream
+      // reader + tiny SSE parser is plenty for our framing.
+      // -------------------------------------------------------------------
+
+      async function streamChat(payload, handlers) {
+        const ctrl = new AbortController();
+        inflight = ctrl;
+        let r;
+        try {
+          r = await fetch("/api/chat/stream", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payload),
+            signal: ctrl.signal,
+          });
+        } catch (e) {
+          if (e.name !== "AbortError") handlers.onError(String(e));
+          handlers.onDone();
+          return;
+        }
+        if (!r.ok) {
+          handlers.onError("HTTP " + r.status);
+          handlers.onDone();
+          return;
+        }
+
+        const reader = r.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let buf = "";
+        try {
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            // SSE frames are separated by a blank line. Split on \n\n /
+            // \r\n\r\n to be tolerant of either line ending.
+            let idx;
+            while ((idx = buf.search(/\r?\n\r?\n/)) !== -1) {
+              const raw = buf.slice(0, idx);
+              const sep = buf.slice(idx).match(/^\r?\n\r?\n/)[0];
+              buf = buf.slice(idx + sep.length);
+              processFrame(raw);
+            }
+          }
+        } catch (e) {
+          if (e.name !== "AbortError") handlers.onError(String(e));
+        } finally {
+          inflight = null;
+        }
+
+        function processFrame(raw) {
+          let event = "message";
+          let data = "";
+          for (const line of raw.split(/\r?\n/)) {
+            if (!line) continue;
+            if (line.startsWith(":")) continue; // SSE comment / keep-alive
+            if (line.startsWith("event:")) {
+              event = line.slice(6).trim();
+            } else if (line.startsWith("data:")) {
+              data += (data ? "\n" : "") + line.slice(5).trim();
+            }
+          }
+          if (!data) return;
+          let payload;
+          try { payload = JSON.parse(data); } catch { return; }
+          if (event === "error" || payload.error) {
+            handlers.onError(payload.message || payload.error || "stream error");
+            return;
+          }
+          if (typeof payload.thinking === "string") handlers.onThinking(payload.thinking);
+          if (typeof payload.delta === "string") handlers.onDelta(payload.delta);
+          if (payload.done) handlers.onDone();
+        }
+      }
+
+      // -------------------------------------------------------------------
+      // Send loop
+      // -------------------------------------------------------------------
+
+      function setSending(sending) {
+        if (sending) {
+          sendBtn.textContent = "Stop";
+          sendBtn.classList.remove("send");
+          sendBtn.classList.add("stop");
+        } else {
+          sendBtn.textContent = "Send";
+          sendBtn.classList.remove("stop");
+          sendBtn.classList.add("send");
+        }
       }
 
       input.addEventListener("input", () => {
         input.style.height = "auto";
-        input.style.height = Math.min(input.scrollHeight, 128) + "px";
+        input.style.height = Math.min(input.scrollHeight, 144) + "px";
       });
       input.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" && !e.shiftKey) {
+        // On phones the Enter key inserts a newline (more like a real
+        // messenger); on desktops Enter sends, Shift+Enter newlines.
+        const isCoarse = matchMedia("(pointer: coarse)").matches;
+        if (e.key === "Enter" && !e.shiftKey && !isCoarse) {
           e.preventDefault();
           send();
         }
       });
-      sendBtn.addEventListener("click", send);
+      sendBtn.addEventListener("click", () => {
+        if (inflight) {
+          inflight.abort();
+        } else {
+          send();
+        }
+      });
 
       async function send() {
         const text = input.value.trim();
-        if (!text || sendBtn.disabled) return;
+        if (!text || inflight) return;
         input.value = "";
         input.style.height = "auto";
-        sendBtn.disabled = true;
-        appendMsg("user", text);
+        appendUserMsg(text);
         messages.push({ role: "user", content: text });
-        const placeholder = appendMsg("assistant", "…");
-        try {
-          const r = await fetch("/api/chat", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              model: modelSel.value || "anyai-text",
-              messages,
-              session_id: SESSION_ID,
-            }),
-          });
-          const j = await r.json();
-          if (j.error) throw new Error(j.error);
-          placeholder.textContent = j.content || "";
-          messages.push({ role: "assistant", content: j.content || "" });
-        } catch (e) {
-          placeholder.remove();
-          appendMsg("error", "Error: " + (e && e.message ? e.message : String(e)));
-          messages.pop();
-        } finally {
-          sendBtn.disabled = false;
-          input.focus();
-        }
+        const slot = appendAssistantBubble();
+        let assistantContent = "";
+        let assistantThinking = "";
+        setSending(true);
+        await streamChat(
+          {
+            model: modelSel.value || "anyai-text",
+            messages,
+            session_id: SESSION_ID,
+          },
+          {
+            onThinking(delta) {
+              assistantThinking += delta;
+              slot.thinkDetails.style.display = "";
+              slot.thinkSummary.textContent = assistantContent ? "Thoughts" : "Thinking…";
+              slot.thinkBody.textContent = assistantThinking;
+              scrollToBottom();
+            },
+            onDelta(delta) {
+              assistantContent += delta;
+              slot.body.textContent = assistantContent;
+              if (assistantThinking) {
+                // First content token means the model is past thinking —
+                // collapse the panel and stop the pulsing dot.
+                slot.thinkDetails.dataset.active = "false";
+                slot.thinkDetails.open = false;
+                slot.thinkSummary.textContent = "Thoughts";
+              }
+              scrollToBottom();
+            },
+            onError(msg) {
+              slot.wrap.remove();
+              appendErrorMsg(msg);
+              messages.pop();
+            },
+            onDone() {
+              slot.body.classList.remove("streaming");
+              slot.thinkDetails.dataset.active = "false";
+              if (assistantContent) {
+                messages.push({ role: "assistant", content: assistantContent });
+              } else if (slot.wrap.parentNode) {
+                // Empty assistant bubble (e.g. user aborted before any token)
+                slot.wrap.remove();
+                messages.pop();
+              }
+              setSending(false);
+              input.focus();
+            },
+          },
+        );
       }
     </script>
   </body>
