@@ -5,7 +5,7 @@
     model: string;
     mode: Mode;
     family: string;
-    onOpenSettings: (tab: "providers" | "families" | "models") => void;
+    onOpenSettings: (tab: "providers" | "families" | "models" | "storage") => void;
   }>();
 </script>
 

@@ -84,6 +84,10 @@ export interface Config {
   kept_models: string[];
   mode_overrides: Partial<Record<Mode, string | null>>;
   tracked_modes: Mode[];
+  /** Where AnyAI persists conversations and generated artifacts. Defaults to
+   *  `~/.anyai/conversations/`. Stored as an absolute path so exported
+   *  configs are readable, though new machines re-default on first load. */
+  conversation_dir: string;
   api: ApiConfig;
   auto_update: AutoUpdateConfig;
   providers: Provider[];

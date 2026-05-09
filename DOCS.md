@@ -511,7 +511,7 @@ A manifest can `imports` other manifests by URL. Their families are merged into 
   "ttl_minutes": 1440,
   "default_family": "gemma4",
   "imports": [
-    "https://anyai.run/manifests/default.json",     // pulls the AnyAI default families in
+    "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/manifests/default.json",     // pulls the AnyAI default families in
     "https://partner.com/anyai/manifest.json"       // and a partner's family
   ],
   "families": {
@@ -710,7 +710,7 @@ The `manifests/` cache stores one entry per URL. When a manifest reached via an 
     "check_interval_hours": 6
   },
   "providers": [
-    { "name": "AnyAI Default", "url": "https://anyai.run/manifest/default.json" },
+    { "name": "AnyAI Default", "url": "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/manifests/default.json" },
     { "name": "Local Dev",     "url": "https://ai.internal/manifest.json" }
   ]
 }

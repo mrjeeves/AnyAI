@@ -1,10 +1,19 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { getModelStatusWithMeta, keepModel, unkeepModel, setModeOverride, pruneNow, recomputeRecommendedSet } from "../../model-lifecycle";
+  import {
+    getModelStatusWithMeta,
+    keepModel,
+    unkeepModel,
+    setModeOverride,
+    pruneNow,
+    recomputeRecommendedSet,
+    lookupModelUsage,
+    type ModelUsage,
+  } from "../../model-lifecycle";
   import { getAllManifests } from "../../providers";
   import { loadConfig } from "../../config";
-  import type { Mode } from "../../types";
+  import type { HardwareProfile, Mode } from "../../types";
 
   type ModelMeta = Awaited<ReturnType<typeof getModelStatusWithMeta>>[number];
 
@@ -14,13 +23,30 @@
   let prunedList = $state<string[]>([]);
   let tab = $state<"installed" | "overrides">("installed");
 
+  let hardware = $state<HardwareProfile | null>(null);
+  let activeMode = $state<Mode>("text");
+  /** Tag the resolver currently picks for (active provider, active family,
+   *  active mode). Only this exact tag has its trash button suppressed —
+   *  every other model is freely deletable, with cross-family/mode warnings
+   *  surfaced in the confirmation dialog. */
+  let activeTag = $state<string | null>(null);
+
   let overridePicker = $state<{ mode: Mode; open: boolean } | null>(null);
   let availableModels = $state<string[]>([]);
-  let deleteTarget = $state<{ name: string; size: number } | null>(null);
+  let deleteTarget = $state<{ name: string; size: number; kept: boolean } | null>(null);
+  let deleteUsage = $state<ModelUsage | null>(null);
+  let deleteUsageLoading = $state(false);
   let deleting = $state(false);
   let deleteError = $state("");
 
   onMount(async () => {
+    try {
+      hardware = await invoke<HardwareProfile>("detect_hardware");
+    } catch {}
+    try {
+      const config = await loadConfig();
+      activeMode = config.active_mode;
+    } catch {}
     await reload();
     try {
       const manifests = await getAllManifests();
@@ -47,6 +73,16 @@
     // cleanup pass writes the cache.
     try { await recomputeRecommendedSet(); } catch {}
     models = await getModelStatusWithMeta();
+    if (hardware) {
+      // Resolve the live tag once per reload so per-row trash visibility is a
+      // pure equality check; cheaper than computing usage for every row.
+      try {
+        const probe = await lookupModelUsage("__probe__", hardware, activeMode);
+        activeTag = probe.activeTag;
+      } catch {
+        activeTag = null;
+      }
+    }
     loading = false;
   }
 
@@ -63,19 +99,79 @@
     await reload();
   }
 
+  async function startDelete(model: ModelMeta) {
+    if (!hardware) return;
+    deleteTarget = { name: model.name, size: model.size, kept: model.kept };
+    deleteUsage = null;
+    deleteError = "";
+    deleteUsageLoading = true;
+    try {
+      deleteUsage = await lookupModelUsage(model.name, hardware, activeMode);
+    } catch {
+      deleteUsage = null;
+    } finally {
+      deleteUsageLoading = false;
+    }
+  }
+
   async function confirmDelete() {
     if (!deleteTarget || deleting) return;
+    if (deleteUsage?.isActiveTag) return; // Hard-locked by the active-tag guard.
     deleting = true;
     deleteError = "";
     try {
+      // Manual delete trumps the pin: clear the keep flag first so it doesn't
+      // resurrect the entry on the next reload.
+      if (deleteTarget.kept) {
+        try { await unkeepModel(deleteTarget.name); } catch {}
+      }
       await invoke("ollama_delete_model", { name: deleteTarget.name });
       deleteTarget = null;
+      deleteUsage = null;
       await reload();
     } catch (e) {
       deleteError = String(e);
     } finally {
       deleting = false;
     }
+  }
+
+  function closeDelete() {
+    if (deleting) return;
+    deleteTarget = null;
+    deleteUsage = null;
+    deleteError = "";
+  }
+
+  /** Cross-family / cross-mode usages worth bolding in the dialog. The
+   *  delete is hard-blocked when isActiveTag is true, so the active triple
+   *  is filtered out either way and the dialog lists what the user might not
+   *  expect — what they'd silently re-pull later if they switch family or
+   *  mode after deleting. */
+  async function getActiveTriple(): Promise<{ provider: string; family: string; mode: Mode } | null> {
+    try {
+      const config = await loadConfig();
+      return { provider: config.active_provider, family: config.active_family, mode: activeMode };
+    } catch {
+      return null;
+    }
+  }
+  let activeTriple = $state<{ provider: string; family: string; mode: Mode } | null>(null);
+  $effect(() => {
+    if (deleteTarget) {
+      getActiveTriple().then((t) => (activeTriple = t));
+    }
+  });
+  function otherUses(usage: ModelUsage | null): ModelUsage["uses"] {
+    if (!usage || !activeTriple) return usage?.uses ?? [];
+    return usage.uses.filter(
+      (u) =>
+        !(
+          u.provider === activeTriple!.provider &&
+          u.familyName === activeTriple!.family &&
+          u.mode === activeTriple!.mode
+        ),
+    );
   }
 
   async function setOverride(mode: Mode, model: string | null) {
@@ -146,10 +242,16 @@
             >
               {m.kept ? "📌" : "📍"}
             </button>
-            {#if !m.kept && m.recommended_by.length === 0}
+            {#if m.name === activeTag}
+              <span
+                class="trash-btn locked"
+                title="In use right now — switch family or mode to delete"
+                aria-hidden="true"
+              >🔒</span>
+            {:else}
               <button
                 class="trash-btn"
-                onclick={() => (deleteTarget = { name: m.name, size: m.size })}
+                onclick={() => startDelete(m)}
                 title="Delete this model"
                 aria-label="Delete {m.name}"
               >
@@ -203,19 +305,55 @@
   {#if deleteTarget}
     <div
       class="confirm-overlay"
-      onclick={() => deleting || (deleteTarget = null)}
+      onclick={closeDelete}
       role="presentation"
     ></div>
     <div class="confirm" role="dialog" aria-label="Delete model">
       <h3>Delete this model?</h3>
       <p class="confirm-name">{deleteTarget.name}</p>
       <p class="confirm-size">Frees {sizeLabel(deleteTarget.size)} of disk space.</p>
+
+      {#if deleteUsageLoading}
+        <p class="confirm-info">Checking where this model is used…</p>
+      {:else if deleteUsage?.isActiveTag}
+        <p class="confirm-error">
+          <strong>This is the model currently in use.</strong>
+          Switch family or mode first, then delete.
+        </p>
+      {:else if otherUses(deleteUsage).length > 0}
+        <p class="confirm-warn-lead">
+          Heads up — this is the recommended model for:
+        </p>
+        <ul class="confirm-uses">
+          {#each otherUses(deleteUsage) as u}
+            <li>
+              <strong>{u.familyLabel}</strong>
+              <span class="use-meta">· {u.mode} mode</span>
+              {#if u.provider !== activeTriple?.provider}
+                <span class="use-meta">· {u.provider}</span>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+        <p class="confirm-warn-tail">
+          You can still delete it; AnyAI will re-pull when you switch.
+        </p>
+      {/if}
+
+      {#if deleteTarget.kept}
+        <p class="confirm-info">This model is pinned. Deleting will unpin it.</p>
+      {/if}
+
       {#if deleteError}
         <p class="confirm-error">{deleteError}</p>
       {/if}
       <div class="confirm-actions">
-        <button class="cancel" disabled={deleting} onclick={() => (deleteTarget = null)}>Cancel</button>
-        <button class="delete" disabled={deleting} onclick={confirmDelete}>
+        <button class="cancel" disabled={deleting} onclick={closeDelete}>Cancel</button>
+        <button
+          class="delete"
+          disabled={deleting || deleteUsageLoading || deleteUsage?.isActiveTag}
+          onclick={confirmDelete}
+        >
           {deleting ? "Deleting…" : "Delete"}
         </button>
       </div>
@@ -325,11 +463,36 @@
     margin-bottom: .5rem;
   }
   .confirm-size { font-size: .78rem; color: #888; margin-bottom: .85rem; }
+  .confirm-info {
+    font-size: .75rem; color: #aaa; background: #1a1a22;
+    padding: .4rem .6rem; border-radius: 5px; margin-bottom: .6rem;
+  }
+  .confirm-warn-lead {
+    font-size: .78rem; color: #ddd; margin-bottom: .35rem;
+  }
+  .confirm-warn-tail {
+    font-size: .73rem; color: #888; margin-top: .25rem; margin-bottom: .75rem;
+    font-style: italic;
+  }
+  .confirm-uses {
+    list-style: none;
+    background: #1f1a0d; border: 1px solid #3a2c10;
+    border-radius: 6px; padding: .45rem .65rem; margin-bottom: .35rem;
+    display: flex; flex-direction: column; gap: .25rem;
+  }
+  .confirm-uses li { font-size: .8rem; color: #f0d9a0; }
+  .confirm-uses li strong { color: #ffd166; font-weight: 700; }
+  .confirm-uses .use-meta { color: #a89070; font-weight: 400; margin-left: .15rem; }
+  .trash-btn.locked {
+    cursor: default;
+    opacity: .35;
+  }
   .confirm-error {
     font-size: .75rem; color: #f88; background: #2a1a1a;
     padding: .4rem .6rem; border-radius: 5px; margin-bottom: .75rem;
     word-break: break-word;
   }
+  .confirm-error strong { color: #ffb3b3; }
   .confirm-actions { display: flex; justify-content: flex-end; gap: .5rem; }
   .confirm-actions button {
     padding: .4rem .9rem; border-radius: 6px; font-size: .8rem;

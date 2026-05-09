@@ -7,6 +7,14 @@ async function configPath(): Promise<string> {
   return `${home}/.anyai/config.json`;
 }
 
+/** Default location for persisted chats / artifacts. Lives under the same
+ *  `~/.anyai/` tree as the rest of AnyAI's state so a single directory holds
+ *  everything the user might want to back up or wipe. */
+async function defaultConversationDir(): Promise<string> {
+  const home = await homeDir();
+  return `${home}/.anyai/conversations`;
+}
+
 const DEFAULT_API: ApiConfig = {
   enabled: true,
   host: "127.0.0.1",
@@ -30,6 +38,8 @@ const DEFAULT_CONFIG: Config = {
   kept_models: [],
   mode_overrides: {},
   tracked_modes: ["text"],
+  // Filled at first load via defaultConversationDir() — needs an async homeDir().
+  conversation_dir: "",
   api: { ...DEFAULT_API },
   auto_update: { ...DEFAULT_AUTO_UPDATE },
   providers: [
@@ -49,6 +59,9 @@ export async function loadConfig(): Promise<Config> {
     if (await exists(path)) {
       const raw = JSON.parse(await readTextFile(path));
       _cached = mergeDefaults(raw);
+      if (!_cached.conversation_dir) {
+        _cached.conversation_dir = await defaultConversationDir();
+      }
       // Persist any defaults we filled in so subsequent loads are consistent.
       await saveConfig(_cached);
       return _cached;
@@ -57,8 +70,31 @@ export async function loadConfig(): Promise<Config> {
     // Corrupt config — reset.
   }
   _cached = structuredClone(DEFAULT_CONFIG);
+  _cached.conversation_dir = await defaultConversationDir();
   await saveConfig(_cached);
   return _cached;
+}
+
+/** Pre-1.0 builds shipped this URL for the AnyAI Default provider. The host
+ *  no longer serves the manifest; rewrite it on load so users with an older
+ *  config don't see a dead URL in the Providers tab. Cheap; runs once per
+ *  load and persists via saveConfig. */
+const LEGACY_ANYAI_RUN_HOST = "anyai.run";
+const CANONICAL_DEFAULT_URL =
+  "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/manifests/default.json";
+
+function rewriteLegacyProviderUrls(providers: Config["providers"]): Config["providers"] {
+  return providers.map((p) => {
+    try {
+      const host = new URL(p.url).hostname;
+      if (host === LEGACY_ANYAI_RUN_HOST) {
+        return { ...p, url: CANONICAL_DEFAULT_URL };
+      }
+    } catch {
+      // Malformed URL — leave it alone; the user can edit/remove via the UI.
+    }
+    return p;
+  });
 }
 
 function mergeDefaults(raw: Record<string, unknown>): Config {
@@ -70,7 +106,9 @@ function mergeDefaults(raw: Record<string, unknown>): Config {
     mode_overrides: (raw as { mode_overrides?: Config["mode_overrides"] }).mode_overrides ?? {},
     kept_models: (raw as { kept_models?: string[] }).kept_models ?? [],
     tracked_modes: (raw as { tracked_modes?: Config["tracked_modes"] }).tracked_modes ?? [],
-    providers: (raw as { providers?: Config["providers"] }).providers ?? DEFAULT_CONFIG.providers,
+    providers: rewriteLegacyProviderUrls(
+      (raw as { providers?: Config["providers"] }).providers ?? DEFAULT_CONFIG.providers,
+    ),
   };
   // Strip removed legacy fields so they don't linger in the saved config.
   delete (merged as unknown as { sources?: unknown }).sources;
