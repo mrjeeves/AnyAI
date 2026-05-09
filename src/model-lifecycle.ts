@@ -3,8 +3,8 @@ import { homeDir } from "@tauri-apps/api/path";
 import { invoke } from "@tauri-apps/api/core";
 import { loadConfig, saveConfig } from "./config";
 import { getAllManifests } from "./providers";
-import { allRecommendedModels } from "./manifest";
-import type { ModelStatusCache, OllamaModel, Mode } from "./types";
+import { allRecommendedModels, resolveModel } from "./manifest";
+import type { HardwareProfile, ModelStatusCache, OllamaModel, Mode } from "./types";
 
 async function statusCachePath(): Promise<string> {
   const home = await homeDir();
@@ -151,6 +151,72 @@ export async function markEvictedNow(tag: string): Promise<void> {
     last_recommended: new Date(0).toISOString(),
   };
   await writeStatusCache(cache);
+}
+
+/**
+ * Where a model tag is the resolver's pick. One entry per
+ * (provider, family, mode) triple whose resolveModel returns this tag for the
+ * current hardware. Drives the bolded warnings in the delete dialog so the
+ * user knows what they'd be re-pulling if they switch family/mode later.
+ */
+export interface ModelUsageRecord {
+  provider: string;
+  familyName: string;
+  familyLabel: string;
+  mode: Mode;
+}
+
+export interface ModelUsage {
+  /** True iff (active_provider, active_family, active_mode) currently resolves to this tag. */
+  isActiveTag: boolean;
+  /** Currently-resolved tag the dialog can name in the lock message. */
+  activeTag: string | null;
+  uses: ModelUsageRecord[];
+}
+
+const ALL_MODES: Mode[] = ["text", "vision", "code", "transcribe"];
+
+/**
+ * Compute everywhere a saved provider's manifest would resolve to `tag` for
+ * the given hardware. Honours mode_overrides (so a tag pinned via override
+ * shows up under the mode it overrides). Cheap enough to run on every delete
+ * dialog open — no caching needed.
+ */
+export async function lookupModelUsage(
+  tag: string,
+  hardware: HardwareProfile,
+  activeMode: Mode,
+): Promise<ModelUsage> {
+  const [allManifests, config] = await Promise.all([getAllManifests(), loadConfig()]);
+  const uses: ModelUsageRecord[] = [];
+  let activeTag: string | null = null;
+
+  for (const { provider, manifest } of allManifests) {
+    for (const [familyName, family] of Object.entries(manifest.families ?? {})) {
+      for (const mode of ALL_MODES) {
+        if (!family.modes[mode]) continue;
+        const resolved = resolveModel(hardware, manifest, mode, config.mode_overrides, familyName);
+        if (
+          provider.name === config.active_provider &&
+          familyName === config.active_family &&
+          mode === activeMode
+        ) {
+          activeTag = resolved;
+        }
+        if (resolved === tag) {
+          uses.push({
+            provider: provider.name,
+            familyName,
+            familyLabel: family.label,
+            mode,
+          });
+        }
+      }
+    }
+  }
+
+  const isActiveTag = activeTag === tag;
+  return { isActiveTag, activeTag, uses };
 }
 
 export async function getModelStatusWithMeta(): Promise<

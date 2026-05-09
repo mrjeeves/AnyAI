@@ -462,8 +462,10 @@ pub fn default_config_value() -> Value {
 
 /// Shallow-merge missing top-level + nested-object keys from defaults so users
 /// upgrading from older configs don't see crashes on first load. Also seeds
-/// `tracked_modes` from `active_mode` for legacy configs and drops removed
-/// fields (e.g. the retired `sources`).
+/// `tracked_modes` from `active_mode` for legacy configs, rewrites any saved
+/// `anyai.run` provider URLs to the canonical raw.githubusercontent.com URL
+/// (the host they used to point to is no longer authoritative), and drops
+/// removed fields (e.g. the retired `sources`).
 pub fn merge_defaults(mut config: Value) -> Value {
     let defaults = default_config_value();
     if let (Some(obj), Some(def_obj)) = (config.as_object_mut(), defaults.as_object()) {
@@ -487,6 +489,8 @@ pub fn merge_defaults(mut config: Value) -> Value {
             }
         }
     }
+    // Rewrite stale anyai.run provider URLs from pre-1.0 builds.
+    rewrite_legacy_provider_urls(&mut config);
     // One-shot upgrade: if tracked_modes is empty, seed from active_mode.
     let needs_seed = config["tracked_modes"]
         .as_array()
@@ -501,6 +505,28 @@ pub fn merge_defaults(mut config: Value) -> Value {
         config["active_family"] = serde_json::json!("gemma4");
     }
     config
+}
+
+const CANONICAL_DEFAULT_URL: &str =
+    "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/manifests/default.json";
+
+fn rewrite_legacy_provider_urls(config: &mut Value) {
+    let Some(arr) = config["providers"].as_array_mut() else {
+        return;
+    };
+    for entry in arr {
+        let Some(url) = entry.get("url").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        // Match by host so `anyai.run`, `www.anyai.run`, etc. all retarget.
+        let host_start = url.find("//").map(|i| i + 2).unwrap_or(0);
+        let after_host = &url[host_start..];
+        let host_end = after_host.find('/').unwrap_or(after_host.len());
+        let host = &after_host[..host_end];
+        if host == "anyai.run" || host == "www.anyai.run" {
+            entry["url"] = serde_json::json!(CANONICAL_DEFAULT_URL);
+        }
+    }
 }
 
 #[cfg(test)]
