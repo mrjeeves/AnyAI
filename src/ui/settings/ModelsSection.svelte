@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
   import { getModelStatusWithMeta, keepModel, unkeepModel, setModeOverride, pruneNow, recomputeRecommendedSet } from "../../model-lifecycle";
   import { getAllManifests } from "../../providers";
   import { loadConfig } from "../../config";
@@ -15,6 +16,9 @@
 
   let overridePicker = $state<{ mode: Mode; open: boolean } | null>(null);
   let availableModels = $state<string[]>([]);
+  let deleteTarget = $state<{ name: string; size: number } | null>(null);
+  let deleting = $state(false);
+  let deleteError = $state("");
 
   onMount(async () => {
     await reload();
@@ -55,6 +59,21 @@
     prunedList = await pruneNow();
     pruning = false;
     await reload();
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget || deleting) return;
+    deleting = true;
+    deleteError = "";
+    try {
+      await invoke("ollama_delete_model", { name: deleteTarget.name });
+      deleteTarget = null;
+      await reload();
+    } catch (e) {
+      deleteError = String(e);
+    } finally {
+      deleting = false;
+    }
   }
 
   async function setOverride(mode: Mode, model: string | null) {
@@ -125,6 +144,16 @@
             >
               {m.kept ? "📌" : "📍"}
             </button>
+            {#if !m.kept && m.recommended_by.length === 0}
+              <button
+                class="trash-btn"
+                onclick={() => (deleteTarget = { name: m.name, size: m.size })}
+                title="Delete this model"
+                aria-label="Delete {m.name}"
+              >
+                🗑
+              </button>
+            {/if}
           </div>
         {/each}
       </div>
@@ -168,6 +197,28 @@
       </div>
     </div>
   {/if}
+
+  {#if deleteTarget}
+    <div
+      class="confirm-overlay"
+      onclick={() => deleting || (deleteTarget = null)}
+      role="presentation"
+    ></div>
+    <div class="confirm" role="dialog" aria-label="Delete model">
+      <h3>Delete this model?</h3>
+      <p class="confirm-name">{deleteTarget.name}</p>
+      <p class="confirm-size">Frees {sizeLabel(deleteTarget.size)} of disk space.</p>
+      {#if deleteError}
+        <p class="confirm-error">{deleteError}</p>
+      {/if}
+      <div class="confirm-actions">
+        <button class="cancel" disabled={deleting} onclick={() => (deleteTarget = null)}>Cancel</button>
+        <button class="delete" disabled={deleting} onclick={confirmDelete}>
+          {deleting ? "Deleting…" : "Delete"}
+        </button>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -208,6 +259,8 @@
   .override-badge { font-size: .68rem; color: #9a7; }
   .pin-btn { background: none; border: none; cursor: pointer; font-size: .9rem; opacity: .5; }
   .pin-btn:hover, .pin-btn.pinned { opacity: 1; }
+  .trash-btn { background: none; border: none; cursor: pointer; font-size: .9rem; opacity: .5; }
+  .trash-btn:hover { opacity: 1; color: #f66; }
   .overrides-section {
     padding: .75rem;
     display: flex; flex-direction: column; gap: .5rem;
@@ -252,4 +305,41 @@
   }
   .picker-list button:hover { background: #1e1e1e; color: #e8e8e8; }
   .picker-list .empty { color: #555; text-align: center; padding: 1rem; font-style: italic; }
+  .confirm-overlay {
+    position: fixed; inset: 0; background: rgba(0, 0, 0, .65); z-index: 30;
+  }
+  .confirm {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: min(380px, 90vw);
+    background: #161616; border: 1px solid #2a2a2a; border-radius: 10px;
+    padding: 1rem 1.1rem; z-index: 31;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, .6);
+  }
+  .confirm h3 { font-size: .9rem; font-weight: 600; margin-bottom: .5rem; }
+  .confirm-name {
+    font-family: monospace; font-size: .85rem; color: #e8e8e8;
+    background: #0d0d0d; padding: .4rem .6rem; border-radius: 5px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    margin-bottom: .5rem;
+  }
+  .confirm-size { font-size: .78rem; color: #888; margin-bottom: .85rem; }
+  .confirm-error {
+    font-size: .75rem; color: #f88; background: #2a1a1a;
+    padding: .4rem .6rem; border-radius: 5px; margin-bottom: .75rem;
+    word-break: break-word;
+  }
+  .confirm-actions { display: flex; justify-content: flex-end; gap: .5rem; }
+  .confirm-actions button {
+    padding: .4rem .9rem; border-radius: 6px; font-size: .8rem;
+    cursor: pointer; border: 1px solid transparent;
+  }
+  .confirm-actions button:disabled { opacity: .5; cursor: default; }
+  .confirm-actions .cancel {
+    background: #1e1e1e; color: #ccc; border-color: #2a2a2a;
+  }
+  .confirm-actions .cancel:hover:not(:disabled) { background: #252525; }
+  .confirm-actions .delete {
+    background: #5a2424; color: #ffd6d6; border-color: #7a3434;
+  }
+  .confirm-actions .delete:hover:not(:disabled) { background: #6a2c2c; }
 </style>
