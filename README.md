@@ -36,7 +36,7 @@ curl http://127.0.0.1:1473/v1/chat/completions \
   -d '{"model":"anyai-text","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-To use AnyAI from Cursor / Continue / Aider / any OpenAI-compatible client, point at:
+To use AnyAI from Cursor / Continue / Aider / opencode / OpenClaw / OpenClaude / any OpenAI-compatible client, point at:
 
 ```
 Base URL: http://127.0.0.1:1473/v1
@@ -45,6 +45,8 @@ API key:  any non-empty string
 ```
 
 The model behind `anyai-text` auto-resolves to the best tag for your hardware and stays current as upstream JSON changes — no client-side reconfiguration needed, ever.
+
+Copy-pasteable configs for the apps that hide these fields (opencode, OpenClaw, OpenClaude, Cursor, Continue, Cline, Aider, Zed, Open WebUI, LibreChat) live in [DOCS.md › Connecting client apps](DOCS.md#connecting-client-apps).
 
 ## Other ways in
 
