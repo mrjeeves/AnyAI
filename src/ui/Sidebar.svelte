@@ -1,16 +1,26 @@
 <script lang="ts">
   import type { ConversationMeta } from "../conversations";
+  import type { Mode } from "../types";
 
-  let { open, items, activeId, onSelect, onNew, onRename, onDelete, onClose } = $props<{
+  let { open, items, activeId, mode, onSelect, onNew, onRename, onDelete, onClose } = $props<{
     open: boolean;
     items: ConversationMeta[];
     activeId: string | null;
+    /** Active mode. Drives whether we say "chat" or "session" in the
+     *  sidebar copy — same list, different metaphor. */
+    mode: Mode;
     onSelect: (id: string) => void;
     onNew: () => void;
     onRename: (id: string, title: string) => void;
     onDelete: (id: string) => void;
     onClose: () => void;
   }>();
+
+  const newLabel = $derived(mode === "transcribe" ? "New session" : "New chat");
+  const emptyLabel = $derived(
+    mode === "transcribe" ? "No sessions yet." : "No conversations yet.",
+  );
+  const itemNoun = $derived(mode === "transcribe" ? "session" : "conversation");
 
   /** Right-click menu state. Anchored to the viewport (fixed positioning),
    *  so the bounding sidebar's overflow can't clip the menu. */
@@ -64,7 +74,7 @@
   function deleteWithConfirm(id: string) {
     closeMenu();
     const item = items.find((c: ConversationMeta) => c.id === id);
-    const label = item?.title ?? "this conversation";
+    const label = item?.title ?? `this ${itemNoun}`;
     if (confirm(`Delete "${label}"? This can't be undone.`)) {
       onDelete(id);
     }
@@ -97,14 +107,14 @@
 
 <aside class="sidebar" class:open aria-hidden={!open}>
   <div class="head">
-    <button class="new" onclick={onNew} title="New chat">
+    <button class="new" onclick={onNew} title={newLabel}>
       <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
         <path
           fill="currentColor"
           d="M12 5a1 1 0 0 1 1 1v5h5a1 1 0 1 1 0 2h-5v5a1 1 0 1 1-2 0v-5H6a1 1 0 1 1 0-2h5V6a1 1 0 0 1 1-1z"
         />
       </svg>
-      <span>New chat</span>
+      <span>{newLabel}</span>
     </button>
     <button class="collapse" onclick={onClose} title="Hide sidebar" aria-label="Hide sidebar">
       <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
@@ -115,7 +125,7 @@
 
   <div class="list" onclick={closeMenu} role="presentation">
     {#if items.length === 0}
-      <div class="empty">No conversations yet.</div>
+      <div class="empty">{emptyLabel}</div>
     {/if}
     {#each groups as group}
       <div class="group-label">{group.label}</div>

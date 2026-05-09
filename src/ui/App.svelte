@@ -4,6 +4,7 @@
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import FirstRun from "./FirstRun.svelte";
   import Chat from "./Chat.svelte";
+  import TranscribeView from "./TranscribeView.svelte";
   import Sidebar from "./Sidebar.svelte";
   import { loadConfig, updateConfig } from "../config";
   import { getActiveManifest } from "../providers";
@@ -322,26 +323,45 @@
         open={sidebarOpen}
         items={conversations}
         activeId={activeConversationId}
+        mode={activeMode}
         onSelect={onSelectConversation}
         onNew={onNewConversation}
         onRename={onRenameConversation}
         onDelete={onDeleteConversation}
         onClose={() => (sidebarOpen = false)}
       />
-      <Chat
-        {activeModel}
-        {activeMode}
-        activeFamily={activeFamilyName}
-        {supportedModes}
-        {hardware}
-        {sidebarOpen}
-        conversationId={activeConversationId}
-        {newChatCounter}
-        onToggleSidebar={() => (sidebarOpen = !sidebarOpen)}
-        onModeChange={onModeChange}
-        onProviderChange={onProviderChange}
-        onConversationChanged={onConversationChanged}
-      />
+      {#if activeMode === "transcribe"}
+        <TranscribeView
+          {activeModel}
+          {activeMode}
+          activeFamily={activeFamilyName}
+          {supportedModes}
+          {hardware}
+          {sidebarOpen}
+          conversationId={activeConversationId}
+          {newChatCounter}
+          onToggleSidebar={() => (sidebarOpen = !sidebarOpen)}
+          onModeChange={onModeChange}
+          onProviderChange={onProviderChange}
+          onConversationChanged={onConversationChanged}
+          onNewSession={onNewConversation}
+        />
+      {:else}
+        <Chat
+          {activeModel}
+          {activeMode}
+          activeFamily={activeFamilyName}
+          {supportedModes}
+          {hardware}
+          {sidebarOpen}
+          conversationId={activeConversationId}
+          {newChatCounter}
+          onToggleSidebar={() => (sidebarOpen = !sidebarOpen)}
+          onModeChange={onModeChange}
+          onProviderChange={onProviderChange}
+          onConversationChanged={onConversationChanged}
+        />
+      {/if}
     </div>
   {/if}
 

@@ -85,6 +85,22 @@ export interface RemoteUiConfig {
   port: number;
 }
 
+/** Microphone capture settings used by transcribe mode. The `device_id` is
+ *  the value `MediaDeviceInfo.deviceId` returns for the chosen input — empty
+ *  string means "let the browser pick the system default". */
+export interface MicConfig {
+  device_id: string;
+  /** Target capture rate in Hz. 16000 is what most ASR models want; 48000
+   *  matches typical USB / Bluetooth mics. The browser will resample for us. */
+  sample_rate: number;
+  /** WebRTC echo cancellation — useful when the speakers are nearby. */
+  echo_cancellation: boolean;
+  /** WebRTC noise suppression — strips constant fan / room hum. */
+  noise_suppression: boolean;
+  /** WebRTC auto gain control — keeps quiet speakers from clipping out. */
+  auto_gain_control: boolean;
+}
+
 export interface Config {
   active_provider: string;
   active_family: string;
@@ -100,6 +116,7 @@ export interface Config {
   api: ApiConfig;
   auto_update: AutoUpdateConfig;
   remote_ui: RemoteUiConfig;
+  mic: MicConfig;
   providers: Provider[];
 }
 

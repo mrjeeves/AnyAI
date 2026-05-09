@@ -1,6 +1,6 @@
 import { readTextFile, writeTextFile, exists, mkdir } from "@tauri-apps/plugin-fs";
 import { homeDir } from "@tauri-apps/api/path";
-import type { Config, ApiConfig, AutoUpdateConfig, RemoteUiConfig } from "./types";
+import type { Config, ApiConfig, AutoUpdateConfig, RemoteUiConfig, MicConfig } from "./types";
 
 async function configPath(): Promise<string> {
   const home = await homeDir();
@@ -35,6 +35,14 @@ const DEFAULT_REMOTE_UI: RemoteUiConfig = {
   port: 1474,
 };
 
+const DEFAULT_MIC: MicConfig = {
+  device_id: "",
+  sample_rate: 16000,
+  echo_cancellation: true,
+  noise_suppression: true,
+  auto_gain_control: true,
+};
+
 const DEFAULT_CONFIG: Config = {
   active_provider: "AnyAI Default",
   active_family: "gemma4",
@@ -48,6 +56,7 @@ const DEFAULT_CONFIG: Config = {
   api: { ...DEFAULT_API },
   auto_update: { ...DEFAULT_AUTO_UPDATE },
   remote_ui: { ...DEFAULT_REMOTE_UI },
+  mic: { ...DEFAULT_MIC },
   providers: [
     {
       name: "AnyAI Default",
@@ -115,6 +124,10 @@ function mergeDefaults(raw: Record<string, unknown>): Config {
     remote_ui: {
       ...DEFAULT_REMOTE_UI,
       ...((raw as { remote_ui?: Partial<RemoteUiConfig> }).remote_ui ?? {}),
+    },
+    mic: {
+      ...DEFAULT_MIC,
+      ...((raw as { mic?: Partial<MicConfig> }).mic ?? {}),
     },
     mode_overrides: (raw as { mode_overrides?: Config["mode_overrides"] }).mode_overrides ?? {},
     kept_models: (raw as { kept_models?: string[] }).kept_models ?? [],
