@@ -28,6 +28,14 @@
       "allow": [{ "path": "$HOME/.anyai" }, { "path": "$HOME/.anyai/**" }]
     },
     {
+      "identifier": "fs:allow-read-dir",
+      "allow": [{ "path": "$HOME/.anyai" }, { "path": "$HOME/.anyai/**" }]
+    },
+    {
+      "identifier": "fs:allow-remove",
+      "allow": [{ "path": "$HOME/.anyai" }, { "path": "$HOME/.anyai/**" }]
+    },
+    {
       "identifier": "http:default",
       "allow": [
         { "url": "http://127.0.0.1:*/*" },

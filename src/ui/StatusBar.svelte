@@ -1,15 +1,31 @@
 <script lang="ts">
   import type { Mode } from "../types";
 
-  let { model, mode, family, onOpenSettings } = $props<{
+  let { model, mode, family, sidebarOpen, onToggleSidebar, onOpenSettings } = $props<{
     model: string;
     mode: Mode;
     family: string;
+    sidebarOpen: boolean;
+    onToggleSidebar: () => void;
     onOpenSettings: (tab: "providers" | "families" | "models" | "storage") => void;
   }>();
 </script>
 
 <div class="status-bar">
+  <button
+    class="hamburger"
+    onclick={onToggleSidebar}
+    title={sidebarOpen ? "Hide conversations" : "Show conversations"}
+    aria-label="Toggle conversations"
+    aria-expanded={sidebarOpen}
+  >
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+      <path
+        fill="currentColor"
+        d="M3 6h18a1 1 0 1 1 0 2H3a1 1 0 1 1 0-2zm0 5h18a1 1 0 1 1 0 2H3a1 1 0 1 1 0-2zm0 5h18a1 1 0 1 1 0 2H3a1 1 0 1 1 0-2z"
+      />
+    </svg>
+  </button>
   <button class="provider-btn" onclick={() => onOpenSettings("families")} title="Change family / model">
     <span class="dot"></span>
     {#if family}
@@ -46,6 +62,17 @@
     background: #0d0d0d;
     gap: .5rem;
   }
+  .hamburger {
+    background: none;
+    border: none;
+    color: #777;
+    cursor: pointer;
+    padding: .25rem .35rem;
+    border-radius: 5px;
+    display: flex;
+    align-items: center;
+  }
+  .hamburger:hover { background: #1a1a1a; color: #ccc; }
   .provider-btn {
     display: flex;
     align-items: center;

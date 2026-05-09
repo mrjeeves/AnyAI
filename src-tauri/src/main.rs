@@ -87,8 +87,22 @@ async fn resolve_virtual_model(requested: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn ollama_chat(model: String, messages: serde_json::Value) -> Result<String, String> {
-    ollama::chat_once(&model, messages)
+async fn ollama_chat(
+    model: String,
+    messages: serde_json::Value,
+    options: Option<serde_json::Value>,
+) -> Result<String, String> {
+    ollama::chat_once(&model, messages, options)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Effective context window for `model` in tokens. Reads `/api/show` and
+/// returns the daemon's `context_length`; the title-bar saturation ring
+/// uses this as the denominator.
+#[tauri::command]
+async fn ollama_model_context(model: String) -> Result<u32, String> {
+    ollama::model_context_length(&model)
         .await
         .map_err(|e| e.to_string())
 }
@@ -342,6 +356,7 @@ fn main() {
             ollama_chat,
             ollama_chat_stream,
             ollama_chat_cancel,
+            ollama_model_context,
             update_status,
             update_check_now,
             update_apply_now,

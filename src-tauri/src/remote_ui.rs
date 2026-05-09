@@ -418,7 +418,7 @@ async fn api_chat(
                 .into_response()
         }
     };
-    let reply = match crate::ollama::chat_once(&resolved, body.messages).await {
+    let reply = match crate::ollama::chat_once(&resolved, body.messages, None).await {
         Ok(s) => s,
         Err(e) => {
             return (
