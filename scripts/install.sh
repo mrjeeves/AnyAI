@@ -75,6 +75,52 @@ install_binary() {
   log "Installed: $PREFIX_DIR/anyai"
 }
 
+# AnyAI is a Tauri app: every binary, including CLI subcommands, is dynamically
+# linked against libwebkit2gtk-4.1.so.0 (Tauri's webview). On a fresh Linux box
+# without those system libs, the dynamic loader bails before main() runs and
+# the user sees:
+#   anyai: error while loading shared libraries: libwebkit2gtk-4.1.so.0: …
+# Even `anyai setup` can't recover from that — the binary never executes.
+# Install the runtime libs at install time so the first launch just works.
+install_linux_runtime_deps() {
+  [ "$OS" = "linux" ] || return 0
+  [ "$DRY_RUN" = "true" ] && { log "(dry-run) would install Linux runtime deps"; return 0; }
+
+  if command -v apt-get >/dev/null 2>&1; then
+    log "Installing Linux runtime libraries (libwebkit2gtk-4.1, libayatana-appindicator3)…"
+    pkgs="libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2"
+    if [ "$(id -u)" = "0" ]; then
+      apt-get update -qq && apt-get install -y --no-install-recommends $pkgs
+    elif sudo -n true 2>/dev/null || [ -t 0 ]; then
+      sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends $pkgs
+    else
+      warn "Cannot run sudo non-interactively; skipping runtime-lib install."
+      warn "If 'anyai' fails with 'libwebkit2gtk-4.1.so.0: cannot open shared object file', run:"
+      warn "  sudo apt-get install -y $pkgs"
+    fi
+  elif command -v dnf >/dev/null 2>&1; then
+    log "Installing Linux runtime libraries via dnf…"
+    pkgs="webkit2gtk4.1 libappindicator-gtk3 librsvg2"
+    if [ "$(id -u)" = "0" ]; then
+      dnf install -y $pkgs
+    else
+      sudo dnf install -y $pkgs || warn "dnf install failed; install manually: sudo dnf install -y $pkgs"
+    fi
+  elif command -v pacman >/dev/null 2>&1; then
+    log "Installing Linux runtime libraries via pacman…"
+    pkgs="webkit2gtk-4.1 libappindicator-gtk3 librsvg"
+    if [ "$(id -u)" = "0" ]; then
+      pacman -S --noconfirm --needed $pkgs
+    else
+      sudo pacman -S --noconfirm --needed $pkgs || warn "pacman install failed; install manually: sudo pacman -S $pkgs"
+    fi
+  else
+    warn "Unrecognized Linux distro — cannot auto-install runtime libs."
+    warn "If 'anyai' fails with 'libwebkit2gtk-4.1.so.0: cannot open shared object file',"
+    warn "install your distro's webkit2gtk-4.1, libayatana-appindicator3, and librsvg2 packages."
+  fi
+}
+
 ensure_on_path() {
   case ":$PATH:" in
     *":$PREFIX_DIR:"*) return 0 ;;
@@ -191,6 +237,11 @@ build_from_source() {
 if [ "$FORCE_SOURCE" = "true" ] || ! try_release; then
   build_from_source
 fi
+
+# Install runtime libs after the binary is in place. Doing it here (rather than
+# inside try_release / build_from_source) means we run it once even if we fall
+# back from a release download to a source build.
+install_linux_runtime_deps
 
 if [ "$DRY_RUN" != "true" ]; then
   ensure_on_path
