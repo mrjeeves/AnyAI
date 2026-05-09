@@ -1,17 +1,23 @@
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tauri::Emitter;
 use tokio::process::{Child, Command};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 static OLLAMA_PROCESS: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
+static CHAT_CANCELS: OnceLock<Mutex<HashMap<String, Arc<Notify>>>> = OnceLock::new();
 
 fn process_lock() -> &'static Mutex<Option<Child>> {
     OLLAMA_PROCESS.get_or_init(|| Mutex::new(None))
+}
+
+fn cancels() -> &'static Mutex<HashMap<String, Arc<Notify>>> {
+    CHAT_CANCELS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 pub fn is_installed() -> bool {
@@ -414,35 +420,91 @@ pub async fn delete_model(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Streamed chat completion. Calls `on_delta` for each token chunk and
-/// `on_done` once when the stream ends. Same CORS-bypass rationale as
-/// `chat_once`.
-pub async fn chat_stream<FD, FE>(
+/// Outcome of a streamed chat call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatStreamOutcome {
+    /// Stream completed normally (Ollama emitted `done: true` or closed cleanly).
+    Completed,
+    /// Caller invoked `cancel(stream_id)` mid-stream.
+    Cancelled,
+}
+
+/// Streamed chat completion. Invokes `on_content` for each visible token
+/// chunk and `on_thinking` for any reasoning/thinking deltas (thinking
+/// models emit those in `message.thinking`; non-thinking models never call
+/// it). `on_done` fires exactly once at stream end. Same CORS-bypass
+/// rationale as `chat_once`.
+///
+/// Pass a unique `stream_id`; calling `cancel(stream_id)` from another task
+/// aborts the in-flight request and resolves the future as `Cancelled`.
+pub async fn chat_stream<FC, FT, FE>(
+    stream_id: &str,
     model: &str,
     messages: serde_json::Value,
-    mut on_delta: FD,
+    mut on_content: FC,
+    mut on_thinking: FT,
     on_done: FE,
-) -> Result<()>
+) -> Result<ChatStreamOutcome>
 where
-    FD: FnMut(&str),
-    FE: FnOnce(),
+    FC: FnMut(&str),
+    FT: FnMut(&str),
+    FE: FnOnce(ChatStreamOutcome),
 {
     ensure_running().await?;
     let client = reqwest::Client::builder()
         .pool_idle_timeout(Duration::from_secs(30))
         .build()
         .context("reqwest client")?;
+    // We don't pass an explicit `think` flag: thinking models default to
+    // emitting thinking, plain models don't have the field. Forwarding
+    // `message.thinking` if it shows up is enough.
     let body = serde_json::json!({
         "model": model,
         "messages": messages,
         "stream": true,
     });
-    let resp = client
+
+    // Register the cancel notifier BEFORE the network call so a cancel
+    // racing with an early-arriving first byte still wins.
+    let notify = Arc::new(Notify::new());
+    cancels()
+        .lock()
+        .await
+        .insert(stream_id.to_string(), notify.clone());
+
+    let result = chat_stream_inner(&client, body, notify, &mut on_content, &mut on_thinking).await;
+    cancels().lock().await.remove(stream_id);
+
+    match &result {
+        Ok(outcome) => on_done(*outcome),
+        Err(_) => on_done(ChatStreamOutcome::Completed),
+    }
+    result
+}
+
+async fn chat_stream_inner<FC, FT>(
+    client: &reqwest::Client,
+    body: serde_json::Value,
+    notify: Arc<Notify>,
+    on_content: &mut FC,
+    on_thinking: &mut FT,
+) -> Result<ChatStreamOutcome>
+where
+    FC: FnMut(&str),
+    FT: FnMut(&str),
+{
+    // Race the POST itself against cancel — a user hitting Stop before the
+    // first byte should still abort instead of waiting for the model to
+    // start producing.
+    let send_fut = client
         .post("http://127.0.0.1:11434/api/chat")
         .json(&body)
-        .send()
-        .await
-        .context("POST /api/chat")?;
+        .send();
+    let resp = tokio::select! {
+        biased;
+        _ = notify.notified() => return Ok(ChatStreamOutcome::Cancelled),
+        r = send_fut => r.context("POST /api/chat")?,
+    };
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
@@ -453,8 +515,15 @@ where
     // partial frames or several at once (same shape as /api/pull).
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::with_capacity(4 * 1024);
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("read /api/chat stream")?;
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            _ = notify.notified() => return Ok(ChatStreamOutcome::Cancelled),
+            next = stream.next() => match next {
+                Some(c) => c.context("read /api/chat stream")?,
+                None => return Ok(ChatStreamOutcome::Completed),
+            },
+        };
         buf.extend_from_slice(&chunk);
         while let Some(nl) = buf.iter().position(|b| *b == b'\n') {
             let line = buf.drain(..=nl).collect::<Vec<u8>>();
@@ -469,19 +538,29 @@ where
             if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
                 return Err(anyhow!("ollama error: {err}"));
             }
+            if let Some(delta) = v["message"]["thinking"].as_str() {
+                if !delta.is_empty() {
+                    on_thinking(delta);
+                }
+            }
             if let Some(delta) = v["message"]["content"].as_str() {
                 if !delta.is_empty() {
-                    on_delta(delta);
+                    on_content(delta);
                 }
             }
             if v["done"].as_bool().unwrap_or(false) {
-                on_done();
-                return Ok(());
+                return Ok(ChatStreamOutcome::Completed);
             }
         }
     }
-    on_done();
-    Ok(())
+}
+
+/// Signal an in-flight `chat_stream` to abort. No-op if no stream with this
+/// id is registered.
+pub async fn cancel_chat(stream_id: &str) {
+    if let Some(notify) = cancels().lock().await.get(stream_id).cloned() {
+        notify.notify_waiters();
+    }
 }
 
 /// One-shot non-streaming chat completion against the local Ollama daemon.
