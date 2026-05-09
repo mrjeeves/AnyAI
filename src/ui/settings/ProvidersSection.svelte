@@ -1,48 +1,25 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getProviders, addProvider, removeProvider, setActiveProvider } from "../../providers";
-  import { addSource, getSources, fetchSourceCatalog, removeSource } from "../../sources";
   import { loadConfig, invalidateConfigCache } from "../../config";
-  import type { Provider, Source } from "../../types";
+  import type { Provider } from "../../types";
 
   let { onChanged } = $props<{ onChanged: () => void }>();
 
   let providers = $state<Provider[]>([]);
-  let sources = $state<Source[]>([]);
   let activeProvider = $state("");
-  let tab = $state<"providers" | "sources">("providers");
 
   let newUrl = $state("");
   let newName = $state("");
   let adding = $state(false);
   let addError = $state("");
 
-  let newSourceUrl = $state("");
-  let newSourceName = $state("");
-  let addingSource = $state(false);
-
-  let browsingSource = $state<string | null>(null);
-  let browseCatalog = $state<Array<{ name: string; url: string; description?: string; origin?: string }>>([]);
-  let browseLoading = $state(false);
-
   onMount(load);
 
   async function load() {
-    [providers, sources] = await Promise.all([getProviders(), getSources()]);
+    providers = await getProviders();
     const config = await loadConfig();
     activeProvider = config.active_provider;
-  }
-
-  function groupByDomain(items: Provider[]): Map<string, Provider[]> {
-    const groups = new Map<string, Provider[]>();
-    for (const p of items) {
-      let domain = "(local)";
-      try { domain = new URL(p.url).hostname; } catch {}
-      const list = groups.get(domain) ?? [];
-      list.push(p);
-      groups.set(domain, list);
-    }
-    return groups;
   }
 
   async function switchProvider(name: string) {
@@ -63,7 +40,7 @@
     addError = "";
     try {
       const name = newName.trim() || new URL(newUrl).hostname;
-      await addProvider({ name, url: newUrl.trim(), source: null });
+      await addProvider({ name, url: newUrl.trim() });
       newUrl = "";
       newName = "";
       await load();
@@ -73,164 +50,71 @@
       adding = false;
     }
   }
-
-  async function addSourceFromForm() {
-    if (!newSourceUrl.trim()) return;
-    addingSource = true;
-    try {
-      const name = newSourceName.trim() || new URL(newSourceUrl).hostname;
-      await addSource({ name, url: newSourceUrl.trim() });
-      newSourceUrl = "";
-      newSourceName = "";
-      await load();
-    } finally {
-      addingSource = false;
-    }
-  }
-
-  async function browseSource(source: Source) {
-    browsingSource = source.name;
-    browseLoading = true;
-    try {
-      const catalog = await fetchSourceCatalog(source.url);
-      browseCatalog = catalog.providers;
-    } catch {
-      browseCatalog = [];
-    } finally {
-      browseLoading = false;
-    }
-  }
-
-  async function addFromCatalog(entry: { name: string; url: string }) {
-    await addProvider({ name: entry.name, url: entry.url, source: browsingSource! });
-    await load();
-  }
-
-  async function deleteSource(name: string) {
-    await removeSource(name);
-    await load();
-  }
 </script>
 
 <div class="section">
-  <div class="h-tabs">
-    <button class:active={tab === "providers"} onclick={() => { tab = "providers"; browsingSource = null; }}>Providers</button>
-    <button class:active={tab === "sources"} onclick={() => (tab = "sources")}>Sources</button>
+  <div class="head">
+    <p class="lede">
+      A <strong>provider</strong> publishes a manifest of model families. Pick one as
+      active — all family/model recommendations come from it.
+    </p>
   </div>
 
-  {#if tab === "providers"}
-    <div class="list">
-      {#each [...groupByDomain(providers)] as [domain, group]}
-        <div class="domain-group">
-          <div class="domain-label">{domain}</div>
-          {#each group as p}
-            <div class="item" class:active={p.name === activeProvider}>
-              <button class="item-name" onclick={() => switchProvider(p.name)}>
-                {#if p.name === activeProvider}<span class="check">✓</span>{/if}
-                {p.name}
-              </button>
-              {#if p.name !== activeProvider}
-                <button class="icon-btn" onclick={() => deleteProvider(p.name)} title="Remove">✕</button>
-              {/if}
-            </div>
-          {/each}
-        </div>
-      {/each}
-    </div>
-
-    <div class="add-form">
-      <input bind:value={newUrl} placeholder="Provider URL" />
-      <input bind:value={newName} placeholder="Name (optional)" />
-      {#if addError}<p class="err">{addError}</p>{/if}
-      <button onclick={addProviderFromForm} disabled={adding || !newUrl.trim()}>
-        {adding ? "Adding…" : "Add provider"}
-      </button>
-    </div>
-  {:else}
-    {#if browsingSource !== null}
-      <div class="browse-header">
-        <button class="back" onclick={() => (browsingSource = null)}>← Back</button>
-        <span>{browsingSource}</span>
-      </div>
-      {#if browseLoading}
-        <p class="loading">Loading…</p>
-      {:else}
-        <div class="list">
-          {#each browseCatalog as entry}
-            <div class="item">
-              <div class="item-info">
-                <span class="item-name-text">{entry.name}</span>
-                {#if entry.description}<span class="desc">{entry.description}</span>{/if}
-                {#if entry.origin && entry.origin !== browsingSource}
-                  <span class="desc">via {entry.origin}</span>
-                {/if}
-              </div>
-              {#if providers.find((p) => p.name === entry.name)}
-                <span class="added">Added</span>
-              {:else}
-                <button class="icon-btn add" onclick={() => addFromCatalog(entry)}>+</button>
-              {/if}
-            </div>
-          {/each}
-          {#if browseCatalog.length === 0}
-            <p class="empty-note">No providers in this source.</p>
-          {/if}
-        </div>
-      {/if}
-    {:else}
-      <div class="list">
-        {#each sources as s}
-          <div class="item">
-            <button class="item-name" onclick={() => browseSource(s)}>{s.name}</button>
-            <button class="icon-btn" onclick={() => deleteSource(s.name)} title="Remove">✕</button>
-          </div>
-        {/each}
-        {#if sources.length === 0}
-          <p class="empty-note">No sources added.</p>
+  <div class="list">
+    {#each providers as p}
+      <div class="item" class:active={p.name === activeProvider}>
+        <button class="item-name" onclick={() => switchProvider(p.name)}>
+          {#if p.name === activeProvider}<span class="check">✓</span>{/if}
+          <span class="name-text">{p.name}</span>
+          <span class="url">{p.url}</span>
+        </button>
+        {#if p.name !== activeProvider}
+          <button class="icon-btn" onclick={() => deleteProvider(p.name)} title="Remove">✕</button>
         {/if}
       </div>
-      <div class="add-form">
-        <input bind:value={newSourceUrl} placeholder="Source URL" />
-        <input bind:value={newSourceName} placeholder="Name (optional)" />
-        <button onclick={addSourceFromForm} disabled={addingSource || !newSourceUrl.trim()}>
-          {addingSource ? "Adding…" : "Add source"}
-        </button>
-      </div>
+    {/each}
+    {#if providers.length === 0}
+      <p class="empty-note">No providers added.</p>
     {/if}
-  {/if}
+  </div>
+
+  <div class="add-form">
+    <input bind:value={newUrl} placeholder="Provider manifest URL (https://…)" />
+    <input bind:value={newName} placeholder="Display name (optional)" />
+    {#if addError}<p class="err">{addError}</p>{/if}
+    <button onclick={addProviderFromForm} disabled={adding || !newUrl.trim()}>
+      {adding ? "Adding…" : "Add provider"}
+    </button>
+  </div>
 </div>
 
 <style>
   .section { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-  .h-tabs { display: flex; border-bottom: 1px solid #1e1e1e; flex-shrink: 0; }
-  .h-tabs button {
-    flex: 1; padding: .55rem; background: none; border: none; color: #666;
-    font-size: .8rem; cursor: pointer; border-bottom: 2px solid transparent;
-  }
-  .h-tabs button.active { color: #e8e8e8; border-bottom-color: #6e6ef7; }
+  .head { padding: .75rem 1rem; border-bottom: 1px solid #1e1e1e; flex-shrink: 0; }
+  .lede { font-size: .78rem; color: #888; line-height: 1.5; }
+  .lede strong { color: #ccc; font-weight: 600; }
   .list { flex: 1; overflow-y: auto; padding: .5rem; display: flex; flex-direction: column; gap: .25rem; min-height: 0; }
-  .domain-group { margin-bottom: .5rem; }
-  .domain-label { font-size: .7rem; color: #444; padding: .3rem .5rem; text-transform: uppercase; letter-spacing: .05em; }
   .item {
-    display: flex; align-items: center; gap: .4rem;
-    padding: .4rem .5rem; border-radius: 6px;
+    display: flex; align-items: stretch; gap: .4rem;
+    padding: .35rem .5rem; border-radius: 6px;
   }
   .item:hover { background: #1a1a1a; }
   .item.active { background: #1a1a2a; }
   .item-name {
     flex: 1; background: none; border: none; color: #ccc;
-    font-size: .85rem; text-align: left; cursor: pointer; display: flex; align-items: center; gap: .35rem;
+    font-size: .85rem; text-align: left; cursor: pointer;
+    display: flex; flex-direction: column; gap: .1rem;
+    padding: .2rem .15rem;
   }
-  .item-info { flex: 1; display: flex; flex-direction: column; gap: .15rem; }
-  .item-name-text { font-size: .85rem; color: #ccc; }
-  .desc { font-size: .73rem; color: #555; }
+  .name-text { display: flex; align-items: center; gap: .35rem; }
+  .url { font-family: monospace; font-size: .68rem; color: #555; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .check { color: #6e6ef7; font-size: .8rem; }
   .icon-btn {
     background: none; border: none; color: #444; cursor: pointer;
     padding: .15rem .35rem; border-radius: 4px; font-size: .85rem;
+    align-self: center;
   }
   .icon-btn:hover { background: #2a2a2a; color: #ccc; }
-  .icon-btn.add { color: #6e6ef7; }
   .add-form {
     padding: .75rem;
     border-top: 1px solid #1e1e1e;
@@ -251,12 +135,5 @@
   .add-form button:hover:not(:disabled) { background: #5a5ae0; }
   .add-form button:disabled { opacity: .4; cursor: default; }
   .err { font-size: .75rem; color: #f66; }
-  .loading, .empty-note { color: #555; font-size: .82rem; text-align: center; padding: 1rem; }
-  .browse-header {
-    display: flex; align-items: center; gap: .5rem;
-    padding: .5rem .75rem; border-bottom: 1px solid #1e1e1e;
-    font-size: .82rem; color: #888;
-  }
-  .back { background: none; border: none; color: #6e6ef7; cursor: pointer; font-size: .82rem; }
-  .added { font-size: .73rem; color: #555; }
+  .empty-note { color: #555; font-size: .82rem; text-align: center; padding: 1rem; }
 </style>

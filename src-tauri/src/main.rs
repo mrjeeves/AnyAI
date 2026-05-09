@@ -329,7 +329,6 @@ fn main() {
 fn ensure_config_dir(_app: &tauri::AppHandle) -> anyhow::Result<()> {
     let dir = anyai_dir()?;
     std::fs::create_dir_all(&dir)?;
-    std::fs::create_dir_all(dir.join("cache/sources"))?;
     std::fs::create_dir_all(dir.join("cache/manifests"))?;
     std::fs::create_dir_all(dir.join("updates"))?;
     Ok(())

@@ -1,7 +1,6 @@
 [
   {
     "name": "AnyAI Default",
-    "url": "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/manifests/default.json",
-    "source": "AnyAI"
+    "url": "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/manifests/default.json"
   }
 ]

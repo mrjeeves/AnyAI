@@ -4,7 +4,7 @@
 
 **AnyAI is a local API surface for local AI.** A single binary exposes an OpenAI-compatible HTTP API on `127.0.0.1` that resolves "what model should I run on this machine?" against a JSON file you (or someone else) host. The GUI and CLI are two clients of that same surface; nothing in the design assumes a human is watching.
 
-The "centralized" piece is decentralized by construction: the source of truth for which models a team uses is a static JSON file at a URL the team controls. Any host (GitHub Pages, S3, an internal HTTP server) is sufficient. JSON files can `import` other JSON files to compose merged catalogs across publishers.
+The "centralized" piece is decentralized by construction: the source of truth for which models a team uses is a static JSON file at a URL the team controls. Any host (GitHub Pages, S3, an internal HTTP server) is sufficient. Manifests can `import` other manifests to compose merged family lists across publishers.
 
 ## One picture
 
@@ -18,7 +18,7 @@ The "centralized" piece is decentralized by construction: the source of truth fo
                           │   resolver    (virtual ID → tag)                  │
                           │     │   ▲                                         │
                           │     │   │ per-file TTL, recursive imports         │
-                          │     │   │ (manifests + source catalogs)           │
+                          │     │   │ (manifests with families)               │
                           │     ▼   │                                         │
                           │   fetch & cache (~/.anyai/cache)                  │
                           │      │                                            │
@@ -45,17 +45,16 @@ The same Rust binary handles three personas, picked at process-start by argv:
 | Invocation       | Persona                                                          |
 |------------------|------------------------------------------------------------------|
 | `anyai serve`    | Headless OpenAI-compat server (the primary use case)             |
-| `anyai <cmd>`    | CLI (status, models, providers, sources, preload, import/export) |
+| `anyai <cmd>`    | CLI (status, models, providers, families, preload, import/export) |
 | `anyai`          | GUI (Tauri); also runs the API server alongside                  |
 
-## The provider/source ecosystem
+## The provider/family ecosystem
 
-Two kinds of JSON file. Both are static, both are cached by `~/.anyai/cache/`, both honour their own `ttl_minutes` independently:
+One kind of JSON file:
 
-- **Manifest** — `{ name, version, ttl_minutes?, default_mode, modes, imports? }`. Maps hardware tiers to model tags. Resolved once per request by the API server.
-- **Source catalog** — `{ name, ttl_minutes?, providers: [...], imports? }`. Lists provider URLs. Browsed when a user adds a provider.
+- **Manifest** — `{ name, version, ttl_minutes?, default_family, families: { ... }, imports? }`. Each family declares its own `default_mode` and per-mode tier table; the resolver walks `families[active_family].modes[active_mode].tiers` against the local hardware. The user picks active provider + active family; the rest is automatic.
 
-`imports` on either file is an array of URLs to other files of the same kind. The fetcher walks them recursively, dedupes by URL, detects cycles, and merges results in document order (the importing file's own entries win on name collision). **Each imported file is fetched and cached against its own `ttl_minutes`** — the recursion does not flatten TTL, so a slow-changing top-level catalog can import a fast-moving one without the publisher having to coordinate.
+`imports` is an array of URLs to other manifests. The fetcher walks them recursively, dedupes by URL, detects cycles, and merges family maps in document order (the importing file's own families win on key collision). **Each imported file is fetched and cached against its own `ttl_minutes`** — the recursion does not flatten TTL, so a slow-changing top-level manifest can import a fast-moving one without the publisher having to coordinate.
 
 That per-file TTL is also how publishers express rate-limit expectations: a manifest hosted on a free static host might say `ttl_minutes: 1440` to keep load down; a high-availability commercial endpoint might say `5`.
 
@@ -67,7 +66,7 @@ That per-file TTL is also how publishers express rate-limit expectations: a mani
 | `cli.rs`  | Every CLI subcommand. |
 | `api.rs`  | axum router, virtual-ID resolution, pull-on-demand, model rewrite. |
 | `api_models.rs` | OpenAI-compatible request/response types. |
-| `resolver.rs` | Manifest/source fetch + per-file TTL cache, recursive imports with cycle detection, hardware-tier walk, virtual-ID map. Mirrors `src/manifest.ts` and `src/sources.ts`. |
+| `resolver.rs` | Manifest fetch + per-file TTL cache, recursive imports with cycle detection, family + hardware-tier walk, virtual-ID map. Mirrors `src/manifest.ts`. |
 | `preload.rs` | `preload(modes, …)` + `ensure_tracked_models()` reconcile loop. |
 | `watcher.rs` | Background ticker (every 5 min) that re-runs `ensure_tracked_models`, recomputes model-status, and triggers `self_update::tick`. Process lock at `~/.anyai/watcher.lock`. |
 | `self_update.rs` | Periodic GitHub-releases check, channel-aware (stable/beta), patch auto-apply, atomic rename-on-restart, package-manager-install detection (no-op when installed via brew/apt/rpm/MSI). |
@@ -81,8 +80,8 @@ The TS layer is the GUI's source of truth. The Rust layer reads the same on-disk
 | File | Role |
 |------|------|
 | `config.ts` | Read/write `~/.anyai/config.json` with default-merge for upgrades. |
-| `manifest.ts` | `getManifest(url)` (per-file TTL cached, recursive imports), `resolveModel`, `allRecommendedModels`. |
-| `providers.ts`, `sources.ts` | CRUD over saved providers/sources. `fetchSourceCatalog(url)` walks `imports` recursively. |
+| `manifest.ts` | `getManifest(url)` (per-file TTL cached, recursive imports), `resolveModel`, `pickFamily`, `familyModes`, `allRecommendedModels`. |
+| `providers.ts` | CRUD over saved providers, plus `getActiveFamily` / `setActiveFamily`. |
 | `model-lifecycle.ts` | `recomputeRecommendedSet`, `runCleanup`, `pruneNow`, `markEvictedNow`. |
 | `import-export.ts` | Bundle config to/from `anyai:import:…` URLs. |
 | `preload.ts`, `watcher.ts` | Thin Tauri-invoke wrappers for the Rust counterparts. |
@@ -95,7 +94,7 @@ The TS layer is the GUI's source of truth. The Rust layer reads the same on-disk
   imported manifest changes (its own TTL refresh)
        │
        ▼
-  watcher tick (5 min)  ── or ──  CLI provider/source mutation
+  watcher tick (5 min)  ── or ──  CLI provider/family mutation
        │
        ▼
   preload::ensure_tracked_models()
@@ -175,6 +174,5 @@ Disabling: `auto_update.enabled = false`, or `ANYAI_AUTOUPDATE=0`. When AnyAI de
 ├── updates/                          (staged self-update binaries)
 └── cache/
     ├── manifests/<hash>.json         (manifest + fetched_at, per-URL — imports cached separately)
-    ├── sources/<hash>.json           (source catalog + fetched_at, per-URL — imports cached separately)
     └── model-status.json             (recommended_by + last_recommended per tag)
 ```

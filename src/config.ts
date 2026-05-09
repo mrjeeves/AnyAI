@@ -24,6 +24,7 @@ const DEFAULT_AUTO_UPDATE: AutoUpdateConfig = {
 
 const DEFAULT_CONFIG: Config = {
   active_provider: "AnyAI Default",
+  active_family: "gemma4",
   active_mode: "text",
   model_cleanup_days: 1,
   kept_models: [],
@@ -31,14 +32,10 @@ const DEFAULT_CONFIG: Config = {
   tracked_modes: ["text"],
   api: { ...DEFAULT_API },
   auto_update: { ...DEFAULT_AUTO_UPDATE },
-  sources: [
-    { name: "AnyAI", url: "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/sources/index.json" },
-  ],
   providers: [
     {
       name: "AnyAI Default",
       url: "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/manifests/default.json",
-      source: "AnyAI",
     },
   ],
 };
@@ -64,21 +61,26 @@ export async function loadConfig(): Promise<Config> {
   return _cached;
 }
 
-function mergeDefaults(raw: Partial<Config>): Config {
+function mergeDefaults(raw: Record<string, unknown>): Config {
   const merged: Config = {
     ...DEFAULT_CONFIG,
-    ...raw,
-    api: { ...DEFAULT_API, ...(raw.api ?? {}) },
-    auto_update: { ...DEFAULT_AUTO_UPDATE, ...(raw.auto_update ?? {}) },
-    mode_overrides: raw.mode_overrides ?? {},
-    kept_models: raw.kept_models ?? [],
-    tracked_modes: raw.tracked_modes ?? [],
-    sources: raw.sources ?? DEFAULT_CONFIG.sources,
-    providers: raw.providers ?? DEFAULT_CONFIG.providers,
+    ...(raw as Partial<Config>),
+    api: { ...DEFAULT_API, ...((raw as { api?: Partial<ApiConfig> }).api ?? {}) },
+    auto_update: { ...DEFAULT_AUTO_UPDATE, ...((raw as { auto_update?: Partial<AutoUpdateConfig> }).auto_update ?? {}) },
+    mode_overrides: (raw as { mode_overrides?: Config["mode_overrides"] }).mode_overrides ?? {},
+    kept_models: (raw as { kept_models?: string[] }).kept_models ?? [],
+    tracked_modes: (raw as { tracked_modes?: Config["tracked_modes"] }).tracked_modes ?? [],
+    providers: (raw as { providers?: Config["providers"] }).providers ?? DEFAULT_CONFIG.providers,
   };
+  // Strip removed legacy fields so they don't linger in the saved config.
+  delete (merged as unknown as { sources?: unknown }).sources;
   // One-shot upgrade: seed tracked_modes from active_mode for legacy configs.
   if (!merged.tracked_modes || merged.tracked_modes.length === 0) {
     merged.tracked_modes = [merged.active_mode];
+  }
+  // Older configs predate active_family; default to the schema's gemma4.
+  if (!merged.active_family) {
+    merged.active_family = DEFAULT_CONFIG.active_family;
   }
   return merged;
 }

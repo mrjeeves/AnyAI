@@ -1,20 +1,25 @@
 <script lang="ts">
   import type { Mode } from "../types";
 
-  let { model, mode, onOpenSettings } = $props<{
+  let { model, mode, family, onOpenSettings } = $props<{
     model: string;
     mode: Mode;
-    onOpenSettings: (tab: "providers" | "models") => void;
+    family: string;
+    onOpenSettings: (tab: "providers" | "families" | "models") => void;
   }>();
 </script>
 
 <div class="status-bar">
-  <button class="provider-btn" onclick={() => onOpenSettings("providers")} title="Open settings">
+  <button class="provider-btn" onclick={() => onOpenSettings("families")} title="Change family / model">
     <span class="dot"></span>
+    {#if family}
+      <span class="family-name">{family}</span>
+      <span class="separator">·</span>
+    {/if}
     <span class="model-name">{model}</span>
   </button>
   <div class="spacer"></div>
-  <button class="models-btn" onclick={() => onOpenSettings("models")} title="Open settings">
+  <button class="models-btn" onclick={() => onOpenSettings("providers")} title="Open settings">
     <span class="grid-icon" aria-hidden="true">⊞</span>
     <span class="label">Models/Settings</span>
     <svg
@@ -53,14 +58,18 @@
     cursor: pointer;
     padding: .2rem .5rem;
     border-radius: 5px;
+    max-width: 60%;
   }
   .provider-btn:hover { background: #1a1a1a; color: #ccc; }
   .dot {
     width: 6px; height: 6px; border-radius: 50%;
     background: #4caf50;
     box-shadow: 0 0 4px #4caf50;
+    flex-shrink: 0;
   }
-  .model-name { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .family-name { color: #6e6ef7; flex-shrink: 0; }
+  .separator { color: #444; flex-shrink: 0; }
+  .model-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .spacer { flex: 1; }
   .models-btn {
     display: flex;

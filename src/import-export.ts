@@ -1,13 +1,12 @@
 import { fetch } from "@tauri-apps/plugin-http";
 import { loadConfig, saveConfig } from "./config";
-import type { Config, Source, Provider } from "./types";
+import type { Provider } from "./types";
 
 interface ExportBundle {
-  sources?: Source[];
   providers?: Provider[];
 }
 
-export async function importFromUrl(url: string): Promise<{ sources: string[]; providers: string[] }> {
+export async function importFromUrl(url: string): Promise<{ providers: string[] }> {
   let json: string;
   if (url.startsWith("anyai:import:")) {
     json = base64Decode(url.slice("anyai:import:".length));
@@ -19,19 +18,9 @@ export async function importFromUrl(url: string): Promise<{ sources: string[]; p
   return importBundle(JSON.parse(json));
 }
 
-export async function importBundle(bundle: ExportBundle): Promise<{ sources: string[]; providers: string[] }> {
+export async function importBundle(bundle: ExportBundle): Promise<{ providers: string[] }> {
   const config = await loadConfig();
-  const addedSources: string[] = [];
   const addedProviders: string[] = [];
-
-  if (bundle.sources) {
-    for (const s of bundle.sources) {
-      if (!config.sources.find((e) => e.name === s.name)) {
-        config.sources.push(s);
-        addedSources.push(s.name);
-      }
-    }
-  }
 
   if (bundle.providers) {
     for (const p of bundle.providers) {
@@ -43,22 +32,16 @@ export async function importBundle(bundle: ExportBundle): Promise<{ sources: str
   }
 
   await saveConfig(config);
-  return { sources: addedSources, providers: addedProviders };
+  return { providers: addedProviders };
 }
 
-export async function exportBundle(opts: {
-  sourcesOnly?: boolean;
-  providersOnly?: boolean;
-}): Promise<ExportBundle> {
+export async function exportBundle(): Promise<ExportBundle> {
   const config = await loadConfig();
-  const bundle: ExportBundle = {};
-  if (!opts.providersOnly) bundle.sources = config.sources;
-  if (!opts.sourcesOnly) bundle.providers = config.providers;
-  return bundle;
+  return { providers: config.providers };
 }
 
-export async function exportAsUrl(opts: { sourcesOnly?: boolean; providersOnly?: boolean } = {}): Promise<string> {
-  const bundle = await exportBundle(opts);
+export async function exportAsUrl(): Promise<string> {
+  const bundle = await exportBundle();
   return `anyai:import:${base64Encode(JSON.stringify(bundle))}`;
 }
 

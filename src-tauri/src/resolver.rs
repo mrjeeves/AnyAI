@@ -2,6 +2,10 @@
 //!
 //! Mirrors the TypeScript `src/manifest.ts` so the headless CLI / API server can resolve
 //! models without booting the JS runtime. Reads the same on-disk caches the GUI writes.
+//!
+//! Schema (v4): a manifest exposes named **families** (e.g. `gemma4`, `qwen3`); each
+//! family owns its own per-mode tier table. The resolver picks
+//! `families[active_family].modes[mode].tiers` and walks them against current hardware.
 
 use anyhow::{anyhow, Result};
 use serde_json::{Map, Value};
@@ -14,7 +18,6 @@ use crate::hardware::HardwareProfile;
 pub const VIRTUAL_PREFIX: &str = "anyai-";
 pub const KNOWN_MODES: &[&str] = &["text", "vision", "code", "transcribe"];
 const DEFAULT_TTL_MIN: f64 = 360.0;
-const DEFAULT_SOURCE_TTL_MIN: f64 = 1440.0;
 const FALLBACK_MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/manifests/default.json";
 
@@ -43,21 +46,63 @@ pub async fn resolve_with_hardware(
         None => active_provider_url(&config).unwrap_or_else(|| FALLBACK_MANIFEST_URL.to_string()),
     };
 
+    let active_family = config["active_family"].as_str().unwrap_or("");
     let manifest = fetch_or_load_manifest(&manifest_url).await?;
-    resolve_in_manifest(&manifest, hw, mode)
+    resolve_in_manifest(&manifest, hw, mode, active_family)
 }
 
-pub fn resolve_in_manifest(manifest: &Value, hw: &HardwareProfile, mode: &str) -> Result<String> {
-    let default_mode = manifest["default_mode"].as_str().unwrap_or("text");
-    let mode_spec = manifest["modes"][mode]
-        .as_object()
-        .or_else(|| manifest["modes"][default_mode].as_object())
-        .ok_or_else(|| anyhow!("mode '{mode}' not found in manifest"))?;
+/// Pick the family the user has selected. Falls back to `default_family`,
+/// then to whichever family appears first in document order. Returns the
+/// (name, family-object) pair so callers can attribute the decision.
+pub fn pick_family<'a>(
+    manifest: &'a Value,
+    requested: &str,
+) -> Option<(String, &'a Map<String, Value>)> {
+    let families = manifest["families"].as_object()?;
+    let candidates = [requested, manifest["default_family"].as_str().unwrap_or("")];
+    for k in candidates {
+        if k.is_empty() {
+            continue;
+        }
+        if let Some(f) = families.get(k).and_then(|v| v.as_object()) {
+            return Some((k.to_string(), f));
+        }
+    }
+    families
+        .iter()
+        .next()
+        .and_then(|(k, v)| v.as_object().map(|f| (k.clone(), f)))
+}
+
+pub fn resolve_in_manifest(
+    manifest: &Value,
+    hw: &HardwareProfile,
+    mode: &str,
+    active_family: &str,
+) -> Result<String> {
+    let (_family_name, family) = pick_family(manifest, active_family)
+        .ok_or_else(|| anyhow!("manifest exposes no families"))?;
+
+    let default_mode = family
+        .get("default_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("text");
+    let mode_spec = family
+        .get("modes")
+        .and_then(|m| m.get(mode))
+        .and_then(|v| v.as_object())
+        .or_else(|| {
+            family
+                .get("modes")
+                .and_then(|m| m.get(default_mode))
+                .and_then(|v| v.as_object())
+        })
+        .ok_or_else(|| anyhow!("mode '{mode}' not found in active family"))?;
 
     let tiers = mode_spec
         .get("tiers")
         .and_then(|t| t.as_array())
-        .ok_or_else(|| anyhow!("no tiers in manifest"))?;
+        .ok_or_else(|| anyhow!("no tiers in active family"))?;
 
     let vram = effective_vram_gb(hw);
     let ram = hw.ram_gb;
@@ -76,7 +121,7 @@ pub fn resolve_in_manifest(manifest: &Value, hw: &HardwareProfile, mode: &str) -
         .last()
         .and_then(|t| t["model"].as_str())
         .map(str::to_string)
-        .ok_or_else(|| anyhow!("no model found in manifest tiers"))
+        .ok_or_else(|| anyhow!("no model found in active family tiers"))
 }
 
 /// VRAM the resolver should credit toward `min_vram_gb` checks. Mirrors
@@ -93,17 +138,22 @@ fn effective_vram_gb(hw: &HardwareProfile) -> f64 {
     }
 }
 
+/// All model tags recommended by a manifest across every family/mode/tier.
 pub fn tags_in_manifest(manifest: &Value) -> Vec<String> {
     let mut out = Vec::new();
-    if let Some(modes) = manifest["modes"].as_object() {
-        for (_, mode_spec) in modes {
-            if let Some(tiers) = mode_spec["tiers"].as_array() {
-                for tier in tiers {
-                    if let Some(t) = tier["model"].as_str() {
-                        out.push(t.to_string());
-                    }
-                    if let Some(t) = tier["fallback"].as_str() {
-                        out.push(t.to_string());
+    if let Some(families) = manifest["families"].as_object() {
+        for (_name, family) in families {
+            if let Some(modes) = family["modes"].as_object() {
+                for (_, mode_spec) in modes {
+                    if let Some(tiers) = mode_spec["tiers"].as_array() {
+                        for tier in tiers {
+                            if let Some(t) = tier["model"].as_str() {
+                                out.push(t.to_string());
+                            }
+                            if let Some(t) = tier["fallback"].as_str() {
+                                out.push(t.to_string());
+                            }
+                        }
                     }
                 }
             }
@@ -148,7 +198,7 @@ pub async fn translate_virtual(requested: &str) -> Result<String> {
 // walked recursively, with each imported file obeying its own TTL.
 // ---------------------------------------------------------------------------
 
-async fn fetch_or_load_manifest(url: &str) -> Result<Value> {
+pub async fn fetch_or_load_manifest(url: &str) -> Result<Value> {
     let mut visited: HashSet<String> = HashSet::new();
     walk_manifest(url, &mut visited).await
 }
@@ -163,7 +213,7 @@ fn walk_manifest<'a>(
         }
 
         let raw = fetch_one_manifest(url).await?;
-        let mut merged_modes: Map<String, Value> = Map::new();
+        let mut merged_families: Map<String, Value> = Map::new();
 
         if let Some(imports) = raw["imports"].as_array() {
             for imp in imports {
@@ -174,18 +224,18 @@ fn walk_manifest<'a>(
                     Ok(v) => v,
                     Err(_) => continue, // Import failure is non-fatal; merge the rest.
                 };
-                if let Some(modes) = imported["modes"].as_object() {
-                    for (k, v) in modes {
-                        merged_modes.insert(k.clone(), v.clone());
+                if let Some(families) = imported["families"].as_object() {
+                    for (k, v) in families {
+                        merged_families.insert(k.clone(), v.clone());
                     }
                 }
             }
         }
 
-        // Importing file wins on mode-key collision (closer publisher).
-        if let Some(modes) = raw["modes"].as_object() {
-            for (k, v) in modes {
-                merged_modes.insert(k.clone(), v.clone());
+        // Importing file wins on family-key collision (closer publisher).
+        if let Some(families) = raw["families"].as_object() {
+            for (k, v) in families {
+                merged_families.insert(k.clone(), v.clone());
             }
         }
 
@@ -193,8 +243,8 @@ fn walk_manifest<'a>(
             "name": raw["name"].clone(),
             "version": raw["version"].clone(),
             "ttl_minutes": raw["ttl_minutes"].clone(),
-            "default_mode": raw["default_mode"].clone(),
-            "modes": Value::Object(merged_modes),
+            "default_family": raw["default_family"].clone(),
+            "families": Value::Object(merged_families),
         }))
     })
 }
@@ -203,8 +253,8 @@ fn empty_manifest() -> Value {
     serde_json::json!({
         "name": "",
         "version": "1",
-        "default_mode": "text",
-        "modes": {},
+        "default_family": "",
+        "families": {},
     })
 }
 
@@ -272,152 +322,6 @@ fn write_manifest_cache(url: &str, manifest: &Value) -> Result<()> {
 fn manifest_cache_path(url: &str) -> Result<PathBuf> {
     Ok(crate::anyai_dir()?
         .join("cache/manifests")
-        .join(format!("{:x}.json", djb2(url))))
-}
-
-// ---------------------------------------------------------------------------
-// Source-catalog fetch + recursive imports.
-// Mirrors `src/sources.ts::fetchSourceCatalog`. Each imported catalog is
-// fetched + cached against its own ttl_minutes; cycles broken by URL.
-// ---------------------------------------------------------------------------
-
-/// Fetch a source catalog with recursive imports merged in. The returned
-/// `providers` array is flat; each entry has an `origin` field set to the URL
-/// of the file that contributed it.
-pub async fn fetch_source_catalog(url: &str) -> Result<Value> {
-    let mut visited: HashSet<String> = HashSet::new();
-    walk_catalog(url, &mut visited).await
-}
-
-fn walk_catalog<'a>(
-    url: &'a str,
-    visited: &'a mut HashSet<String>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
-    Box::pin(async move {
-        if !visited.insert(url.to_string()) {
-            return Ok(serde_json::json!({ "name": "", "providers": [] }));
-        }
-
-        let raw = fetch_one_catalog(url).await?;
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut out: Vec<Value> = Vec::new();
-
-        if let Some(imports) = raw["imports"].as_array() {
-            for imp in imports {
-                let Some(imp_url) = imp.as_str() else {
-                    continue;
-                };
-                let imported = match walk_catalog(imp_url, visited).await {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                if let Some(providers) = imported["providers"].as_array() {
-                    for p in providers {
-                        let Some(name) = p["name"].as_str() else {
-                            continue;
-                        };
-                        if seen.contains(name) {
-                            continue;
-                        }
-                        seen.insert(name.to_string());
-                        let mut entry = p.clone();
-                        if entry.get("origin").is_none() {
-                            entry["origin"] = Value::String(imp_url.to_string());
-                        }
-                        out.push(entry);
-                    }
-                }
-            }
-        }
-
-        // Importing file wins on name collision (closer publisher).
-        if let Some(providers) = raw["providers"].as_array() {
-            for p in providers {
-                let Some(name) = p["name"].as_str() else {
-                    continue;
-                };
-                let mut entry = p.clone();
-                entry["origin"] = Value::String(url.to_string());
-                if seen.contains(name) {
-                    if let Some(idx) = out.iter().position(|e| e["name"].as_str() == Some(name)) {
-                        out[idx] = entry;
-                    }
-                    continue;
-                }
-                seen.insert(name.to_string());
-                out.push(entry);
-            }
-        }
-
-        Ok(serde_json::json!({
-            "name": raw["name"].clone(),
-            "description": raw["description"].clone(),
-            "ttl_minutes": raw["ttl_minutes"].clone(),
-            "providers": out,
-        }))
-    })
-}
-
-async fn fetch_one_catalog(url: &str) -> Result<Value> {
-    if let Some(cached) = read_catalog_cache(url) {
-        let ttl_min = cached["catalog"]["ttl_minutes"]
-            .as_f64()
-            .unwrap_or(DEFAULT_SOURCE_TTL_MIN);
-        let fetched_at = cached["fetched_at"].as_str().unwrap_or("");
-        if !is_stale(fetched_at, ttl_min) {
-            return Ok(cached["catalog"].clone());
-        }
-    }
-    match fetch_catalog_http(url).await {
-        Ok(c) => {
-            let _ = write_catalog_cache(url, &c);
-            Ok(c)
-        }
-        Err(e) => {
-            if let Some(cached) = read_catalog_cache(url) {
-                return Ok(cached["catalog"].clone());
-            }
-            Err(e)
-        }
-    }
-}
-
-async fn fetch_catalog_http(url: &str) -> Result<Value> {
-    let body = tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio::process::Command::new("curl")
-            .args(["-sf", "--max-time", "10", url])
-            .output(),
-    )
-    .await??;
-    if !body.status.success() {
-        return Err(anyhow!("HTTP fetch failed for {url}"));
-    }
-    Ok(serde_json::from_slice(&body.stdout)?)
-}
-
-fn read_catalog_cache(url: &str) -> Option<Value> {
-    let path = catalog_cache_path(url).ok()?;
-    let s = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&s).ok()
-}
-
-fn write_catalog_cache(url: &str, catalog: &Value) -> Result<()> {
-    let path = catalog_cache_path(url)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let entry = serde_json::json!({
-        "fetched_at": chrono_iso_now(),
-        "catalog": catalog,
-    });
-    std::fs::write(path, serde_json::to_string_pretty(&entry)?)?;
-    Ok(())
-}
-
-fn catalog_cache_path(url: &str) -> Result<PathBuf> {
-    Ok(crate::anyai_dir()?
-        .join("cache/sources")
         .join(format!("{:x}.json", djb2(url))))
 }
 
@@ -514,7 +418,7 @@ pub fn save_config_value(config: &Value) -> Result<()> {
     Ok(())
 }
 
-fn active_provider_url(config: &Value) -> Option<String> {
+pub fn active_provider_url(config: &Value) -> Option<String> {
     let active = config["active_provider"].as_str()?;
     config["providers"]
         .as_array()?
@@ -528,6 +432,7 @@ fn active_provider_url(config: &Value) -> Option<String> {
 pub fn default_config_value() -> Value {
     serde_json::json!({
         "active_provider": "AnyAI Default",
+        "active_family": "gemma4",
         "active_mode": "text",
         "model_cleanup_days": 1,
         "kept_models": [],
@@ -546,17 +451,10 @@ pub fn default_config_value() -> Value {
             "auto_apply": "patch",
             "check_interval_hours": 6
         },
-        "sources": [
-            {
-                "name": "AnyAI",
-                "url": "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/sources/index.json"
-            }
-        ],
         "providers": [
             {
                 "name": "AnyAI Default",
-                "url": "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/manifests/default.json",
-                "source": "AnyAI"
+                "url": "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/manifests/default.json"
             }
         ]
     })
@@ -564,10 +462,13 @@ pub fn default_config_value() -> Value {
 
 /// Shallow-merge missing top-level + nested-object keys from defaults so users
 /// upgrading from older configs don't see crashes on first load. Also seeds
-/// `tracked_modes` from `active_mode` for legacy configs.
+/// `tracked_modes` from `active_mode` for legacy configs and drops removed
+/// fields (e.g. the retired `sources`).
 pub fn merge_defaults(mut config: Value) -> Value {
     let defaults = default_config_value();
     if let (Some(obj), Some(def_obj)) = (config.as_object_mut(), defaults.as_object()) {
+        // Strip retired fields so they don't linger in the saved config.
+        obj.remove("sources");
         for (k, v) in def_obj {
             if !obj.contains_key(k) {
                 obj.insert(k.clone(), v.clone());
@@ -595,6 +496,10 @@ pub fn merge_defaults(mut config: Value) -> Value {
         let active = config["active_mode"].as_str().unwrap_or("text").to_string();
         config["tracked_modes"] = serde_json::json!([active]);
     }
+    // Fill active_family on legacy configs (predates the families schema).
+    if config["active_family"].as_str().unwrap_or("").is_empty() {
+        config["active_family"] = serde_json::json!("gemma4");
+    }
     config
 }
 
@@ -619,15 +524,21 @@ mod tests {
     /// file: that couples the resolver test to manifest content.
     fn manifest() -> Value {
         serde_json::json!({
-            "default_mode": "text",
-            "modes": {
-                "text": {
-                    "tiers": [
-                        { "min_vram_gb": 24, "min_ram_gb": 48, "model": "big:35b"   },
-                        { "min_vram_gb":  8, "min_ram_gb": 16, "model": "mid:9b"    },
-                        { "min_vram_gb":  4, "min_ram_gb": 10, "model": "small:2b"  },
-                        { "min_vram_gb":  0, "min_ram_gb":  0, "model": "tiny:1b"   }
-                    ]
+            "default_family": "test",
+            "families": {
+                "test": {
+                    "label": "Test",
+                    "default_mode": "text",
+                    "modes": {
+                        "text": {
+                            "tiers": [
+                                { "min_vram_gb": 24, "min_ram_gb": 48, "model": "big:35b"   },
+                                { "min_vram_gb":  8, "min_ram_gb": 16, "model": "mid:9b"    },
+                                { "min_vram_gb":  4, "min_ram_gb": 10, "model": "small:2b"  },
+                                { "min_vram_gb":  0, "min_ram_gb":  0, "model": "tiny:1b"   }
+                            ]
+                        }
+                    }
                 }
             }
         })
@@ -640,7 +551,7 @@ mod tests {
         // the system couldn't fit, and ground at ~1 token / 10 s.
         let mac = hw(GpuType::Apple, Some(8.0), 8.0);
         assert_eq!(
-            resolve_in_manifest(&manifest(), &mac, "text").unwrap(),
+            resolve_in_manifest(&manifest(), &mac, "text", "test").unwrap(),
             "tiny:1b"
         );
     }
@@ -649,7 +560,7 @@ mod tests {
     fn pi_8gb_no_gpu_lands_on_tiny() {
         let pi = hw(GpuType::None, None, 8.0);
         assert_eq!(
-            resolve_in_manifest(&manifest(), &pi, "text").unwrap(),
+            resolve_in_manifest(&manifest(), &pi, "text", "test").unwrap(),
             "tiny:1b"
         );
     }
@@ -660,7 +571,7 @@ mod tests {
         // ram>=16, not via the (still-zero) effective vram.
         let mac = hw(GpuType::Apple, Some(16.0), 16.0);
         assert_eq!(
-            resolve_in_manifest(&manifest(), &mac, "text").unwrap(),
+            resolve_in_manifest(&manifest(), &mac, "text", "test").unwrap(),
             "mid:9b"
         );
     }
@@ -671,7 +582,18 @@ mod tests {
         // tier — the VRAM is its own pool here, so the check stays useful.
         let pc = hw(GpuType::Nvidia, Some(12.0), 8.0);
         assert_eq!(
-            resolve_in_manifest(&manifest(), &pc, "text").unwrap(),
+            resolve_in_manifest(&manifest(), &pc, "text", "test").unwrap(),
+            "mid:9b"
+        );
+    }
+
+    #[test]
+    fn unknown_family_falls_back_to_default_family() {
+        // Stale config still resolves: the family the user has saved is gone,
+        // so the resolver falls back to the manifest's default_family.
+        let pc = hw(GpuType::Nvidia, Some(12.0), 8.0);
+        assert_eq!(
+            resolve_in_manifest(&manifest(), &pc, "text", "no-such-family").unwrap(),
             "mid:9b"
         );
     }

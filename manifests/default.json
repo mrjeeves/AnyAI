@@ -1,21 +1,42 @@
 {
   "name": "AnyAI Default",
-  "version": "3",
+  "version": "4",
   "ttl_minutes": 360,
-  "default_mode": "text",
-  "modes": {
-    "text": {
-      "label": "Text",
-      "tiers": [
-        { "min_vram_gb": 24, "min_ram_gb": 48, "model": "qwen3.6:35b", "fallback": "gemma4:31b"  },
-        { "min_vram_gb": 20, "min_ram_gb": 40, "model": "gemma4:31b",  "fallback": "qwen3.6:27b" },
-        { "min_vram_gb": 16, "min_ram_gb": 32, "model": "qwen3.6:27b", "fallback": "gemma4:26b"  },
-        { "min_vram_gb": 14, "min_ram_gb": 28, "model": "gemma4:26b",  "fallback": "qwen3.5:9b"  },
-        { "min_vram_gb": 8,  "min_ram_gb": 16, "model": "qwen3.5:9b",   "fallback": "gemma4:e4b"    },
-        { "min_vram_gb": 6,  "min_ram_gb": 12, "model": "gemma4:e4b",   "fallback": "gemma4:e2b"   },
-        { "min_vram_gb": 4,  "min_ram_gb": 8,  "model": "gemma4:e2b",  "fallback": "llama3.2:1b"   },
-        { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "llama3.2:1b",  "fallback": "llama3.2:1b"   }
-      ]
+  "default_family": "gemma4",
+  "families": {
+    "gemma4": {
+      "label": "Gemma 4",
+      "description": "Google Gemma 4 — versatile general-purpose models with strong instruction following.",
+      "default_mode": "text",
+      "modes": {
+        "text": {
+          "label": "Text",
+          "tiers": [
+            { "min_vram_gb": 20, "min_ram_gb": 40, "model": "gemma4:31b",  "fallback": "gemma4:26b" },
+            { "min_vram_gb": 14, "min_ram_gb": 28, "model": "gemma4:26b",  "fallback": "gemma4:e4b" },
+            { "min_vram_gb": 6,  "min_ram_gb": 12, "model": "gemma4:e4b",  "fallback": "gemma4:e2b" },
+            { "min_vram_gb": 4,  "min_ram_gb": 8,  "model": "gemma4:e2b",  "fallback": "gemma4:e2b" },
+            { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "gemma4:e2b",  "fallback": "gemma4:e2b" }
+          ]
+        }
+      }
+    },
+    "qwen3": {
+      "label": "Qwen 3",
+      "description": "Alibaba Qwen 3 — strong multilingual and reasoning performance at every size.",
+      "default_mode": "text",
+      "modes": {
+        "text": {
+          "label": "Text",
+          "tiers": [
+            { "min_vram_gb": 24, "min_ram_gb": 48, "model": "qwen3.6:35b", "fallback": "qwen3.6:27b" },
+            { "min_vram_gb": 16, "min_ram_gb": 32, "model": "qwen3.6:27b", "fallback": "qwen3.5:9b"  },
+            { "min_vram_gb": 8,  "min_ram_gb": 16, "model": "qwen3.5:9b",  "fallback": "qwen3.5:1b"  },
+            { "min_vram_gb": 4,  "min_ram_gb": 8,  "model": "qwen3.5:1b",  "fallback": "qwen3.5:1b"  },
+            { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "qwen3.5:1b",  "fallback": "qwen3.5:1b"  }
+          ]
+        }
+      }
     }
   }
 }
