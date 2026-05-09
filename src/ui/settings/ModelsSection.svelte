@@ -25,11 +25,19 @@
 
   let hardware = $state<HardwareProfile | null>(null);
   let activeMode = $state<Mode>("text");
-  /** Tag the resolver currently picks for (active provider, active family,
-   *  active mode). Only this exact tag has its trash button suppressed —
-   *  every other model is freely deletable, with cross-family/mode warnings
-   *  surfaced in the confirmation dialog. */
-  let activeTag = $state<string | null>(null);
+  /** Every model tag listed in any tier (model or fallback) of the active
+   *  family inside the active provider. These are the rows we lock from
+   *  deletion: switching modes within the active family stays cheap because
+   *  the user can't accidentally delete a tag they'd need on the next mode
+   *  swap. Switching families (CLI or Family tab) recomputes this set. */
+  let activeFamilyTags = $state<Set<string>>(new Set());
+  /** The active family's display label, surfaced in the row badge so users
+   *  can read "active · Gemma 4" instead of decoding their config. */
+  let activeFamilyLabel = $state<string>("");
+  /** Per-tag list of every (provider, family) pair that lists the tag in
+   *  any tier — so a row in family `qwen3` reads "in Qwen 3 family" rather
+   *  than the old "in N providers" which lost the family signal entirely. */
+  let tagFamilies = $state<Record<string, Array<{ provider: string; familyName: string; familyLabel: string }>>>({});
 
   let overridePicker = $state<{ mode: Mode; open: boolean } | null>(null);
   let availableModels = $state<string[]>([]);
@@ -73,17 +81,59 @@
     // cleanup pass writes the cache.
     try { await recomputeRecommendedSet(); } catch {}
     models = await getModelStatusWithMeta();
-    if (hardware) {
-      // Resolve the live tag once per reload so per-row trash visibility is a
-      // pure equality check; cheaper than computing usage for every row.
-      try {
-        const probe = await lookupModelUsage("__probe__", hardware, activeMode);
-        activeTag = probe.activeTag;
-      } catch {
-        activeTag = null;
-      }
-    }
+    await computeFamilyMembership();
     loading = false;
+  }
+
+  /** Walk every saved provider's manifest and bucket every tag into:
+   *  (a) the active-family lock set, and
+   *  (b) the per-tag family map for row badges. One pass over O(providers
+   *  × families × modes × tiers) — cheap enough to redo on every reload. */
+  async function computeFamilyMembership() {
+    try {
+      const [allManifests, config] = await Promise.all([getAllManifests(), loadConfig()]);
+      const lockSet = new Set<string>();
+      const map: Record<string, Array<{ provider: string; familyName: string; familyLabel: string }>> = {};
+      let activeLabel = "";
+
+      for (const { provider, manifest } of allManifests) {
+        for (const [familyName, family] of Object.entries(manifest.families ?? {})) {
+          const isActiveFam =
+            provider.name === config.active_provider && familyName === config.active_family;
+          if (isActiveFam) activeLabel = family.label;
+
+          for (const modeSpec of Object.values(family.modes)) {
+            for (const tier of modeSpec.tiers) {
+              for (const tag of [tier.model, tier.fallback]) {
+                if (!tag) continue;
+                if (isActiveFam) lockSet.add(tag);
+                const list = map[tag] ?? [];
+                if (!list.find((e) => e.provider === provider.name && e.familyName === familyName)) {
+                  list.push({ provider: provider.name, familyName, familyLabel: family.label });
+                }
+                map[tag] = list;
+              }
+            }
+          }
+        }
+      }
+      // Mode overrides can point at a tag outside the active family. Whichever
+      // tag the resolver picks for the active mode is the "live" model and
+      // also belongs in the lock set, even if it doesn't appear in any tier
+      // of the active family.
+      if (hardware) {
+        try {
+          const probe = await lookupModelUsage("__probe__", hardware, activeMode);
+          if (probe.activeTag) lockSet.add(probe.activeTag);
+        } catch {}
+      }
+
+      activeFamilyTags = lockSet;
+      activeFamilyLabel = activeLabel;
+      tagFamilies = map;
+    } catch {
+      // Non-fatal: the rows will fall back to the unrecommended badge.
+    }
   }
 
   async function toggleKeep(name: string, kept: boolean) {
@@ -116,7 +166,9 @@
 
   async function confirmDelete() {
     if (!deleteTarget || deleting) return;
-    if (deleteUsage?.isActiveTag) return; // Hard-locked by the active-tag guard.
+    // Active-family lock is enforced at the row level (no trash button is
+    // rendered for those tags). Belt + suspenders here in case state slips.
+    if (activeFamilyTags.has(deleteTarget.name)) return;
     deleting = true;
     deleteError = "";
     try {
@@ -217,18 +269,30 @@
     {:else}
       <div class="list">
         {#each models as m}
-          <div class="model-row" class:unrecommended={m.recommended_by.length === 0}>
+          {@const inActive = activeFamilyTags.has(m.name)}
+          {@const fams = tagFamilies[m.name] ?? []}
+          {@const otherFams = fams.filter((f) => !(inActive && f.familyLabel === activeFamilyLabel))}
+          <div class="model-row" class:unrecommended={!inActive && fams.length === 0}>
             <div class="model-info">
               <span class="name">{m.name}</span>
               <span class="size">{sizeLabel(m.size)}</span>
             </div>
             <div class="model-meta">
-              {#if m.recommended_by.length > 0}
-                <span class="rec-badge">
-                  ✓ {m.recommended_by.length === 1 ? m.recommended_by[0] : `${m.recommended_by.length} providers`}
+              {#if inActive}
+                <span class="rec-badge primary" title="Locked — part of the active family">
+                  ✓ active · {activeFamilyLabel} family
                 </span>
+              {:else if fams.length === 1}
+                <span class="rec-badge soft">in {fams[0].familyLabel} family</span>
+              {:else if fams.length > 1}
+                <span class="rec-badge soft">in {fams.length} families</span>
               {:else}
                 <span class="unrec-badge">unrecommended · {ageLabel(m.last_recommended)}</span>
+              {/if}
+              {#if inActive && otherFams.length > 0}
+                <span class="rec-meta">
+                  also in {otherFams.length === 1 ? `${otherFams[0].familyLabel} family` : `${otherFams.length} other families`}
+                </span>
               {/if}
               {#if m.override_for.length > 0}
                 <span class="override-badge">override: {m.override_for.join(", ")}</span>
@@ -242,10 +306,10 @@
             >
               {m.kept ? "📌" : "📍"}
             </button>
-            {#if m.name === activeTag}
+            {#if inActive}
               <span
                 class="trash-btn locked"
-                title="In use right now — switch family or mode to delete"
+                title="Active family ({activeFamilyLabel}) — switch family to delete"
                 aria-hidden="true"
               >🔒</span>
             {:else}
@@ -395,6 +459,15 @@
   .size { font-size: .72rem; color: #555; }
   .model-meta { display: flex; flex-direction: column; gap: .15rem; align-items: flex-end; }
   .rec-badge { font-size: .7rem; color: #4a4; }
+  .rec-badge.primary {
+    color: #b3b3ff;
+    background: #1a1a2a;
+    padding: .1rem .45rem;
+    border-radius: 4px;
+    font-weight: 600;
+  }
+  .rec-badge.soft { color: #777; }
+  .rec-meta { font-size: .68rem; color: #555; font-style: italic; }
   .unrec-badge { font-size: .7rem; color: #777; }
   .override-badge { font-size: .68rem; color: #9a7; }
   .pin-btn { background: none; border: none; cursor: pointer; font-size: .9rem; opacity: .5; }
