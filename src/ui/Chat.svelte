@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import ModeBar from "./ModeBar.svelte";
   import StatusBar from "./StatusBar.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
@@ -41,31 +42,57 @@
     const text = input.trim();
     if (!text || thinking) return;
     input = "";
-    messages = [...messages, { role: "user", content: text }];
+    const history = [...messages, { role: "user" as const, content: text }];
+    messages = history;
     thinking = true;
 
+    // Per-call channel so concurrent (or rapidly retried) streams can't
+    // crosstalk. crypto.randomUUID is available in the Tauri WebView.
+    const streamId = crypto.randomUUID();
+    let unlisten: UnlistenFn | null = null;
+    let assistantIdx = -1;
     try {
-      // Going through the Rust-side ollama_chat command instead of
+      unlisten = await listen<{ delta: string; done: boolean }>(
+        `anyai://chat-stream/${streamId}`,
+        (e) => {
+          const { delta } = e.payload;
+          if (!delta) return;
+          if (assistantIdx === -1) {
+            // First token: drop the typing dots and append the bubble we'll
+            // keep growing.
+            thinking = false;
+            messages = [...messages, { role: "assistant", content: delta }];
+            assistantIdx = messages.length - 1;
+          } else {
+            const next = messages.slice();
+            next[assistantIdx] = {
+              ...next[assistantIdx],
+              content: next[assistantIdx].content + delta,
+            };
+            messages = next;
+          }
+        },
+      );
+
+      // Going through the Rust-side ollama_chat_stream command instead of
       // tauri-plugin-http: Ollama's CORS allowlist on Windows rejects
       // requests originating from the Tauri WebView (`http://tauri.localhost`)
       // with HTTP 403 even after the model is downloaded. reqwest from Rust
       // doesn't set Origin, so the daemon accepts the call.
-      const content = await invoke<string>("ollama_chat", {
+      await invoke("ollama_chat_stream", {
+        streamId,
         model: activeModel,
-        messages: messages.map((m) => ({ role: m.role, content: m.content })),
+        messages: history.map((m) => ({ role: m.role, content: m.content })),
       });
-      if (!content) {
-        messages = [
-          ...messages,
-          { role: "assistant", content: "(empty response)" },
-        ];
-        return;
+
+      if (assistantIdx === -1) {
+        messages = [...messages, { role: "assistant", content: "(empty response)" }];
       }
-      messages = [...messages, { role: "assistant", content }];
     } catch (e) {
       messages = [...messages, { role: "assistant", content: `(error: ${e})` }];
     } finally {
       thinking = false;
+      unlisten?.();
     }
   }
 
