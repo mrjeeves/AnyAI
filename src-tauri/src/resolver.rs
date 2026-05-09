@@ -59,7 +59,7 @@ pub fn resolve_in_manifest(manifest: &Value, hw: &HardwareProfile, mode: &str) -
         .and_then(|t| t.as_array())
         .ok_or_else(|| anyhow!("no tiers in manifest"))?;
 
-    let vram = hw.vram_gb.unwrap_or(0.0);
+    let vram = effective_vram_gb(hw);
     let ram = hw.ram_gb;
 
     for tier in tiers {
@@ -77,6 +77,20 @@ pub fn resolve_in_manifest(manifest: &Value, hw: &HardwareProfile, mode: &str) -
         .and_then(|t| t["model"].as_str())
         .map(str::to_string)
         .ok_or_else(|| anyhow!("no model found in manifest tiers"))
+}
+
+/// VRAM the resolver should credit toward `min_vram_gb` checks. Mirrors
+/// `effectiveVramGb` in `src/manifest.ts`: only discrete GPUs (NVIDIA, AMD)
+/// own VRAM separately from system RAM. Apple Silicon and integrated GPUs
+/// share the same physical pool `ram_gb` already counts, so crediting their
+/// "VRAM" again would let an 8 GB Mac match a `vram>=6` tier and pick a
+/// model the system can't fit.
+fn effective_vram_gb(hw: &HardwareProfile) -> f64 {
+    use crate::hardware::GpuType;
+    match hw.gpu_type {
+        GpuType::Nvidia | GpuType::Amd => hw.vram_gb.unwrap_or(0.0),
+        GpuType::Apple | GpuType::None => 0.0,
+    }
 }
 
 pub fn tags_in_manifest(manifest: &Value) -> Vec<String> {
@@ -582,4 +596,83 @@ pub fn merge_defaults(mut config: Value) -> Value {
         config["tracked_modes"] = serde_json::json!([active]);
     }
     config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hardware::{GpuType, HardwareProfile};
+
+    fn hw(gpu: GpuType, vram: Option<f64>, ram: f64) -> HardwareProfile {
+        HardwareProfile {
+            vram_gb: vram,
+            ram_gb: ram,
+            disk_free_gb: 100.0,
+            gpu_type: gpu,
+            arch: "x86_64".into(),
+            soc: None,
+        }
+    }
+
+    /// Tier table mirroring the bundled manifest's shape so the test stays
+    /// stable if `manifests/default.json` is retuned. Don't load the real
+    /// file: that couples the resolver test to manifest content.
+    fn manifest() -> Value {
+        serde_json::json!({
+            "default_mode": "text",
+            "modes": {
+                "text": {
+                    "tiers": [
+                        { "min_vram_gb": 24, "min_ram_gb": 48, "model": "big:35b"   },
+                        { "min_vram_gb":  8, "min_ram_gb": 16, "model": "mid:9b"    },
+                        { "min_vram_gb":  4, "min_ram_gb": 10, "model": "small:2b"  },
+                        { "min_vram_gb":  0, "min_ram_gb":  0, "model": "tiny:1b"   }
+                    ]
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn apple_8gb_unified_lands_on_tiny_not_mid() {
+        // Regression: pre-fix, Apple 8 GB reported vram=8 AND ram=8, the
+        // resolver OR-matched `vram >= 6` at the 9 B tier, picked a model
+        // the system couldn't fit, and ground at ~1 token / 10 s.
+        let mac = hw(GpuType::Apple, Some(8.0), 8.0);
+        assert_eq!(
+            resolve_in_manifest(&manifest(), &mac, "text").unwrap(),
+            "tiny:1b"
+        );
+    }
+
+    #[test]
+    fn pi_8gb_no_gpu_lands_on_tiny() {
+        let pi = hw(GpuType::None, None, 8.0);
+        assert_eq!(
+            resolve_in_manifest(&manifest(), &pi, "text").unwrap(),
+            "tiny:1b"
+        );
+    }
+
+    #[test]
+    fn apple_16gb_unified_lands_on_mid() {
+        // Mac with enough headroom for a 9 B model — picks `mid` via
+        // ram>=16, not via the (still-zero) effective vram.
+        let mac = hw(GpuType::Apple, Some(16.0), 16.0);
+        assert_eq!(
+            resolve_in_manifest(&manifest(), &mac, "text").unwrap(),
+            "mid:9b"
+        );
+    }
+
+    #[test]
+    fn discrete_nvidia_vram_still_credited() {
+        // 12 GB NVIDIA card with 8 GB system RAM should still get the 9 B
+        // tier — the VRAM is its own pool here, so the check stays useful.
+        let pc = hw(GpuType::Nvidia, Some(12.0), 8.0);
+        assert_eq!(
+            resolve_in_manifest(&manifest(), &pc, "text").unwrap(),
+            "mid:9b"
+        );
+    }
 }
