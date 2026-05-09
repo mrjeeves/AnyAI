@@ -7,6 +7,7 @@ Full reference manual for AnyAI. For a one-page overview and quick start, see [R
 - [How it works](#how-it-works)
 - [Installation](#installation)
 - [API server](#api-server)
+- [Connecting client apps](#connecting-client-apps)
 - [CLI reference](#cli-reference)
   - [Run / Chat](#run--chat)
   - [Status](#status)
@@ -139,6 +140,239 @@ Every response includes `X-AnyAI-Resolved-Model` so a client (or a log) can see 
 If a virtual model's tag isn't pulled yet, the server returns `503` with `Retry-After: 10` and a JSON body describing pull progress. Pass `?wait=true` (or header `X-AnyAI-Wait: true`) to hold the connection and stream pull progress as SSE keep-alives instead.
 
 The GUI also runs the API server on the same port by default — disable via `config.json` (`api.enabled: false`).
+
+---
+
+## Connecting client apps
+
+Most consumer-facing AI apps advertise a "local model" toggle and then leave you to figure out the actual fields. AnyAI speaks OpenAI's HTTP wire format on `127.0.0.1:1473`, so anything that supports a custom OpenAI base URL is a drop-in.
+
+The universal answer to *"how do I point [client] at my local LLM?"* is always these four values:
+
+| Field    | Value                                              |
+|----------|----------------------------------------------------|
+| Base URL | `http://127.0.0.1:1473/v1`                         |
+| API key  | any non-empty string (e.g. `anyai`)                |
+| Model    | `anyai-text` · `anyai-code` · `anyai-vision`       |
+| Auth     | `Authorization: Bearer <key>` (clients add this for you) |
+
+Below are exact, copy-pasteable configs for the apps that most commonly ship with the toggle but bury the fields. Start `anyai serve` first; everything else just points at the same URL.
+
+### opencode
+
+`opencode.json` (project root, or `~/.config/opencode/opencode.json`):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "anyai": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "AnyAI (local)",
+      "options": { "baseURL": "http://127.0.0.1:1473/v1" },
+      "models": {
+        "anyai-text":   { "name": "AnyAI (text)" },
+        "anyai-code":   { "name": "AnyAI (code)" },
+        "anyai-vision": { "name": "AnyAI (vision)" }
+      }
+    }
+  }
+}
+```
+
+Restart opencode, then `/models` → pick `AnyAI`.
+
+### OpenClaw
+
+In OpenClaw's Settings → Providers → Add → **OpenAI-compatible**:
+
+```
+Name:     AnyAI
+Base URL: http://127.0.0.1:1473/v1
+API key:  anyai
+Model:    anyai-text
+```
+
+Equivalent CLI:
+
+```bash
+openclaw provider add anyai \
+  --kind openai-compatible \
+  --base-url http://127.0.0.1:1473/v1 \
+  --api-key anyai \
+  --model anyai-text
+openclaw provider use anyai
+```
+
+### OpenClaude (Gitlawb / mjohnnywest / hatixntsoa forks)
+
+OpenClaude reads its OpenAI-mode settings from environment variables:
+
+```bash
+export CLAUDE_CODE_USE_OPENAI=1
+export OPENAI_BASE_URL=http://127.0.0.1:1473/v1
+export OPENAI_API_KEY=anyai
+export OPENAI_MODEL=anyai-code     # or anyai-text
+openclaude
+```
+
+Drop those four lines in your shell rc and every OpenClaude session routes through AnyAI.
+
+### Cursor
+
+Settings → Models → enable **Override OpenAI Base URL**:
+
+```
+http://127.0.0.1:1473/v1
+```
+
+API key field: `anyai`. Add `anyai-text` / `anyai-code` to the **Model Names** list and click **Verify**. Cursor caches model lists — toggle the override off and on once after adding new model IDs.
+
+### Continue.dev
+
+`~/.continue/config.yaml`:
+
+```yaml
+models:
+  - name: AnyAI (text)
+    provider: openai
+    model: anyai-text
+    apiBase: http://127.0.0.1:1473/v1
+    apiKey: anyai
+  - name: AnyAI (code)
+    provider: openai
+    model: anyai-code
+    apiBase: http://127.0.0.1:1473/v1
+    apiKey: anyai
+```
+
+Legacy `config.json` form, if you haven't migrated yet:
+
+```json
+{ "title": "AnyAI", "provider": "openai",
+  "model": "anyai-text",
+  "apiBase": "http://127.0.0.1:1473/v1",
+  "apiKey": "anyai" }
+```
+
+### Cline / Roo Code
+
+⚙️ → API Provider → **OpenAI Compatible**:
+
+```
+Base URL:  http://127.0.0.1:1473/v1
+API Key:   anyai
+Model ID:  anyai-text
+```
+
+If the Base URL field is missing, update the extension — it was hidden briefly in some 3.x builds and has since been restored. CLI users: `cline provider configure openai-compatible`.
+
+### Aider
+
+Flags:
+
+```bash
+aider \
+  --openai-api-base http://127.0.0.1:1473/v1 \
+  --openai-api-key  anyai \
+  --model           openai/anyai-code
+```
+
+Or `.env` in your project:
+
+```
+OPENAI_API_BASE=http://127.0.0.1:1473/v1
+OPENAI_API_KEY=anyai
+AIDER_MODEL=openai/anyai-code
+```
+
+The `openai/` prefix tells aider's LiteLLM layer to treat it as a generic OpenAI-compatible model and skip token-cost lookups.
+
+### Zed
+
+`~/.config/zed/settings.json`:
+
+```json
+{
+  "language_models": {
+    "openai_compatible": {
+      "AnyAI": {
+        "api_url": "http://127.0.0.1:1473/v1",
+        "available_models": [
+          { "name": "anyai-text", "display_name": "AnyAI (text)", "max_tokens": 32768 },
+          { "name": "anyai-code", "display_name": "AnyAI (code)", "max_tokens": 32768 }
+        ]
+      }
+    }
+  }
+}
+```
+
+Zed prompts for the API key on first use — type `anyai` (it's stored in the system keychain, not the JSON file).
+
+### Open WebUI
+
+Open WebUI's **Ollama** panel won't see AnyAI — AnyAI exposes OpenAI's wire format, not Ollama's native API. Use the **OpenAI** panel instead:
+
+Settings → Connections → OpenAI API:
+
+```
+API Base URL: http://127.0.0.1:1473/v1
+API Key:      anyai
+```
+
+### LibreChat
+
+`librechat.yaml`:
+
+```yaml
+endpoints:
+  custom:
+    - name: AnyAI
+      apiKey: anyai
+      baseURL: http://127.0.0.1:1473/v1
+      models:
+        default: ["anyai-text", "anyai-code", "anyai-vision"]
+        fetch: false
+      titleConvo: true
+      modelDisplayLabel: AnyAI
+```
+
+### Raw SDK use
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:1473/v1", api_key="anyai")
+client.chat.completions.create(
+    model="anyai-text",
+    messages=[{"role": "user", "content": "hi"}],
+)
+```
+
+```js
+import OpenAI from "openai";
+const client = new OpenAI({
+  baseURL: "http://127.0.0.1:1473/v1",
+  apiKey:  "anyai",
+});
+```
+
+### Clients that only speak Ollama (port 11434)
+
+A handful of tools (Msty, some Obsidian plugins, older Open WebUI builds) only know how to talk to `http://localhost:11434`. AnyAI already runs Ollama as a managed child process, so those tools can hit `http://127.0.0.1:11434` directly and see exactly the models AnyAI pulled. Confirm with `anyai status`.
+
+The trade-off: going through Ollama directly bypasses AnyAI's virtual model IDs (`anyai-text` etc.), so you'll be naming raw tags like `qwen3.5:9b`. Use AnyAI's URL whenever the client lets you.
+
+### Clients that only speak Anthropic's wire format
+
+If a tool only accepts `ANTHROPIC_BASE_URL` and the Anthropic Messages API (vanilla Claude Code, some Anthropic-only desktop apps), put an Anthropic→OpenAI shim in front of AnyAI — `claude-code-router`, `anthropic-proxy`, or LiteLLM in `--anthropic` mode all work. Point the shim's upstream at `http://127.0.0.1:1473/v1` and the client at the shim. AnyAI itself does not translate the Anthropic wire format.
+
+### Troubleshooting
+
+- **`Connection refused`** — `anyai serve` isn't running, or the client is on a different host. AnyAI binds `127.0.0.1` by default; for LAN access run `anyai serve --host 0.0.0.0 --bearer-token sk-…` and point the client at that host with the matching key.
+- **`model not found: anyai-text`** — the client is hitting AnyAI but the manifest doesn't expose that mode. `curl http://127.0.0.1:1473/v1/models` lists what's actually available; `anyai status` shows which mode resolved.
+- **`503 Retry-After`** — the model isn't pulled yet. Wait, or run `anyai preload text` ahead of time. Clients that respect `Retry-After` will recover on their own.
+- **Client streams nothing then errors** — some clients send `stream: true` but don't handle SSE keep-alive frames. Disable streaming in the client, or pass `?wait=true` so AnyAI streams progress as keep-alives.
 
 ---
 
