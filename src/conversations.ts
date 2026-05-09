@@ -35,6 +35,9 @@ export interface Conversation {
   created_at: string;
   updated_at: string;
   messages: StoredMessage[];
+  /** Transcribe-mode artifacts. Empty / absent for text-mode conversations. */
+  transcript?: string;
+  talking_points?: string[];
 }
 
 /** Lightweight projection used by the sidebar list — avoids reading every
