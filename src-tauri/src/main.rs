@@ -7,6 +7,7 @@ mod cli;
 mod hardware;
 mod ollama;
 mod preload;
+mod remote_ui;
 mod resolver;
 mod self_update;
 mod watcher;
@@ -148,6 +149,73 @@ async fn ollama_chat_cancel(stream_id: String) {
     ollama::cancel_chat(&stream_id).await;
 }
 
+// ---------------------------------------------------------------------------
+// Remote UI commands
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct RemoteUiStatus {
+    enabled: bool,
+    running: bool,
+    port: u16,
+    lan_ips: Vec<String>,
+    remote_active: bool,
+}
+
+#[tauri::command]
+fn remote_ui_status() -> Result<RemoteUiStatus, String> {
+    let cfg = resolver::load_config_value().map_err(|e| e.to_string())?;
+    let enabled = cfg["remote_ui"]["enabled"].as_bool().unwrap_or(false);
+    let port = cfg["remote_ui"]["port"].as_u64().unwrap_or(1474) as u16;
+    Ok(RemoteUiStatus {
+        enabled,
+        running: remote_ui::is_running(),
+        port,
+        lan_ips: remote_ui::lan_ipv4_addresses(),
+        remote_active: remote_ui::remote_active_now(),
+    })
+}
+
+#[tauri::command]
+async fn remote_ui_set_enabled(enabled: bool, port: Option<u16>) -> Result<RemoteUiStatus, String> {
+    let mut cfg = resolver::load_config_value().map_err(|e| e.to_string())?;
+    cfg["remote_ui"]["enabled"] = serde_json::json!(enabled);
+    let final_port = if let Some(p) = port {
+        cfg["remote_ui"]["port"] = serde_json::json!(p);
+        p
+    } else {
+        cfg["remote_ui"]["port"].as_u64().unwrap_or(1474) as u16
+    };
+    resolver::save_config_value(&cfg).map_err(|e| e.to_string())?;
+    if enabled {
+        remote_ui::start(final_port)
+            .await
+            .map_err(|e| e.to_string())?;
+    } else {
+        remote_ui::stop().await;
+    }
+    Ok(RemoteUiStatus {
+        enabled,
+        running: remote_ui::is_running(),
+        port: final_port,
+        lan_ips: remote_ui::lan_ipv4_addresses(),
+        remote_active: remote_ui::remote_active_now(),
+    })
+}
+
+#[tauri::command]
+fn remote_ui_qr(text: String) -> Result<String, String> {
+    remote_ui::qr_svg(&text).map_err(|e| e.to_string())
+}
+
+/// The local Tauri UI calls this on mount + every 5s so the tracker knows the
+/// desktop is open. Without it, only remote heartbeats would register and
+/// every remote session would unnecessarily curtain a UI nobody's using.
+#[tauri::command]
+fn remote_ui_local_heartbeat(session_id: String) {
+    remote_ui::register_local_heartbeat(&session_id);
+}
+
 #[tauri::command]
 fn update_status() -> Result<self_update::UpdateStatus, String> {
     self_update::status().map_err(|e| e.to_string())
@@ -259,6 +327,10 @@ fn main() {
             update_status,
             update_check_now,
             update_apply_now,
+            remote_ui_status,
+            remote_ui_set_enabled,
+            remote_ui_qr,
+            remote_ui_local_heartbeat,
         ])
         .setup(|app| {
             // If the configured 800x600 window can't fit on this monitor —
@@ -310,8 +382,39 @@ fn main() {
                             eprintln!("api server failed: {e}");
                         }
                     });
+
+                    // Auto-start the remote UI server if the user previously enabled it.
+                    let remote_enabled = cfg["remote_ui"]["enabled"].as_bool().unwrap_or(false);
+                    let remote_port = cfg["remote_ui"]["port"].as_u64().unwrap_or(1474) as u16;
+                    if remote_enabled {
+                        tokio::spawn(async move {
+                            if let Err(e) = remote_ui::start(remote_port).await {
+                                eprintln!("remote-ui start failed: {e}");
+                            }
+                        });
+                    }
                 }
             });
+
+            // Bridge `remote_ui::subscribe_active()` → Tauri event so the
+            // GUI can flip the curtain on without polling. Runs for the
+            // lifetime of the app.
+            {
+                use tauri::Emitter;
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut rx = remote_ui::subscribe_active();
+                    let initial = *rx.borrow();
+                    let _ = app_handle.emit("anyai://remote-active-changed", initial);
+                    loop {
+                        if rx.changed().await.is_err() {
+                            break;
+                        }
+                        let active = *rx.borrow();
+                        let _ = app_handle.emit("anyai://remote-active-changed", active);
+                    }
+                });
+            }
             Ok(())
         })
         .build(tauri::generate_context!())

@@ -455,6 +455,10 @@ pub fn default_config_value() -> Value {
             "auto_apply": "patch",
             "check_interval_hours": 6
         },
+        "remote_ui": {
+            "enabled": false,
+            "port": 1474
+        },
         "providers": [
             {
                 "name": "AnyAI Default",
@@ -480,7 +484,7 @@ pub fn merge_defaults(mut config: Value) -> Value {
                 obj.insert(k.clone(), v.clone());
             }
         }
-        for nested_key in ["api", "auto_update"] {
+        for nested_key in ["api", "auto_update", "remote_ui"] {
             if let (Some(nested), Some(def_nested)) = (
                 obj.get_mut(nested_key).and_then(Value::as_object_mut),
                 def_obj.get(nested_key).and_then(Value::as_object),

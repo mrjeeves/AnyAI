@@ -1,6 +1,6 @@
 import { readTextFile, writeTextFile, exists, mkdir } from "@tauri-apps/plugin-fs";
 import { homeDir } from "@tauri-apps/api/path";
-import type { Config, ApiConfig, AutoUpdateConfig } from "./types";
+import type { Config, ApiConfig, AutoUpdateConfig, RemoteUiConfig } from "./types";
 
 async function configPath(): Promise<string> {
   const home = await homeDir();
@@ -30,6 +30,11 @@ const DEFAULT_AUTO_UPDATE: AutoUpdateConfig = {
   check_interval_hours: 6,
 };
 
+const DEFAULT_REMOTE_UI: RemoteUiConfig = {
+  enabled: false,
+  port: 1474,
+};
+
 const DEFAULT_CONFIG: Config = {
   active_provider: "AnyAI Default",
   active_family: "gemma4",
@@ -42,6 +47,7 @@ const DEFAULT_CONFIG: Config = {
   conversation_dir: "",
   api: { ...DEFAULT_API },
   auto_update: { ...DEFAULT_AUTO_UPDATE },
+  remote_ui: { ...DEFAULT_REMOTE_UI },
   providers: [
     {
       name: "AnyAI Default",
@@ -102,7 +108,14 @@ function mergeDefaults(raw: Record<string, unknown>): Config {
     ...DEFAULT_CONFIG,
     ...(raw as Partial<Config>),
     api: { ...DEFAULT_API, ...((raw as { api?: Partial<ApiConfig> }).api ?? {}) },
-    auto_update: { ...DEFAULT_AUTO_UPDATE, ...((raw as { auto_update?: Partial<AutoUpdateConfig> }).auto_update ?? {}) },
+    auto_update: {
+      ...DEFAULT_AUTO_UPDATE,
+      ...((raw as { auto_update?: Partial<AutoUpdateConfig> }).auto_update ?? {}),
+    },
+    remote_ui: {
+      ...DEFAULT_REMOTE_UI,
+      ...((raw as { remote_ui?: Partial<RemoteUiConfig> }).remote_ui ?? {}),
+    },
     mode_overrides: (raw as { mode_overrides?: Config["mode_overrides"] }).mode_overrides ?? {},
     kept_models: (raw as { kept_models?: string[] }).kept_models ?? [],
     tracked_modes: (raw as { tracked_modes?: Config["tracked_modes"] }).tracked_modes ?? [],

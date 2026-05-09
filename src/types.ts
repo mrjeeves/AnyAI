@@ -76,6 +76,15 @@ export interface AutoUpdateConfig {
   check_interval_hours: number;
 }
 
+/** Optional in-process server that exposes a minimal browser shell over the
+ *  LAN so phones / other machines can chat with this AnyAI instance. Off by
+ *  default — turning it on binds 0.0.0.0:port. Single-user: the local Tauri
+ *  UI is curtained off while a remote session is active. */
+export interface RemoteUiConfig {
+  enabled: boolean;
+  port: number;
+}
+
 export interface Config {
   active_provider: string;
   active_family: string;
@@ -90,6 +99,7 @@ export interface Config {
   conversation_dir: string;
   api: ApiConfig;
   auto_update: AutoUpdateConfig;
+  remote_ui: RemoteUiConfig;
   providers: Provider[];
 }
 
