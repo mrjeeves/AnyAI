@@ -1028,9 +1028,7 @@ async fn run_update_now() -> Result<()> {
         if cmp == std::cmp::Ordering::Equal {
             println!("Already on the latest version ({latest}).");
         } else {
-            println!(
-                "Already up to date — you're on {current} (latest published: {latest})."
-            );
+            println!("Already up to date — you're on {current} (latest published: {latest}).");
         }
         stamp_check_now()?;
         return Ok(());
@@ -1061,10 +1059,7 @@ async fn print_status() -> Result<()> {
         }
     );
     match read_pending_or_clean()? {
-        Some(p) => println!(
-            "Pending         : {} staged at {}",
-            p.version, p.staged_at
-        ),
+        Some(p) => println!("Pending         : {} staged at {}", p.version, p.staged_at),
         None => println!("Pending         : none"),
     }
     Ok(())
