@@ -98,8 +98,25 @@
   ): Set<Mode> {
     if (!manifest) return new Set(["text", "vision", "code", "transcribe"]);
     const picked = pickFamily(manifest, familyName);
-    if (!picked) return new Set();
+    if (!picked) return new Set(["transcribe"]);
     return familyModes(picked.family);
+  }
+
+  /** What to display in the status bar / pass downstream as the
+   *  "active model". Transcribe rides on whisper-rs (models live under
+   *  `~/.anyai/whisper/`), so its display tag comes from MicConfig
+   *  rather than the manifest's Ollama tier table. */
+  function displayModelFor(
+    mode: Mode,
+    hw: HardwareProfile,
+    manifest: Awaited<ReturnType<typeof getActiveManifest>>,
+    config: Awaited<ReturnType<typeof loadConfig>>,
+  ): string {
+    if (mode === "transcribe") {
+      const m = config.mic?.whisper_model || "tiny.en";
+      return `whisper:${m}`;
+    }
+    return resolveModel(hw, manifest, mode, config.mode_overrides, config.active_family);
   }
 
   async function refreshConversations() {
@@ -125,20 +142,36 @@
       const picked = pickFamily(manifest, config.active_family);
       activeFamilyName = picked?.name ?? manifest.default_family ?? "";
       supportedModes = modesForActiveFamily(manifest, activeFamilyName);
-      activeModel = resolveModel(hw, manifest, activeMode, config.mode_overrides, activeFamilyName);
+      activeModel = displayModelFor(activeMode, hw, manifest, config);
 
-      const ollamaInstalled = await invoke<boolean>("ollama_installed");
-      if (!ollamaInstalled) {
-        view = "first-run";
+      // Transcribe rides on whisper-rs / cpal — there's no Ollama model
+      // to pull for it. Boot straight into chat so the user sees the
+      // transcribe view; whisper model presence is checked at Record-time
+      // by TranscribeView, which deep-links to Settings → Transcription
+      // when the configured model isn't installed.
+      if (activeMode === "transcribe") {
+        // Best-effort: still warm Ollama if it happens to be present, so
+        // a quick mode switch back to text doesn't pay the cold-start.
+        invoke<boolean>("ollama_installed")
+          .then((installed) => {
+            if (installed) invoke("ollama_ensure_running").catch(() => {});
+          })
+          .catch(() => {});
+        view = "chat";
       } else {
-        // Check if the model needs pulling
-        const pulled = await invoke<Array<{ name: string }>>("ollama_list_models");
-        const hasCurrent = pulled.some((m) => m.name === activeModel);
-        if (!hasCurrent) {
+        const ollamaInstalled = await invoke<boolean>("ollama_installed");
+        if (!ollamaInstalled) {
           view = "first-run";
         } else {
-          await invoke("ollama_ensure_running");
-          view = "chat";
+          // Check if the model needs pulling
+          const pulled = await invoke<Array<{ name: string }>>("ollama_list_models");
+          const hasCurrent = pulled.some((m) => m.name === activeModel);
+          if (!hasCurrent) {
+            view = "first-run";
+          } else {
+            await invoke("ollama_ensure_running");
+            view = "chat";
+          }
         }
       }
 
@@ -218,13 +251,7 @@
         const [config, manifest] = await Promise.all([loadConfig(), getActiveManifest()]);
         activeFamilyName = config.active_family;
         supportedModes = modesForActiveFamily(manifest, activeFamilyName);
-        activeModel = resolveModel(
-          hardware,
-          manifest,
-          activeMode,
-          config.mode_overrides,
-          activeFamilyName,
-        );
+        activeModel = displayModelFor(activeMode, hardware, manifest, config);
       });
     } catch (e) {
       // Surface the silenced startup error. Without this it's invisible:
@@ -255,7 +282,7 @@
     const [config, manifest] = await Promise.all([loadConfig(), getActiveManifest()]);
     activeFamilyName = config.active_family;
     supportedModes = modesForActiveFamily(manifest, activeFamilyName);
-    activeModel = resolveModel(hardware, manifest, mode, config.mode_overrides, activeFamilyName);
+    activeModel = displayModelFor(mode, hardware, manifest, config);
 
     await updateConfig({ active_mode: mode });
   }
@@ -265,13 +292,7 @@
     const [config, manifest] = await Promise.all([loadConfig(), getActiveManifest()]);
     activeFamilyName = config.active_family;
     supportedModes = modesForActiveFamily(manifest, activeFamilyName);
-    activeModel = resolveModel(
-      hardware,
-      manifest,
-      activeMode,
-      config.mode_overrides,
-      activeFamilyName,
-    );
+    activeModel = displayModelFor(activeMode, hardware, manifest, config);
   }
 
   function onSelectConversation(id: string) {

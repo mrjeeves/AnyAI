@@ -32,6 +32,20 @@ pub async fn preload<F: FnMut(PreloadEvent)>(
     }
 
     for mode in modes {
+        // Transcribe runs on whisper-rs (models live under
+        // `~/.anyai/whisper/`), not Ollama. Skip it in the Ollama
+        // preload loop instead of resolving + pulling a phantom tag —
+        // the previous behaviour pulled a non-existent `whisper:*`
+        // manifest from Ollama Hub and silently wrote nothing to disk.
+        if mode == "transcribe" {
+            on_event(PreloadEvent {
+                mode: mode.clone(),
+                model: String::new(),
+                status: "ready".into(),
+                detail: "transcribe uses whisper-rs (manage via Settings → Transcription)".into(),
+            });
+            continue;
+        }
         let model = match crate::resolver::resolve(mode).await {
             Ok(m) => m,
             Err(e) => {
