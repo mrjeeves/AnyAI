@@ -91,7 +91,13 @@ fn chunk_buffer_dir(stream_id: &str) -> Result<PathBuf> {
 /// `_` so the path can't escape `~/.anyai/transcribe-buffer/`.
 fn sanitize_stream_id(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -701,12 +707,7 @@ fn count_pending_chunks(buffer_dir: &Path) -> u32 {
     };
     let mut n: u32 = 0;
     for entry in entries.flatten() {
-        if entry
-            .path()
-            .extension()
-            .and_then(|s| s.to_str())
-            == Some("f32")
-        {
+        if entry.path().extension().and_then(|s| s.to_str()) == Some("f32") {
             n = n.saturating_add(1);
         }
     }
