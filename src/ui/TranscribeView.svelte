@@ -50,6 +50,13 @@
     delta: string;
     elapsed_ms: number;
     final: boolean;
+    /** 5-second chunks still queued on disk waiting for whisper. The
+     *  Rust side spills audio to `~/.anyai/transcribe-buffer/{stream}/`
+     *  when the model can't keep up with realtime, so this stays > 0
+     *  on slow hardware until the backlog drains. UI doesn't render it
+     *  yet, but having the field on the wire means we can light up a
+     *  "X s behind" chip later without changing the event plumbing. */
+    pending_chunks?: number;
   }
   interface WhisperModelInfo {
     name: string;
