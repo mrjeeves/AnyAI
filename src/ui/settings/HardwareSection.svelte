@@ -2,6 +2,8 @@
   import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { loadConfig, updateConfig } from "../../config";
+  import { getActiveManifest } from "../../providers";
+  import { resolveModelEx } from "../../manifest";
   import type { HardwareProfile, GpuType, MicConfig } from "../../types";
 
   type Tab = "providers" | "families" | "models" | "storage" | "updates" | "hardware";
@@ -12,6 +14,10 @@
   let conversationDir = $state("");
   let loading = $state(true);
   let error = $state("");
+  /** Tag the resolver picks for transcribe against the active family +
+   *  hardware. Resolved here (not just described) so users can confirm
+   *  the active whisper model from this tab without bouncing to Models. */
+  let transcribeTag = $state("");
 
   // Microphone config + cpal-backed device list. Audio capture itself runs
   // through Rust/cpal (see src-tauri/src/transcribe.rs); the WebView's
@@ -43,15 +49,28 @@
 
   onMount(async () => {
     try {
-      const [hw, config, devices] = await Promise.all([
+      const [hw, config, devices, manifest] = await Promise.all([
         invoke<HardwareProfile>("detect_hardware"),
         loadConfig(),
         invoke<AudioInputDevice[]>("audio_input_devices").catch(() => []),
+        getActiveManifest().catch(() => null),
       ]);
       hardware = hw;
       conversationDir = config.conversation_dir ?? "";
       mic = { ...config.mic };
       micDevices = devices;
+      if (manifest) {
+        try {
+          const r = resolveModelEx(
+            hw,
+            manifest,
+            "transcribe",
+            config.mode_overrides,
+            config.active_family,
+          );
+          transcribeTag = r.runtime === "whisper" ? r.model : "";
+        } catch {}
+      }
     } catch (e) {
       error = String(e);
     } finally {
@@ -173,7 +192,7 @@
   {:else if error && !hardware}
     <p class="error">{error}</p>
   {:else if hardware}
-    <div class="cards">
+    <div class="cards scroll-fade">
       <div class="group-label">Compute</div>
 
       <div class="card">
@@ -311,8 +330,13 @@
 
             <div>
               <dt>Transcribe model</dt>
-              <dd class="dim">
-                Picked automatically by the active family's tier ladder.
+              <dd>
+                {#if transcribeTag}
+                  <code class="picked-tag">{transcribeTag}</code>
+                  <span class="dim">picked by family tier</span>
+                {:else}
+                  <span class="dim">Picked automatically by the active family's tier ladder.</span>
+                {/if}
                 <button class="link-btn small" onclick={() => setActive("models")} title="Manage models">
                   Manage →
                 </button>
@@ -389,7 +413,7 @@
   .loading, .error { padding: 2rem; text-align: center; color: #555; font-size: .82rem; }
   .error { color: #d66; }
 
-  .cards { flex: 1; overflow-y: scroll; padding: .75rem; display: flex; flex-direction: column; gap: .6rem; min-height: 0; }
+  .cards { flex: 1; overflow-y: scroll; padding: .75rem; display: flex; flex-direction: column; gap: .6rem; min-height: 0; --scroll-fade-bg: #111; }
   .group-label {
     font-size: .68rem; color: #666; text-transform: uppercase;
     letter-spacing: .06em; margin: .35rem .15rem -.1rem;
@@ -417,6 +441,7 @@
   dd { margin: 0; font-size: .82rem; color: #ccc; display: flex; align-items: center; gap: .35rem; flex-wrap: wrap; }
   dd .dim { color: #555; font-size: .74rem; }
   dd code { font-family: monospace; font-size: .76rem; color: #9a7; }
+  .picked-tag { background: #1f1812; border: 1px solid #4a3a1a; color: #d4a64a; padding: 0 .35rem; border-radius: 4px; }
 
   .badge {
     font-size: .72rem;

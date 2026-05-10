@@ -81,7 +81,7 @@
       {:else if active === "providers"}
         <ProvidersSection {onChanged} />
       {:else if active === "models"}
-        <ModelsSection />
+        <ModelsSection {onChanged} />
       {:else if active === "storage"}
         <StorageSection setActive={(t) => (active = t)} />
       {:else if active === "hardware"}

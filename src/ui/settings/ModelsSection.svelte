@@ -13,10 +13,12 @@
   } from "../../model-lifecycle";
   import { getAllManifests } from "../../providers";
   import { loadConfig } from "../../config";
-  import { resolveModel } from "../../manifest";
+  import { resolveModel, modeFor } from "../../manifest";
   import type { HardwareProfile, Mode } from "../../types";
 
   type ModelMeta = Awaited<ReturnType<typeof getModelStatusWithMeta>>[number];
+
+  let { onChanged }: { onChanged?: () => void } = $props();
 
   let models = $state<ModelMeta[]>([]);
   let loading = $state(true);
@@ -107,13 +109,22 @@
       const map: Record<string, Array<{ provider: string; familyName: string; familyLabel: string }>> = {};
       let activeLabel = "";
 
+      // Walk every (provider, family, mode) triple via `modeFor` so
+      // shared_modes — most notably the manifest-wide transcribe ladder —
+      // contributes its tiers to both the lock set and the tagFamilies
+      // map. Without this, whisper tags inherited from shared_modes show
+      // as "unrecommended" in the list even though every family that
+      // supports transcribe would re-pull them on demand.
+      const ALL_MODES: Mode[] = ["text", "vision", "code", "transcribe"];
       for (const { provider, manifest } of allManifests) {
         for (const [familyName, family] of Object.entries(manifest.families ?? {})) {
           const isActiveFam =
             provider.name === config.active_provider && familyName === config.active_family;
           if (isActiveFam) activeLabel = family.label;
 
-          for (const modeSpec of Object.values(family.modes)) {
+          for (const mode of ALL_MODES) {
+            const modeSpec = modeFor(manifest, family, mode);
+            if (!modeSpec) continue;
             for (const tier of modeSpec.tiers) {
               for (const tag of [tier.model, tier.fallback]) {
                 if (!tag) continue;
@@ -272,6 +283,7 @@
     await setModeOverride(mode, model);
     overridePicker = null;
     await reload();
+    onChanged?.();
   }
 
   /** Per-row override action. If `mode` is null, revert every mode that
@@ -293,6 +305,7 @@
     }
     rowOverridePicker = null;
     await reload();
+    onChanged?.();
   }
 
   /** Modes legal as override targets for `runtime`. Whisper tags are only
@@ -337,7 +350,7 @@
     {:else if models.length === 0}
       <div class="empty">No models pulled yet.</div>
     {:else}
-      <div class="list">
+      <div class="list scroll-fade">
         {#each models as m}
           {@const inActive = activeFamilyTags.has(m.name)}
           {@const fams = tagFamilies[m.name] ?? []}
@@ -581,7 +594,7 @@
     border-bottom: 1px solid #1e1e1e;
   }
   .loading, .empty { padding: 2rem; text-align: center; color: #555; font-size: .85rem; }
-  .list { flex: 1; overflow-y: scroll; padding: .5rem; display: flex; flex-direction: column; gap: .25rem; min-height: 0; }
+  .list { flex: 1; overflow-y: scroll; padding: .5rem; display: flex; flex-direction: column; gap: .25rem; min-height: 0; --scroll-fade-bg: #111; }
   .model-row {
     padding: .5rem .6rem; border-radius: 7px; background: #1a1a1a;
     display: flex; align-items: center; gap: .5rem;

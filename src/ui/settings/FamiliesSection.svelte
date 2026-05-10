@@ -172,7 +172,7 @@
       </p>
     </div>
 
-    <div class="list">
+    <div class="list scroll-fade">
       {#each familyEntries(manifest) as [name, family]}
         {@const isActive = name === activeFamily}
         {@const picked = pickedTag(name, activeMode)}
@@ -230,7 +230,7 @@
         {/if}
       </div>
 
-      <div class="detail-body">
+      <div class="detail-body scroll-fade">
         {#if modes.length === 0}
           <p class="empty-note">This family declares no modes.</p>
         {:else}
@@ -305,7 +305,7 @@
   .head { padding: .75rem 1rem; border-bottom: 1px solid #1e1e1e; flex-shrink: 0; }
   .lede { font-size: .78rem; color: #888; line-height: 1.5; }
   .lede strong { color: #ccc; font-weight: 600; }
-  .list { flex: 1; overflow-y: auto; padding: .75rem; display: flex; flex-direction: column; gap: .5rem; min-height: 0; }
+  .list { flex: 1; overflow-y: auto; padding: .75rem; display: flex; flex-direction: column; gap: .5rem; min-height: 0; --scroll-fade-bg: #111; }
   .row {
     width: 100%;
     text-align: left;
@@ -358,9 +358,12 @@
     flex: 1; overflow-y: auto; padding: .5rem .75rem 1rem;
     display: flex; flex-direction: column; gap: .6rem;
     min-height: 0;
+    --scroll-fade-bg: #111;
     /* Keep the scroll track always rendered so the user sees there's
      * more below; the WebKit pseudo-elements style it to match the
-     * dark theme. */
+     * dark theme. The scroll-fade class layers on shadow gradients
+     * for a discoverable "more above / below" hint when the OS
+     * auto-hides the scrollbar. */
     scrollbar-width: thin;
     scrollbar-color: #2a2a2a transparent;
   }

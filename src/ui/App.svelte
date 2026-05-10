@@ -784,6 +784,27 @@
   :global(*::-webkit-scrollbar-corner) {
     background: #1a1a1a;
   }
+  /* Scroll-shadow affordance for panels whose contents may exceed the
+     viewport. The OS-level overlay scrollbar fades when idle (especially
+     on macOS), so settings panes opt into this utility for an always-on
+     "more above / more below" hint that doesn't depend on the OS
+     showing the scrollbar. Built on Lea Verou's scroll-shadow trick:
+       - Two `local`-attached gradients (top/bottom) match the panel
+         background and slide with the scroll position. They cover the
+         shadow when the user is at that edge.
+       - Two `scroll`-attached radial shadows (top/bottom) stay fixed.
+         They peek out as soon as the user has scrolled away from the
+         edge, signalling more content in that direction.
+     The container needs a non-transparent background-color (set per-
+     component) for the local-attached layers to mask correctly. */
+  :global(.scroll-fade) {
+    background:
+      linear-gradient(var(--scroll-fade-bg, #0f0f0f) 30%, rgba(15, 15, 15, 0)) top / 100% 24px no-repeat,
+      linear-gradient(rgba(15, 15, 15, 0), var(--scroll-fade-bg, #0f0f0f) 70%) bottom / 100% 24px no-repeat,
+      radial-gradient(farthest-side at 50% 0, rgba(0, 0, 0, .55), rgba(0, 0, 0, 0)) top / 100% 14px no-repeat,
+      radial-gradient(farthest-side at 50% 100%, rgba(0, 0, 0, .55), rgba(0, 0, 0, 0)) bottom / 100% 14px no-repeat;
+    background-attachment: local, local, scroll, scroll;
+  }
   .app {
     height: 100vh;
     display: flex;
