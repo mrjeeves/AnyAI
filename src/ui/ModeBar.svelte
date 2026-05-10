@@ -94,6 +94,12 @@
           : "running"
       : "idle",
   );
+
+  /** A live chat stream pins the UI to its conversation — the messages list
+   *  lives on Chat.svelte, so unmounting that component (by switching modes)
+   *  orphans the deltas. We disable the other mode buttons until the stream
+   *  releases the slot, matching the "stop to switch" rule for transcribe. */
+  const chatRunning = $derived(chatSlot.kind === "chat");
 </script>
 
 <div class="mode-bar">
@@ -103,6 +109,8 @@
       {@const isText = m.id === "text"}
       {@const slotStatus = isText ? textStatus : transcribeStatus}
       {@const slotActive = slotStatus !== "idle"}
+      {@const lockedOut = chatRunning && m.id !== current}
+      {@const btnDisabled = !ok || lockedOut}
       <div
         class="slot"
         class:active={m.id === current}
@@ -110,14 +118,19 @@
         class:paused={slotStatus === "paused"}
         class:drain={slotStatus === "drain"}
         class:unsupported={!ok}
+        class:locked={lockedOut}
       >
         <button
           class="mode-btn"
           class:active={m.id === current}
           class:unsupported={!ok}
-          disabled={!ok}
-          title={ok ? "" : `${m.label} isn't in the active manifest — no model is recommended for it.`}
-          onclick={() => ok && onChange(m.id)}
+          disabled={btnDisabled}
+          title={!ok
+            ? `${m.label} isn't in the active manifest — no model is recommended for it.`
+            : lockedOut
+              ? "Stop the chat to switch modes."
+              : ""}
+          onclick={() => !btnDisabled && onChange(m.id)}
         >
           <span class="mode-label">{m.label}{!ok ? " · unsupported" : ""}</span>
           {#if slotActive}
@@ -271,6 +284,10 @@
     opacity: .45;
     cursor: not-allowed;
     font-style: italic;
+  }
+  .slot.locked .mode-btn {
+    opacity: .45;
+    cursor: not-allowed;
   }
   .mode-label { line-height: 1; }
 
