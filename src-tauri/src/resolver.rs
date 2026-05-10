@@ -83,11 +83,25 @@ pub fn resolve_in_manifest(
     Ok(resolve_full(manifest, hw, mode, active_family)?.0)
 }
 
+/// Default runtime for a mode when the manifest doesn't declare one.
+/// Mirror of `defaultRuntimeFor` on the TS side. Transcribe always uses
+/// whisper-rs in this app; everything else routes through Ollama. Used
+/// so a stale cached manifest from before the `runtime` field landed
+/// can't trick the resolver into handing whisper-shaped names to
+/// `ollama pull`.
+pub fn default_runtime_for(mode: &str) -> &'static str {
+    if mode == "transcribe" {
+        "whisper"
+    } else {
+        "ollama"
+    }
+}
+
 /// Resolve a `(model, runtime)` pair against the active family's tier
-/// table. The runtime defaults to `"ollama"` if the mode block doesn't
-/// declare one — that's how every text/vision/code mode currently works.
-/// Whisper modes set `runtime: "whisper"` so callers can route around
-/// the Ollama pull / list path entirely.
+/// table. Runtime is read **strictly from the requested mode's spec** —
+/// never inherited from a fallback default mode — so a transcribe
+/// request whose mode is missing from the manifest still routes through
+/// whisper-rs instead of inheriting `text`'s `ollama` runtime.
 pub fn resolve_full(
     manifest: &Value,
     hw: &HardwareProfile,
@@ -97,29 +111,43 @@ pub fn resolve_full(
     let (_family_name, family) = pick_family(manifest, active_family)
         .ok_or_else(|| anyhow!("manifest exposes no families"))?;
 
+    let exact_spec = family
+        .get("modes")
+        .and_then(|m| m.get(mode))
+        .and_then(|v| v.as_object());
+
+    // Runtime is bound to the requested mode, not the fallback. If the
+    // requested mode isn't declared we use the well-known default for
+    // that mode (transcribe → whisper, everything else → ollama).
+    let runtime = exact_spec
+        .and_then(|s| s.get("runtime"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| default_runtime_for(mode))
+        .to_string();
+
+    // No explicit block AND we're on a non-ollama runtime — return a
+    // safe whisper default rather than crossing tier ladders with text
+    // mode (which would surface nonsense like the text model + whisper
+    // runtime, then trip whisper-rs at load time).
+    if exact_spec.is_none() && runtime == "whisper" {
+        return Ok(("tiny.en".to_string(), runtime));
+    }
+
     let default_mode = family
         .get("default_mode")
         .and_then(|v| v.as_str())
         .unwrap_or("text");
-    let mode_spec = family
-        .get("modes")
-        .and_then(|m| m.get(mode))
-        .and_then(|v| v.as_object())
-        .or_else(|| {
-            family
-                .get("modes")
-                .and_then(|m| m.get(default_mode))
-                .and_then(|v| v.as_object())
-        })
-        .ok_or_else(|| anyhow!("mode '{mode}' not found in active family"))?;
+    let tier_spec = exact_spec.or_else(|| {
+        family
+            .get("modes")
+            .and_then(|m| m.get(default_mode))
+            .and_then(|v| v.as_object())
+    });
+    let Some(tier_spec) = tier_spec else {
+        return Err(anyhow!("mode '{mode}' not found in active family"));
+    };
 
-    let runtime = mode_spec
-        .get("runtime")
-        .and_then(|v| v.as_str())
-        .unwrap_or("ollama")
-        .to_string();
-
-    let tiers = mode_spec
+    let tiers = tier_spec
         .get("tiers")
         .and_then(|t| t.as_array())
         .ok_or_else(|| anyhow!("no tiers in active family"))?;
@@ -145,17 +173,23 @@ pub fn resolve_full(
     Ok((last, runtime))
 }
 
-/// Look up the runtime declared on `mode` for the active family without
-/// resolving a tier. Used by preload to skip Ollama-pull machinery for
-/// whisper-runtime modes.
+/// Look up the effective runtime for `mode` under the active family.
+/// Reads the manifest's declared runtime when present, otherwise falls
+/// back to `default_runtime_for(mode)` so the preload loop skips
+/// `ollama pull` for whisper modes even when the cached manifest
+/// predates the `runtime` field.
 pub fn mode_runtime(manifest: &Value, mode: &str, active_family: &str) -> Option<String> {
     let (_, family) = pick_family(manifest, active_family)?;
-    family
-        .get("modes")?
-        .get(mode)?
-        .get("runtime")?
-        .as_str()
-        .map(str::to_string)
+    let declared = family
+        .get("modes")
+        .and_then(|m| m.get(mode))
+        .and_then(|v| v.get("runtime"))
+        .and_then(|v| v.as_str());
+    Some(
+        declared
+            .unwrap_or_else(|| default_runtime_for(mode))
+            .to_string(),
+    )
 }
 
 /// VRAM the resolver should credit toward `min_vram_gb` checks. Mirrors
