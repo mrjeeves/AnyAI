@@ -40,6 +40,11 @@
   let tagFamilies = $state<Record<string, Array<{ provider: string; familyName: string; familyLabel: string }>>>({});
 
   let overridePicker = $state<{ mode: Mode; open: boolean } | null>(null);
+  /** Per-row override popover. Anchored to the model row, lets the user
+   *  pin this exact tag as the override for any mode, or revert all modes
+   *  it currently overrides. The Mode-overrides tab is the inverse view —
+   *  same config field, just keyed by mode rather than by tag. */
+  let rowOverridePicker = $state<{ tag: string; runtime: "ollama" | "whisper" } | null>(null);
   let availableModels = $state<string[]>([]);
   let deleteTarget = $state<{
     name: string;
@@ -125,11 +130,19 @@
       // Mode overrides can point at a tag outside the active family. Whichever
       // tag the resolver picks for the active mode is the "live" model and
       // also belongs in the lock set, even if it doesn't appear in any tier
-      // of the active family.
+      // of the active family. Transcribe is locked unconditionally as well
+      // (regardless of which mode the user is currently in) — the picked
+      // whisper model is one click away from being needed and it doesn't
+      // appear in the ollama family tiers, so the activeMode probe alone
+      // misses it on every text/code/vision session.
       if (hardware) {
         try {
           const probe = await lookupModelUsage("__probe__", hardware, activeMode);
           if (probe.activeTag) lockSet.add(probe.activeTag);
+        } catch {}
+        try {
+          const probeT = await lookupModelUsage("__probe__", hardware, "transcribe");
+          if (probeT.activeTag) lockSet.add(probeT.activeTag);
         } catch {}
       }
 
@@ -248,6 +261,34 @@
     await reload();
   }
 
+  /** Per-row override action. If `mode` is null, revert every mode that
+   *  currently overrides to this tag (the Revert path). Otherwise pin
+   *  this tag as the override for the picked mode (the Override path).
+   *  Whisper tags can only ever override transcribe — the picker hides
+   *  the other rows for those rows so the user can't pin a whisper tag
+   *  as the text/code/vision override and break the runtime resolver. */
+  async function applyRowOverride(tag: string, mode: Mode | null) {
+    if (mode === null) {
+      const cfg = await loadConfig();
+      for (const m of modes) {
+        if (cfg.mode_overrides[m] === tag) {
+          await setModeOverride(m, null);
+        }
+      }
+    } else {
+      await setModeOverride(mode, tag);
+    }
+    rowOverridePicker = null;
+    await reload();
+  }
+
+  /** Modes legal as override targets for `runtime`. Whisper tags are only
+   *  valid for transcribe; ollama tags for everything else. The picker
+   *  uses this to hide invalid choices instead of silently misrouting. */
+  function eligibleModes(runtime: "ollama" | "whisper"): Mode[] {
+    return runtime === "whisper" ? ["transcribe"] : ["text", "vision", "code"];
+  }
+
   function ageLabel(isoDate: string): string {
     const ms = Date.now() - new Date(isoDate).getTime();
     const hours = Math.floor(ms / 3_600_000);
@@ -288,6 +329,7 @@
           {@const inActive = activeFamilyTags.has(m.name)}
           {@const fams = tagFamilies[m.name] ?? []}
           {@const otherFams = fams.filter((f) => !(inActive && f.familyLabel === activeFamilyLabel))}
+          {@const isOverridden = m.override_for.length > 0}
           <div class="model-row" class:unrecommended={!inActive && fams.length === 0}>
             <div class="model-info">
               <div class="name-row">
@@ -326,6 +368,29 @@
               title={m.kept ? "Unpin" : "Pin (never clean up)"}
             >
               {m.kept ? "📌" : "📍"}
+            </button>
+            <button
+              class="override-btn"
+              class:active={isOverridden}
+              onclick={() => (rowOverridePicker = { tag: m.name, runtime: m.runtime })}
+              title={isOverridden
+                ? `Revert (currently overrides: ${m.override_for.join(", ")})`
+                : "Override"}
+              aria-label={isOverridden ? "Revert override" : "Set as override"}
+            >
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                {#if isOverridden}
+                  <path
+                    fill="currentColor"
+                    d="M12 5V2L7 7l5 5V8c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46A7.93 7.93 0 0 0 20 14c0-4.42-3.58-8-8-8z"
+                  />
+                {:else}
+                  <path
+                    fill="currentColor"
+                    d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"
+                  />
+                {/if}
+              </svg>
             </button>
             {#if inActive}
               <span
@@ -382,6 +447,40 @@
         {/each}
         {#if availableModels.length === 0}
           <p class="empty">No models from any provider yet.</p>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
+  {#if rowOverridePicker}
+    {@const target = rowOverridePicker}
+    {@const targetMeta = models.find((m) => m.name === target.tag)}
+    {@const overriddenModes = targetMeta?.override_for ?? []}
+    <div class="picker-overlay" onclick={() => (rowOverridePicker = null)} role="presentation"></div>
+    <div class="picker row-picker" role="dialog" aria-label="Override modes for {target.tag}">
+      <div class="picker-header">
+        <span>Use <strong>{target.tag}</strong> for…</span>
+        <button class="close" onclick={() => (rowOverridePicker = null)}>✕</button>
+      </div>
+      <div class="row-picker-body">
+        {#each eligibleModes(target.runtime) as mode}
+          {@const isOn = overriddenModes.includes(mode)}
+          <button
+            class="mode-toggle"
+            class:on={isOn}
+            onclick={() => applyRowOverride(target.tag, isOn ? null : mode)}
+            title={isOn
+              ? `Currently overrides ${mode} — click to revert`
+              : `Pin as ${mode} override`}
+          >
+            <span class="mode-name">{mode}</span>
+            <span class="mode-state">{isOn ? "✓ override" : "set"}</span>
+          </button>
+        {/each}
+        {#if overriddenModes.length > 0}
+          <button class="revert-all" onclick={() => applyRowOverride(target.tag, null)}>
+            Revert all overrides for this model
+          </button>
         {/if}
       </div>
     </div>
@@ -469,7 +568,7 @@
     border-bottom: 1px solid #1e1e1e;
   }
   .loading, .empty { padding: 2rem; text-align: center; color: #555; font-size: .85rem; }
-  .list { flex: 1; overflow-y: auto; padding: .5rem; display: flex; flex-direction: column; gap: .25rem; min-height: 0; }
+  .list { flex: 1; overflow-y: scroll; padding: .5rem; display: flex; flex-direction: column; gap: .25rem; min-height: 0; }
   .model-row {
     padding: .5rem .6rem; border-radius: 7px; background: #1a1a1a;
     display: flex; align-items: center; gap: .5rem;
@@ -512,6 +611,18 @@
   .pin-btn:hover, .pin-btn.pinned { opacity: 1; }
   .trash-btn { background: none; border: none; cursor: pointer; font-size: .9rem; opacity: .5; }
   .trash-btn:hover { opacity: 1; color: #f66; }
+  .override-btn {
+    background: none; border: none; cursor: pointer;
+    color: #777; opacity: .55;
+    display: inline-flex; align-items: center; justify-content: center;
+    padding: .15rem .25rem; border-radius: 5px;
+    transition: opacity .12s, color .12s, background .12s;
+  }
+  .override-btn:hover { opacity: 1; background: #1a1a2a; color: #b3b3ff; }
+  .override-btn.active {
+    color: #ffd166; opacity: 1; background: #2a2210;
+  }
+  .override-btn.active:hover { color: #ffe39a; background: #3a3014; }
   .overrides-section {
     padding: .75rem;
     display: flex; flex-direction: column; gap: .5rem;
@@ -556,6 +667,36 @@
   }
   .picker-list button:hover { background: #1e1e1e; color: #e8e8e8; }
   .picker-list .empty { color: #555; text-align: center; padding: 1rem; font-style: italic; }
+  .row-picker { width: 320px; max-height: 60vh; }
+  .row-picker-body {
+    padding: .5rem;
+    display: flex; flex-direction: column; gap: .3rem;
+    overflow-y: auto;
+  }
+  .mode-toggle {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: .5rem .65rem;
+    background: #131318; border: 1px solid #1f1f24;
+    color: #ccc; border-radius: 6px; cursor: pointer;
+    font-size: .82rem;
+  }
+  .mode-toggle:hover { border-color: #3a3a55; background: #1a1a26; }
+  .mode-toggle.on {
+    background: #2a2210; border-color: #4a3a18; color: #ffd166;
+  }
+  .mode-toggle.on:hover { background: #3a3014; border-color: #6a4a20; }
+  .mode-name { text-transform: capitalize; font-weight: 500; }
+  .mode-state {
+    font-size: .7rem; color: inherit; opacity: .7;
+    font-family: monospace;
+  }
+  .revert-all {
+    margin-top: .25rem;
+    padding: .4rem .65rem; background: none; border: 1px dashed #4a3a18;
+    color: #ffd166; border-radius: 6px; cursor: pointer;
+    font-size: .76rem;
+  }
+  .revert-all:hover { background: #2a2210; }
   .confirm-overlay {
     position: fixed; inset: 0; background: rgba(0, 0, 0, .65); z-index: 30;
   }

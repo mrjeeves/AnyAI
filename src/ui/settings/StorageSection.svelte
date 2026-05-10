@@ -19,17 +19,24 @@
   let diskFreeGb = $state<number | null>(null);
   let dirExists = $state<boolean | null>(null);
   let loading = $state(true);
+  /** Bytes parked under `~/.anyai/transcribe-buffer/`. > 0 when whisper
+   *  fell behind realtime and audio is spilling to disk; the inference
+   *  loop drains the dir as it catches up. The card stays hidden when
+   *  there's nothing pending — there's no useful "0 GB" reading. */
+  let transcribeBacklogBytes = $state(0);
 
   onMount(async () => {
     try {
-      const [pulled, hw, config] = await Promise.all([
+      const [pulled, hw, config, backlog] = await Promise.all([
         invoke<OllamaModel[]>("ollama_list_models").catch(() => [] as OllamaModel[]),
         invoke<HardwareProfile>("detect_hardware").catch(() => null),
         loadConfig(),
+        invoke<number>("transcribe_buffer_size_bytes").catch(() => 0),
       ]);
       totalBytes = pulled.reduce((acc, m) => acc + m.size, 0);
       modelCount = pulled.length;
       diskFreeGb = hw?.disk_free_gb ?? null;
+      transcribeBacklogBytes = backlog;
       conversationDir = config.conversation_dir ?? "";
       savedConvDir = conversationDir;
       if (conversationDir) {
@@ -39,6 +46,20 @@
       loading = false;
     }
   });
+
+  function backlogSeconds(bytes: number): number {
+    // 16 kHz mono f32 → 64 KB per second of audio. We round to the
+    // nearest second; the goal is "you have ~12 s pending", not lab-grade
+    // precision.
+    return Math.round(bytes / (16000 * 4));
+  }
+
+  function bytesLabel(bytes: number): string {
+    if (bytes >= 1024 * 1024 * 1024) return (bytes / 1024 / 1024 / 1024).toFixed(2) + " GB";
+    if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + " MB";
+    if (bytes >= 1024) return Math.round(bytes / 1024) + " KB";
+    return bytes + " B";
+  }
 
   async function saveConvDir() {
     if (saving) return;
@@ -101,6 +122,25 @@
         </div>
       </div>
 
+      {#if transcribeBacklogBytes > 0}
+        <div class="card">
+          <div class="card-row">
+            <div class="card-info">
+              <div class="card-title">Transcription backlog</div>
+              <div class="card-meta">
+                <span class="warn">
+                  {bytesLabel(transcribeBacklogBytes)}
+                  ({backlogSeconds(transcribeBacklogBytes)} s of audio)
+                </span>
+                pending whisper inference under
+                <code>~/.anyai/transcribe-buffer/</code>.
+                Drains automatically while AnyAI is open.
+              </div>
+            </div>
+          </div>
+        </div>
+      {/if}
+
       <div class="card">
         <div class="card-title">Conversations &amp; artifacts</div>
         <p class="card-meta">
@@ -146,7 +186,7 @@
   .lede { font-size: .78rem; color: #888; line-height: 1.5; }
   .lede code { font-family: monospace; font-size: .76rem; color: #aaa; background: #1a1a22; padding: 0 .25rem; border-radius: 3px; }
 
-  .cards { flex: 1; overflow-y: auto; padding: .75rem; display: flex; flex-direction: column; gap: .6rem; min-height: 0; }
+  .cards { flex: 1; overflow-y: scroll; padding: .75rem; display: flex; flex-direction: column; gap: .6rem; min-height: 0; }
   .card {
     border: 1px solid #1e1e1e;
     background: #131318;
@@ -161,6 +201,7 @@
   .card-title { font-size: .9rem; font-weight: 600; color: #e8e8e8; }
   .card-meta { font-size: .76rem; color: #888; line-height: 1.5; }
   .card-meta .dim { color: #555; }
+  .card-meta .warn { color: #ffd166; font-weight: 600; }
   code { font-family: monospace; font-size: .76rem; color: #aaa; background: #1a1a22; padding: 0 .25rem; border-radius: 3px; }
 
   .link-btn {

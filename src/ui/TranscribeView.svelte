@@ -1,11 +1,17 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
+  import { onDestroy, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import ModeBar from "./ModeBar.svelte";
   import StatusBar from "./StatusBar.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
   import type { SettingsTab } from "../update-state.svelte";
+  import {
+    transcribeUi,
+    startRecording,
+    stopRecording,
+    clearLiveDelta,
+    clearAfterPersist,
+  } from "./transcribe-state.svelte";
   import { loadConfig } from "../config";
   import {
     loadConversation,
@@ -28,6 +34,7 @@
     onProviderChange,
     onConversationChanged,
     onNewSession,
+    onRequestStopTranscribe,
   } = $props<{
     activeModel: string;
     activeMode: Mode;
@@ -41,24 +48,10 @@
     onModeChange: (mode: Mode) => void;
     onProviderChange: () => void;
     onConversationChanged: (id: string) => void;
-    /** Create a fresh, untitled session. App owns the active-id pointer so
-     *  the sidebar list updates and the bottom-bar "+ New" mirrors the
-     *  sidebar's own "New session" button. */
     onNewSession: () => void;
+    onRequestStopTranscribe: () => void;
   }>();
 
-  interface TranscribeFrame {
-    delta: string;
-    elapsed_ms: number;
-    final: boolean;
-    /** 5-second chunks still queued on disk waiting for whisper. The
-     *  Rust side spills audio to `~/.anyai/transcribe-buffer/{stream}/`
-     *  when the model can't keep up with realtime, so this stays > 0
-     *  on slow hardware until the backlog drains. UI doesn't render it
-     *  yet, but having the field on the wire means we can light up a
-     *  "X s behind" chip later without changing the event plumbing. */
-    pending_chunks?: number;
-  }
   interface WhisperModelInfo {
     name: string;
     approx_size_bytes: number;
@@ -69,25 +62,9 @@
   let activeConversation = $state<Conversation | null>(null);
   let transcript = $state("");
   let talkingPoints = $state<string[]>([]);
-  /** Title input — bound directly to the bottom-bar field. Persisted on
-   *  Enter, blur, and at record-start so a recording always lives on disk
-   *  under whatever the user typed. */
   let sessionName = $state("");
   let settingsTab = $state<SettingsTab | null>(null);
-
-  // Recording state. Capture + ASR run on the Rust side via cpal +
-  // whisper-rs; we drive it via Tauri commands and listen for delta
-  // frames on a per-stream event channel.
-  let recording = $state(false);
-  let recordingStartedAt = $state(0);
-  let elapsed = $state(0);
   let transcribeError = $state("");
-  /** Active stream id while a recording is going. Per-recording UUID so a
-   *  stale event from a previous session can't cross-contaminate the new
-   *  one if the user stops + starts quickly. */
-  let activeStreamId: string | null = null;
-  let unlistenStream: UnlistenFn | null = null;
-  let elapsedTimer: ReturnType<typeof setInterval> | null = null;
 
   // Load (or clear) a session whenever the active id changes.
   $effect(() => {
@@ -124,10 +101,47 @@
     transcript = "";
     talkingPoints = [];
     sessionName = "";
-    if (recording) stopRecording();
+    if (transcribeUi.active && transcribeUi.conversationId === conversationId) {
+      // Cancelling the active recording on "+ New" matches the previous
+      // single-view behaviour. The store's stopRecording awaits the
+      // final frame before resolving so the live delta fully lands first.
+      stopRecording().then(() => {
+        flushLiveDelta();
+        clearAfterPersist();
+      });
+    }
   });
 
-  onDestroy(() => stopRecording());
+  // Watch the global store: when a frame arrives for our conversation,
+  // append the delta to our visible transcript and clear it from the
+  // store so we don't double-append. Untrack on `liveDelta` itself —
+  // we drive off `framePulse` to avoid resubscription churn.
+  $effect(() => {
+    void transcribeUi.framePulse;
+    untrack(flushLiveDelta);
+  });
+
+  function flushLiveDelta() {
+    const myConv = transcribeUi.conversationId;
+    if (!transcribeUi.liveDelta) return;
+    if (myConv && myConv !== conversationId) return; // belongs to another conv
+    transcript = transcript + transcribeUi.liveDelta;
+    clearLiveDelta();
+  }
+
+  onDestroy(() => {
+    // Don't tear down the recording when this view unmounts — that's
+    // the whole point of lifting state into the store. Just flush any
+    // text we haven't rendered yet so it lives on the conversation
+    // instead of staying buffered in the store.
+    flushLiveDelta();
+    if (transcribeUi.active && transcribeUi.conversationId === conversationId) {
+      // Best-effort save of the current transcript so a crash later
+      // doesn't lose the in-flight text. The active recording keeps
+      // appending to the conversation file via stopRecording's flush.
+      persist().catch(() => {});
+    }
+  });
 
   async function persist(opts: { force?: boolean } = {}): Promise<Conversation | null> {
     const hasContent = sessionName.trim() || transcript.trim() || talkingPoints.length > 0;
@@ -163,9 +177,7 @@
     persist().catch((e) => console.warn("save title failed:", e));
   }
 
-  /** Pre-flight: confirm the configured whisper model is downloaded. If
-   *  not, surface a clear "go to Settings → Transcription" call to action
-   *  rather than letting the Rust side throw a model-not-found error. */
+  /** Pre-flight: confirm the configured whisper model is downloaded. */
   async function modelInstalled(name: string): Promise<boolean> {
     try {
       const all = await invoke<WhisperModelInfo[]>("whisper_models_list");
@@ -175,14 +187,11 @@
     }
   }
 
-  async function startRecording() {
-    if (recording) return;
+  async function startRec() {
+    if (transcribeUi.active) return;
     transcribeError = "";
     const cfg = await loadConfig();
     const mic = cfg.mic;
-    // `activeModel` is the family/tier-resolved pick from App.svelte,
-    // prefixed `whisper:` so the status bar can't confuse it with an
-    // Ollama tag. Strip the prefix for the bare ggml filename.
     const model = activeModel.startsWith("whisper:")
       ? activeModel.slice("whisper:".length)
       : activeModel || "tiny.en";
@@ -194,73 +203,31 @@
       return;
     }
 
-    const streamId = crypto.randomUUID();
-    activeStreamId = streamId;
-
+    // Snapshot the conversation before starting so deltas land on it
+    // even if the user navigates away mid-recording.
+    const conv = await persist({ force: true });
     try {
-      // Listen first so we can't miss a fast-arriving frame between the
-      // invoke returning and the listener attaching.
-      unlistenStream = await listen<TranscribeFrame>(
-        `anyai://transcribe-stream/${streamId}`,
-        (e) => {
-          const f = e.payload;
-          if (f.delta) {
-            transcript = transcript + f.delta;
-          }
-          if (f.final) {
-            // Worker unwound on its own (error path or natural end). Make
-            // sure our state stays in sync.
-            if (recording) stopRecording();
-          }
-        },
-      );
-
-      await invoke("transcribe_start", {
-        streamId,
+      await startRecording({
         model,
         device: mic.device_name || null,
+        conversationId: conv?.id ?? null,
       });
-
-      recording = true;
-      recordingStartedAt = Date.now();
-      elapsed = 0;
-      elapsedTimer = setInterval(() => {
-        elapsed = Math.floor((Date.now() - recordingStartedAt) / 1000);
-      }, 250);
-
-      // Snapshot the session name so a recording always lives on disk
-      // under whatever the user typed when they hit record.
-      await persist({ force: true });
     } catch (e) {
       transcribeError = String(e);
-      // Tear down any partial state so a retry has a clean slate.
-      unlistenStream?.();
-      unlistenStream = null;
-      activeStreamId = null;
     }
   }
 
-  async function stopRecording() {
-    const id = activeStreamId;
-    recording = false;
-    if (elapsedTimer) clearInterval(elapsedTimer);
-    elapsedTimer = null;
-    activeStreamId = null;
-    if (id) {
-      try {
-        await invoke("transcribe_stop", { streamId: id });
-      } catch (e) {
-        console.warn("transcribe_stop failed:", e);
-      }
-    }
-    unlistenStream?.();
-    unlistenStream = null;
-    // Persist the final transcript text.
+  async function stopRec() {
+    await stopRecording();
+    flushLiveDelta();
+    clearAfterPersist();
     persist().catch((e) => console.warn("save after stop failed:", e));
   }
 
   async function handleModeChange(mode: Mode) {
-    if (recording) await stopRecording();
+    // No longer auto-stop on mode switch — that's the whole point of the
+    // global store. The recording keeps capturing in the background and
+    // the StatusBar shows progress from any mode.
     await onModeChange(mode);
   }
 
@@ -274,6 +241,13 @@
     const s = (sec % 60).toString().padStart(2, "0");
     return `${m}:${s}`;
   }
+
+  // True iff this view is the one tied to the active recording — used
+  // to draw the rec dot in the local pane chrome (the StatusBar always
+  // shows it for any active session).
+  let isMyRecording = $derived(
+    transcribeUi.active && transcribeUi.conversationId === conversationId,
+  );
 </script>
 
 <div class="transcribe-shell">
@@ -284,15 +258,18 @@
     {sidebarOpen}
     {onToggleSidebar}
     onOpenSettings={(tab) => (settingsTab = tab)}
+    onRequestStopTranscribe={() => onRequestStopTranscribe()}
   />
 
   <div class="split">
     <section class="pane left" aria-label="Live transcription">
       <header class="pane-head">
         <span class="pane-title">Transcription</span>
-        {#if recording}
+        {#if isMyRecording && !transcribeUi.paused}
           <span class="rec-dot" aria-hidden="true"></span>
-          <span class="rec-time">{fmtElapsed(elapsed)}</span>
+          <span class="rec-time">{fmtElapsed(transcribeUi.elapsed)}</span>
+        {:else if isMyRecording && transcribeUi.paused}
+          <span class="rec-paused">paused</span>
         {/if}
       </header>
       <div class="pane-body">
@@ -300,7 +277,7 @@
           <pre class="transcript">{transcript}</pre>
         {:else}
           <div class="placeholder">
-            {#if recording}
+            {#if isMyRecording}
               Listening… transcription will stream in here every few
               seconds.
             {:else}
@@ -359,13 +336,13 @@
         spellcheck="false"
       />
     </label>
-    {#if recording}
-      <button class="record-btn stop" onclick={stopRecording} title="Stop recording">
+    {#if isMyRecording}
+      <button class="record-btn stop" onclick={onRequestStopTranscribe} title="Stop recording">
         <span class="rec-square" aria-hidden="true"></span>
         Stop
       </button>
     {:else}
-      <button class="record-btn" onclick={startRecording} title="Start recording">
+      <button class="record-btn" onclick={startRec} disabled={transcribeUi.active} title={transcribeUi.active ? "Another recording is in progress" : "Start recording"}>
         <span class="rec-circle" aria-hidden="true"></span>
         Record
       </button>
@@ -432,6 +409,13 @@
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
     font-size: .76rem;
     color: #e35a5a;
+  }
+  .rec-paused {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: .76rem;
+    color: #d4a64a;
+    text-transform: uppercase;
+    letter-spacing: .05em;
   }
   .pane-body {
     flex: 1;

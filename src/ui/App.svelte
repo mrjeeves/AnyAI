@@ -25,6 +25,15 @@
     type FolderMeta,
   } from "../conversations";
   import { updateUi } from "../update-state.svelte";
+  import {
+    transcribeUi,
+    stopRecording,
+    startDrain,
+    clearLiveDelta,
+    clearAfterPersist,
+    type PendingStream,
+  } from "./transcribe-state.svelte";
+  import { newConversation, saveConversation } from "../conversations";
   import type { HardwareProfile, Mode } from "../types";
 
   let unsubSwap: (() => void) | null = null;
@@ -304,6 +313,11 @@
         supportedModes = modesForActiveFamily(manifest, activeFamilyName);
         activeModel = displayModelFor(activeMode, hardware, manifest, config);
       });
+
+      // After everything else is wired, see if a previous AnyAI process
+      // left a transcribe buffer behind. Fire-and-forget — failure
+      // shouldn't block the app from coming up.
+      probeAndResumeBacklog().catch(() => {});
     } catch (e) {
       // Surface the silenced startup error. Without this it's invisible:
       // the catch sets `error` and falls into the chat view with
@@ -487,6 +501,103 @@
     }
     refreshConversations().catch(() => {});
   }
+
+  // ---------------------------------------------------------------------
+  // Persistent transcription — App-level confirm dialog + auto-resume.
+  // The StatusBar's stop button calls into here so the dialog is mounted
+  // outside Chat / TranscribeView and survives mode switches.
+  // ---------------------------------------------------------------------
+
+  /** Set when the user clicks the stop button on the recording chip.
+   *  When the chunk backlog is non-zero, we hold the user in this
+   *  dialog until they decide whether to drain or discard the rest. */
+  let stopConfirm = $state<{
+    pendingChunks: number;
+    paused: boolean;
+    drainOnly: boolean;
+  } | null>(null);
+
+  function requestStopTranscribe() {
+    if (!transcribeUi.active) return;
+    stopConfirm = {
+      pendingChunks: transcribeUi.pendingChunks,
+      paused: transcribeUi.paused,
+      drainOnly: transcribeUi.drainOnly,
+    };
+  }
+
+  function jumpToTranscribe() {
+    if (activeMode !== "transcribe") {
+      onModeChange("transcribe").catch(() => {});
+    }
+    // If the active conversation isn't the one being recorded into, hop
+    // to it so the user actually sees the live text.
+    const recId = transcribeUi.conversationId;
+    if (recId && recId !== activeConversationId) {
+      activeConversationId = recId;
+      suppressNextActiveEvent = true;
+      setActiveConversationId(recId);
+    }
+  }
+
+  async function confirmStopTranscribe(): Promise<void> {
+    stopConfirm = null;
+    await stopRecording();
+    // Best-effort: clear the live delta so the next session starts
+    // from a clean slate. The view that owns the conversation has
+    // already flushed any text it cared about.
+    clearLiveDelta();
+    clearAfterPersist();
+  }
+
+  function cancelStopTranscribe() {
+    stopConfirm = null;
+  }
+
+  /** Scan `~/.anyai/transcribe-buffer/` for chunks left over by a
+   *  previous (crashed / force-quit) AnyAI process and offer to drain
+   *  them. We only auto-start the drain — we don't resurrect a mic
+   *  stream — so the user always sees a chip in the status bar with a
+   *  clear "Recovering…" label, never silent reactivation. */
+  let recoveryProbeStarted = false;
+  async function probeAndResumeBacklog() {
+    if (recoveryProbeStarted) return;
+    recoveryProbeStarted = true;
+    try {
+      const pending = await invoke<PendingStream[]>("transcribe_pending_streams");
+      // Pick the largest backlog — multiple orphans are possible if the
+      // app crashed twice without cleanup, but only one drain runs at
+      // a time. The others stay on disk and the user can clear them
+      // from the Storage tab.
+      const target = pending
+        .filter((p) => p.pending_chunks > 0 && p.model)
+        .sort((a, b) => b.pending_chunks - a.pending_chunks)[0];
+      if (!target || !target.model) return;
+
+      // Mint a "Recovered transcript" conversation so the drained text
+      // has somewhere to land. We don't try to merge into a previous
+      // conversation — there's no way to know which one was open when
+      // the buffer was written.
+      const conv = newConversation("transcribe", `whisper:${target.model}`, activeFamilyName || "");
+      conv.title = `Recovered transcript ${new Date().toLocaleString()}`.slice(0, 80);
+      await saveConversation(conv);
+      await refreshConversations();
+
+      console.info(
+        "[anyai] resuming transcript backlog: stream=%s pending=%d model=%s",
+        target.stream_id,
+        target.pending_chunks,
+        target.model,
+      );
+      await startDrain({
+        streamId: target.stream_id,
+        model: target.model,
+        conversationId: conv.id,
+      });
+    } catch (e) {
+      console.warn("[anyai] backlog probe failed:", e);
+    }
+  }
 </script>
 
 <div class="app" class:curtained={remoteActive}>
@@ -538,6 +649,7 @@
           onProviderChange={onProviderChange}
           onConversationChanged={onConversationChanged}
           onNewSession={onNewConversation}
+          onRequestStopTranscribe={requestStopTranscribe}
         />
       {:else}
         <Chat
@@ -553,8 +665,47 @@
           onModeChange={onModeChange}
           onProviderChange={onProviderChange}
           onConversationChanged={onConversationChanged}
+          onRequestStopTranscribe={requestStopTranscribe}
+          onJumpToTranscribe={jumpToTranscribe}
         />
       {/if}
+    </div>
+  {/if}
+
+  {#if stopConfirm}
+    {@const c = stopConfirm}
+    <div class="confirm-overlay" onclick={cancelStopTranscribe} role="presentation"></div>
+    <div class="stop-confirm" role="dialog" aria-label="Stop transcription">
+      <h3>Stop transcription?</h3>
+      {#if c.drainOnly}
+        <p class="stop-meta">
+          This is a recovery drain — stopping discards
+          <strong>{c.pendingChunks * 5} s</strong> of un-transcribed audio
+          ({c.pendingChunks} {c.pendingChunks === 1 ? "chunk" : "chunks"})
+          left over from a previous session.
+        </p>
+      {:else if c.pendingChunks > 0}
+        <p class="stop-meta">
+          Whisper is still
+          <strong>{c.pendingChunks * 5} s</strong> behind realtime
+          ({c.pendingChunks} {c.pendingChunks === 1 ? "chunk" : "chunks"} pending).
+          Stopping now drops that audio without transcribing it.
+        </p>
+        <p class="stop-hint">
+          To finish without losing it, pause the mic and let the backlog
+          drain — the transcript chip stays in the bar until it's empty.
+        </p>
+      {:else}
+        <p class="stop-meta">
+          The session will end and the final transcript will be saved.
+        </p>
+      {/if}
+      <div class="stop-actions">
+        <button class="cancel" onclick={cancelStopTranscribe}>Cancel</button>
+        <button class="confirm-stop" onclick={confirmStopTranscribe}>
+          {c.pendingChunks > 0 ? "Stop & discard backlog" : "Stop"}
+        </button>
+      </div>
     </div>
   {/if}
 
@@ -605,28 +756,33 @@
   }
   /* Always-on dark scrollbars. macOS overlay scrollbars hide by default,
      which made the Settings → Hardware list look like it ended at the
-     viewport. Forcing a thin, visible track is the cheapest fix. */
+     viewport. We size the thumb up + brighten it so users can see at a
+     glance that a panel is scrollable; settings panes also opt into
+     `overflow-y: scroll` so the lane is reserved even when the thumb is
+     fully covering the viewport. */
   :global(*) {
-    scrollbar-width: thin;
-    scrollbar-color: #2a2a2a #0d0d0d;
+    scrollbar-width: auto;
+    scrollbar-color: #4a4a5e #161616;
   }
   :global(*::-webkit-scrollbar) {
-    width: 10px;
-    height: 10px;
+    width: 12px;
+    height: 12px;
   }
   :global(*::-webkit-scrollbar-track) {
-    background: #0d0d0d;
+    background: #161616;
+    border-left: 1px solid #1f1f1f;
   }
   :global(*::-webkit-scrollbar-thumb) {
-    background: #2a2a2a;
-    border-radius: 5px;
-    border: 2px solid #0d0d0d;
+    background: #4a4a5e;
+    border-radius: 6px;
+    border: 2px solid #161616;
+    min-height: 32px;
   }
   :global(*::-webkit-scrollbar-thumb:hover) {
-    background: #3a3a55;
+    background: #6e6ef7;
   }
   :global(*::-webkit-scrollbar-corner) {
-    background: #0d0d0d;
+    background: #161616;
   }
   .app {
     height: 100vh;
@@ -674,6 +830,60 @@
      remote device is driving the UI. Sits above the settings panel too
      so opening Settings → Remote on the desktop doesn't accidentally
      punch through. */
+  .confirm-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, .55);
+    z-index: 9000;
+  }
+  .stop-confirm {
+    position: fixed;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: min(420px, 90vw);
+    background: #161616;
+    border: 1px solid #2a2a2a;
+    border-radius: 10px;
+    padding: 1.1rem 1.2rem;
+    z-index: 9001;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, .65);
+  }
+  .stop-confirm h3 {
+    font-size: .95rem; font-weight: 600;
+    color: #e8e8e8;
+    margin-bottom: .65rem;
+  }
+  .stop-confirm .stop-meta {
+    font-size: .82rem; color: #ccc; line-height: 1.55;
+    margin-bottom: .55rem;
+  }
+  .stop-confirm .stop-meta strong { color: #ffd166; }
+  .stop-confirm .stop-hint {
+    font-size: .76rem; color: #888;
+    line-height: 1.5;
+    background: #131318;
+    padding: .5rem .65rem;
+    border-radius: 6px;
+    margin-bottom: .85rem;
+  }
+  .stop-actions {
+    display: flex; justify-content: flex-end; gap: .55rem;
+    margin-top: .25rem;
+  }
+  .stop-actions button {
+    padding: .45rem 1rem; border-radius: 6px;
+    font-size: .82rem; cursor: pointer;
+    border: 1px solid transparent;
+  }
+  .stop-actions .cancel {
+    background: #1e1e1e; color: #ccc; border-color: #2a2a2a;
+  }
+  .stop-actions .cancel:hover { background: #252525; }
+  .stop-actions .confirm-stop {
+    background: #5a2424; color: #ffd6d6; border-color: #7a3434;
+  }
+  .stop-actions .confirm-stop:hover { background: #6a2c2c; }
+
   .remote-curtain {
     position: fixed;
     inset: 0;

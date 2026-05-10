@@ -1,14 +1,27 @@
 <script lang="ts">
   import { updateUi } from "../update-state.svelte";
+  import {
+    transcribeUi,
+    pauseRecording,
+    resumeRecording,
+  } from "./transcribe-state.svelte";
   import type { Mode } from "../types";
 
-  let { model, mode, family, sidebarOpen, onToggleSidebar, onOpenSettings } = $props<{
+  let { model, mode, family, sidebarOpen, onToggleSidebar, onOpenSettings, onRequestStopTranscribe, onJumpToTranscribe } = $props<{
     model: string;
     mode: Mode;
     family: string;
     sidebarOpen: boolean;
     onToggleSidebar: () => void;
     onOpenSettings: (tab: "providers" | "families" | "models" | "storage" | "updates") => void;
+    /** Wired by App so the stop-with-warning dialog lives outside the
+     *  status bar (which renders inside Chat / TranscribeView and would
+     *  make the dialog vanish on mode switch). */
+    onRequestStopTranscribe?: () => void;
+    /** Click target for the recording chip — jumps to Transcribe view so
+     *  the user can see what's being captured. Optional: omitted in
+     *  TranscribeView where we're already there. */
+    onJumpToTranscribe?: () => void;
   }>();
 
   // If the update dot is showing, the user almost certainly clicked the
@@ -16,6 +29,12 @@
   // don't have to dig through the sidebar to find what they came for.
   function openSettings() {
     onOpenSettings(updateUi.available ? "updates" : "providers");
+  }
+
+  function fmtElapsed(sec: number): string {
+    const m = Math.floor(sec / 60).toString().padStart(2, "0");
+    const s = (sec % 60).toString().padStart(2, "0");
+    return `${m}:${s}`;
   }
 </script>
 
@@ -42,6 +61,68 @@
     {/if}
     <span class="model-name">{model}</span>
   </button>
+
+  {#if transcribeUi.active}
+    <div
+      class="rec-chip"
+      class:paused={transcribeUi.paused}
+      class:drain={transcribeUi.drainOnly}
+      role="group"
+      aria-label="Transcription controls"
+    >
+      <button
+        class="rec-label"
+        onclick={onJumpToTranscribe}
+        disabled={!onJumpToTranscribe}
+        title={transcribeUi.drainOnly
+          ? "Recovering transcript from previous session"
+          : transcribeUi.paused
+          ? "Mic paused — backlog draining"
+          : "Recording — click to open Transcribe"}
+      >
+        <span class="rec-dot" aria-hidden="true"></span>
+        {#if transcribeUi.drainOnly}
+          <span class="rec-text">Recovering…</span>
+        {:else}
+          <span class="rec-text">{transcribeUi.paused ? "Paused" : "Rec"}</span>
+          <span class="rec-time">{fmtElapsed(transcribeUi.elapsed)}</span>
+        {/if}
+        {#if transcribeUi.pendingChunks > 0}
+          <span class="rec-backlog" title="{transcribeUi.pendingChunks} chunks pending whisper inference">
+            +{transcribeUi.pendingChunks * 5}s
+          </span>
+        {/if}
+      </button>
+      {#if !transcribeUi.drainOnly}
+        {#if transcribeUi.paused}
+          <button class="rec-ctrl" onclick={() => resumeRecording()} title="Resume mic">
+            <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
+              <path fill="currentColor" d="M8 5v14l11-7z" />
+            </svg>
+          </button>
+        {:else}
+          <button class="rec-ctrl" onclick={() => pauseRecording()} title="Pause mic (keeps draining backlog)">
+            <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
+              <path fill="currentColor" d="M6 5h4v14H6zM14 5h4v14h-4z" />
+            </svg>
+          </button>
+        {/if}
+      {/if}
+      <button
+        class="rec-ctrl rec-stop"
+        onclick={onRequestStopTranscribe}
+        disabled={!onRequestStopTranscribe}
+        title={transcribeUi.pendingChunks > 0
+          ? `Stop (${transcribeUi.pendingChunks} chunks still pending)`
+          : "Stop"}
+      >
+        <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
+          <rect x="6" y="6" width="12" height="12" fill="currentColor" rx="1.5" />
+        </svg>
+      </button>
+    </div>
+  {/if}
+
   <div class="spacer"></div>
   <button
     class="models-btn"
@@ -117,6 +198,71 @@
   .family-name { color: #6e6ef7; flex-shrink: 0; }
   .separator { color: #444; flex-shrink: 0; }
   .model-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .rec-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: .15rem;
+    background: #1f1212;
+    border: 1px solid #4a2020;
+    border-radius: 6px;
+    padding: .15rem .15rem .15rem .35rem;
+    margin-left: .25rem;
+  }
+  .rec-chip.paused { background: #1f1c12; border-color: #4a4220; }
+  .rec-chip.drain { background: #121a22; border-color: #1f3b54; }
+  .rec-label {
+    background: none; border: none; cursor: pointer;
+    display: inline-flex; align-items: center; gap: .35rem;
+    padding: .1rem .35rem .1rem .1rem; color: inherit;
+    font-size: .72rem; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .rec-label:disabled { cursor: default; }
+  .rec-label .rec-text { color: #f0a3a3; font-weight: 600; letter-spacing: .03em; }
+  .rec-chip.paused .rec-text { color: #f0d49a; }
+  .rec-chip.drain .rec-text { color: #9acaea; }
+  .rec-time { color: #e0c5c5; }
+  .rec-chip.paused .rec-time { color: #d4c8a8; }
+  .rec-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #e35a5a;
+    box-shadow: 0 0 6px #e35a5a;
+    animation: rec-pulse 1.4s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+  .rec-chip.paused .rec-dot {
+    background: #d4a64a; box-shadow: 0 0 6px #d4a64a;
+    animation: none;
+  }
+  .rec-chip.drain .rec-dot {
+    background: #6e9ad4; box-shadow: 0 0 6px #6e9ad4;
+  }
+  @keyframes rec-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: .35; }
+  }
+  .rec-backlog {
+    background: #2a1410; color: #f0c2a8;
+    padding: 0 .3rem; border-radius: 3px;
+    font-size: .65rem; letter-spacing: .03em;
+  }
+  .rec-chip.paused .rec-backlog { background: #2a2410; color: #f0d8a8; }
+  .rec-chip.drain .rec-backlog { background: #122030; color: #a8c8f0; }
+  .rec-ctrl {
+    background: none; border: none; cursor: pointer;
+    color: #d8a4a4; padding: .2rem .3rem; border-radius: 4px;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .rec-ctrl:hover:not(:disabled) { background: #2a1414; color: #fff; }
+  .rec-ctrl:disabled { opacity: .4; cursor: default; }
+  .rec-chip.paused .rec-ctrl { color: #d8c8a4; }
+  .rec-chip.paused .rec-ctrl:hover:not(:disabled) { background: #2a2814; color: #fff; }
+  .rec-chip.drain .rec-ctrl { color: #a4c4e8; }
+  .rec-chip.drain .rec-ctrl:hover:not(:disabled) { background: #14202a; color: #fff; }
+  .rec-stop:hover:not(:disabled) { color: #fff; background: #5a2424 !important; }
+
   .spacer { flex: 1; }
   .models-btn {
     display: flex;
