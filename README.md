@@ -10,12 +10,21 @@ This is the entire README. The rest is in [DOCS.md](DOCS.md), because it turns o
 
 ## Install
 
+**macOS / Linux**
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/scripts/install.sh | sh   # macOS / Linux
-irm https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/scripts/install.ps1 | iex        # Windows
+curl -fsSL https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/scripts/install.sh | sh
 ```
 
-`myownllm serve` to start the API. `myownllm` to open the GUI. That's it for setup.
+**Windows**
+
+```powershell
+irm https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/scripts/install.ps1 | iex
+```
+
+Run `myownllm` to open the GUI. That's it for setup.
+
+> Power users: `myownllm serve` starts the headless API server, and `myownllm run` opens a terminal chat. See the [CLI](#cli) section below.
 
 ## Features
 
