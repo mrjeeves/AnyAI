@@ -1,15 +1,9 @@
 /**
  * Shared reactive state for the in-app update flow.
  *
- * Lives outside the component tree because three unrelated subtrees touch it:
- *   - App.svelte runs the startup check and renders the "apply now?" modal
- *   - Chat / TranscribeView own the SettingsPanel and need to be told when
- *     to open it on a particular tab (the user clicked "yes" on the modal)
- *   - SettingsPanel reads the available flag to draw an attention dot on the
- *     Updates tab, and clears it when the user opens that tab
- *
- * Keeping a single module-scoped $state object here avoids prop-drilling a
- * signal through App → Chat → StatusBar → SettingsPanel just for one dot.
+ * Lives outside the component tree so the StatusBar's settings button and
+ * the SettingsPanel's Updates tab can both observe a single signal without
+ * prop-drilling it through App → Chat → StatusBar.
  */
 
 export type SettingsTab =
@@ -24,18 +18,9 @@ export type SettingsTab =
 
 class UpdateUiState {
   /** Set when startup detects a release we can apply (already staged or just
-   *  staged this session). Drives the attention dot on the Updates tab. */
+   *  staged this session). Drives the attention dot on the StatusBar's
+   *  Settings button and the Updates tab inside the SettingsPanel. */
   available = $state<{ version: string } | null>(null);
-
-  /** Bumped to ask whichever view currently owns the SettingsPanel to open
-   *  it on a specific tab. The nonce makes repeat requests for the same tab
-   *  observable — without it $effect wouldn't re-fire if the user closes
-   *  Settings and we try to re-open it on the same tab. */
-  openSettingsRequest = $state<{ tab: SettingsTab; nonce: number } | null>(null);
-
-  requestSettings(tab: SettingsTab) {
-    this.openSettingsRequest = { tab, nonce: (this.openSettingsRequest?.nonce ?? 0) + 1 };
-  }
 }
 
 export const updateUi = new UpdateUiState();

@@ -96,11 +96,6 @@
    */
   let suppressNextActiveEvent = false;
 
-  /** "Update X.Y.Z is available" prompt. Shown once per launch when the
-   *  startup probe finds a staged update; dismissing leaves the attention
-   *  dot on Settings → Updates so it isn't lost. */
-  let updatePrompt = $state<{ version: string } | null>(null);
-
   /**
    * Modes the active family inside the active manifest actually has tiers
    * for. Falls back to all four before the manifest loads so the bar isn't
@@ -336,12 +331,14 @@
   /**
    * Background probe for an available update right after the chat view
    * paints. We hit `update_status` first (purely local — reads the staged
-   * marker on disk) so a relaunch with an already-staged update prompts
-   * instantly without a network round-trip. Only if nothing is staged do
-   * we ask `update_check_now` to talk to GitHub.
+   * marker on disk) so a relaunch with an already-staged update lights up
+   * the Settings dot without a network round-trip. Only if nothing is
+   * staged do we ask `update_check_now` to talk to GitHub.
    *
-   * The prompt is shown at most once per launch. Dismissing it leaves
-   * `updateUi.available` set so Settings → Updates still gets the dot.
+   * Result lands in `updateUi.available`, which the StatusBar's settings
+   * button and the SettingsPanel's Updates tab both watch. We deliberately
+   * never modal the user — they get a quiet attention dot they can act on
+   * when they're ready.
    */
   let updateCheckStarted = false;
   function kickUpdateCheck() {
@@ -358,12 +355,11 @@
       );
       if (status.pending) {
         updateUi.available = { version: status.pending.version };
-        updatePrompt = { version: status.pending.version };
         return;
       }
       // Nothing staged → ask GitHub. Skip for package-manager installs and
       // when self-update is disabled, since check_now will just bail and
-      // we don't want a phantom prompt either way.
+      // we don't want a phantom dot either way.
       if (!status.enabled || status.install_kind === "package_manager") return;
 
       type CheckOutcome =
@@ -376,12 +372,10 @@
       const outcome = await invoke<CheckOutcome>("update_check_now");
       if (outcome.kind === "staged") {
         updateUi.available = { version: outcome.version };
-        updatePrompt = { version: outcome.version };
       } else if (outcome.kind === "policy_blocked") {
         // Auto-apply policy refused the jump — surface the dot so the user
-        // can find it in Settings, but don't modal them: clicking "apply"
-        // wouldn't work without a config edit, which the Updates tab
-        // explains.
+        // can find it in Settings; the Updates tab itself explains what
+        // they need to change to permit the upgrade.
         updateUi.available = { version: outcome.latest };
       }
     } catch (e) {
@@ -389,15 +383,6 @@
       // the user. The watcher's periodic tick will retry later.
       console.warn("startup update check skipped:", e);
     }
-  }
-
-  function onUpdatePromptYes() {
-    updatePrompt = null;
-    updateUi.requestSettings("updates");
-  }
-
-  function onUpdatePromptNo() {
-    updatePrompt = null;
   }
 
   async function onModeChange(mode: Mode) {
@@ -570,25 +555,6 @@
           onConversationChanged={onConversationChanged}
         />
       {/if}
-    </div>
-  {/if}
-
-  {#if updatePrompt && !remoteActive}
-    <div class="update-prompt-overlay" role="presentation"></div>
-    <div
-      class="update-prompt"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="update-prompt-title"
-    >
-      <div class="update-prompt-title" id="update-prompt-title">Update available</div>
-      <div class="update-prompt-body">
-        AnyAI <strong>{updatePrompt.version}</strong> is ready to install. Apply it now?
-      </div>
-      <div class="update-prompt-actions">
-        <button class="up-no" onclick={onUpdatePromptNo}>Not now</button>
-        <button class="up-yes" onclick={onUpdatePromptYes}>Yes, take me there</button>
-      </div>
     </div>
   {/if}
 
@@ -813,73 +779,5 @@
     color: #9a9ab8;
     margin-top: 0.25rem;
     line-height: 1.5;
-  }
-
-  .update-prompt-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.55);
-    z-index: 50;
-  }
-  .update-prompt {
-    position: fixed;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    z-index: 51;
-    width: min(420px, 92vw);
-    background: #131320;
-    border: 1px solid #2a2a55;
-    border-radius: 12px;
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
-    color: #e8e8e8;
-    padding: 1.1rem 1.2rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.8rem;
-  }
-  .update-prompt-title {
-    font-size: 0.95rem;
-    font-weight: 600;
-  }
-  .update-prompt-body {
-    font-size: 0.85rem;
-    color: #c8c8d8;
-    line-height: 1.5;
-  }
-  .update-prompt-body strong {
-    color: #e8e8e8;
-    font-family: monospace;
-  }
-  .update-prompt-actions {
-    display: flex;
-    gap: 0.5rem;
-    justify-content: flex-end;
-  }
-  .update-prompt-actions button {
-    padding: 0.45rem 0.95rem;
-    border-radius: 7px;
-    font: inherit;
-    font-size: 0.8rem;
-    cursor: pointer;
-    border: 1px solid;
-  }
-  .up-no {
-    background: #1a1a2a;
-    border-color: #2a2a3a;
-    color: #c8c8d8;
-  }
-  .up-no:hover {
-    background: #22223a;
-    border-color: #3a3a55;
-  }
-  .up-yes {
-    background: #1f3a26;
-    border-color: #2c5135;
-    color: #cfeacf;
-  }
-  .up-yes:hover {
-    background: #28492f;
-    border-color: #3a6644;
   }
 </style>

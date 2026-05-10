@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { updateUi } from "../update-state.svelte";
   import type { Mode } from "../types";
 
   let { model, mode, family, sidebarOpen, onToggleSidebar, onOpenSettings } = $props<{
@@ -7,8 +8,15 @@
     family: string;
     sidebarOpen: boolean;
     onToggleSidebar: () => void;
-    onOpenSettings: (tab: "providers" | "families" | "models" | "storage") => void;
+    onOpenSettings: (tab: "providers" | "families" | "models" | "storage" | "updates") => void;
   }>();
+
+  // If the update dot is showing, the user almost certainly clicked the
+  // Settings button *because* of it — drop them on the Updates tab so they
+  // don't have to dig through the sidebar to find what they came for.
+  function openSettings() {
+    onOpenSettings(updateUi.available ? "updates" : "providers");
+  }
 </script>
 
 <div class="status-bar">
@@ -35,7 +43,13 @@
     <span class="model-name">{model}</span>
   </button>
   <div class="spacer"></div>
-  <button class="models-btn" onclick={() => onOpenSettings("providers")} title="Open settings">
+  <button
+    class="models-btn"
+    onclick={openSettings}
+    title={updateUi.available
+      ? `Update ${updateUi.available.version} available`
+      : "Open settings"}
+  >
     <span class="grid-icon" aria-hidden="true">⊞</span>
     <span class="label">Models/Settings</span>
     <svg
@@ -50,6 +64,12 @@
         d="M19.43 12.98a7.7 7.7 0 0 0 0-1.96l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.5 7.5 0 0 0-1.7-.98l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54a7.5 7.5 0 0 0-1.7.98l-2.39-.96a.5.5 0 0 0-.6.22L2.8 8.8a.5.5 0 0 0 .12.64l2.03 1.58a7.7 7.7 0 0 0 0 1.96L2.92 14.56a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96a7.5 7.5 0 0 0 1.7.98l.36 2.54a.5.5 0 0 0 .5.42h3.84a.5.5 0 0 0 .5-.42l.36-2.54a7.5 7.5 0 0 0 1.7-.98l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z"
       />
     </svg>
+    {#if updateUi.available}
+      <span
+        class="update-dot"
+        aria-label="Update {updateUi.available.version} available"
+      ></span>
+    {/if}
   </button>
 </div>
 
@@ -110,8 +130,18 @@
     padding: .2rem .5rem;
     border-radius: 5px;
   }
+  .models-btn { position: relative; }
   .models-btn:hover { background: #1a1a1a; color: #ccc; }
   .grid-icon { font-size: .85rem; line-height: 1; }
   .gear-icon { display: block; }
   .label { line-height: 1; }
+  .update-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #f59e0b;
+    box-shadow: 0 0 6px rgba(245, 158, 11, 0.7);
+    flex-shrink: 0;
+    margin-left: .15rem;
+  }
 </style>

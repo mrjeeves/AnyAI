@@ -12,7 +12,7 @@
     type Conversation,
     type StoredMessage,
   } from "../conversations";
-  import { updateUi, type SettingsTab } from "../update-state.svelte";
+  import type { SettingsTab } from "../update-state.svelte";
   import type { HardwareProfile, Mode } from "../types";
 
   let {
@@ -63,19 +63,6 @@
   let streaming = $state(false);
   let activeStreamId = $state<string | null>(null);
   let settingsTab = $state<SettingsTab | null>(null);
-
-  // Open the SettingsPanel on a specific tab when App requests it (e.g.
-  // user clicked "yes" on the startup update prompt). Tracking the nonce
-  // means a repeat request for the same tab still opens the panel after
-  // the user has closed it.
-  let lastOpenSettingsNonce = -1;
-  $effect(() => {
-    const req = updateUi.openSettingsRequest;
-    if (!req) return;
-    if (req.nonce === lastOpenSettingsNonce) return;
-    lastOpenSettingsNonce = req.nonce;
-    settingsTab = req.tab;
-  });
   let messagesEl: HTMLElement;
 
   /** Loaded conversation snapshot. We keep the full record (id + metadata)
