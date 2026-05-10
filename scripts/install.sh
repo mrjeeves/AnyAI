@@ -6,8 +6,8 @@
 #   2. Fall back to building from source via scripts/bootstrap.sh.
 #
 # Usage:
-#   curl -fsSL https://myownllm.run/install.sh | sh
-#   curl -fsSL https://myownllm.run/install.sh | sh -s -- --run
+#   curl -fsSL https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/scripts/install.sh | sh -s -- --run
 #   ./scripts/install.sh --dry-run
 #
 # This script is intentionally POSIX sh-compatible so that `curl … | sh` works
