@@ -12,6 +12,7 @@
     type Conversation,
     type StoredMessage,
   } from "../conversations";
+  import type { SettingsTab } from "../update-state.svelte";
   import type { HardwareProfile, Mode } from "../types";
 
   let {
@@ -61,7 +62,7 @@
   let input = $state("");
   let streaming = $state(false);
   let activeStreamId = $state<string | null>(null);
-  let settingsTab = $state<"providers" | "families" | "models" | "storage" | null>(null);
+  let settingsTab = $state<SettingsTab | null>(null);
   let messagesEl: HTMLElement;
 
   /** Loaded conversation snapshot. We keep the full record (id + metadata)

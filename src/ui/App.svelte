@@ -24,6 +24,7 @@
     type ConversationMeta,
     type FolderMeta,
   } from "../conversations";
+  import { updateUi } from "../update-state.svelte";
   import type { HardwareProfile, Mode } from "../types";
 
   let unsubSwap: (() => void) | null = null;
@@ -222,6 +223,7 @@
       } else {
         await invoke("ollama_ensure_running");
         view = "chat";
+        kickUpdateCheck();
       }
 
       // Seed the sidebar early so it's ready when the chat view paints.
@@ -323,6 +325,64 @@
   async function onFirstRunComplete() {
     await invoke("ollama_ensure_running");
     view = "chat";
+    kickUpdateCheck();
+  }
+
+  /**
+   * Background probe for an available update right after the chat view
+   * paints. We hit `update_status` first (purely local — reads the staged
+   * marker on disk) so a relaunch with an already-staged update lights up
+   * the Settings dot without a network round-trip. Only if nothing is
+   * staged do we ask `update_check_now` to talk to GitHub.
+   *
+   * Result lands in `updateUi.available`, which the StatusBar's settings
+   * button and the SettingsPanel's Updates tab both watch. We deliberately
+   * never modal the user — they get a quiet attention dot they can act on
+   * when they're ready.
+   */
+  let updateCheckStarted = false;
+  function kickUpdateCheck() {
+    if (updateCheckStarted) return;
+    updateCheckStarted = true;
+    void runUpdateCheck();
+  }
+
+  async function runUpdateCheck() {
+    try {
+      type Pending = { version: string; staged_at: string };
+      const status = await invoke<{ pending: Pending | null; install_kind: string; enabled: boolean }>(
+        "update_status",
+      );
+      if (status.pending) {
+        updateUi.available = { version: status.pending.version };
+        return;
+      }
+      // Nothing staged → ask GitHub. Skip for package-manager installs and
+      // when self-update is disabled, since check_now will just bail and
+      // we don't want a phantom dot either way.
+      if (!status.enabled || status.install_kind === "package_manager") return;
+
+      type CheckOutcome =
+        | { kind: "disabled" }
+        | { kind: "package_manager" }
+        | { kind: "up_to_date"; current: string; latest: string }
+        | { kind: "staged"; version: string }
+        | { kind: "policy_blocked"; current: string; latest: string; policy: string };
+
+      const outcome = await invoke<CheckOutcome>("update_check_now");
+      if (outcome.kind === "staged") {
+        updateUi.available = { version: outcome.version };
+      } else if (outcome.kind === "policy_blocked") {
+        // Auto-apply policy refused the jump — surface the dot so the user
+        // can find it in Settings; the Updates tab itself explains what
+        // they need to change to permit the upgrade.
+        updateUi.available = { version: outcome.latest };
+      }
+    } catch (e) {
+      // Network failures, GitHub rate limits, etc. — not worth disturbing
+      // the user. The watcher's periodic tick will retry later.
+      console.warn("startup update check skipped:", e);
+    }
   }
 
   async function onModeChange(mode: Mode) {

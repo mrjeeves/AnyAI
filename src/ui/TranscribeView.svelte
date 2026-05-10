@@ -5,6 +5,7 @@
   import ModeBar from "./ModeBar.svelte";
   import StatusBar from "./StatusBar.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
+  import type { SettingsTab } from "../update-state.svelte";
   import { loadConfig } from "../config";
   import {
     loadConversation,
@@ -72,9 +73,7 @@
    *  Enter, blur, and at record-start so a recording always lives on disk
    *  under whatever the user typed. */
   let sessionName = $state("");
-  let settingsTab = $state<
-    "providers" | "families" | "models" | "storage" | null
-  >(null);
+  let settingsTab = $state<SettingsTab | null>(null);
 
   // Recording state. Capture + ASR run on the Rust side via cpal +
   // whisper-rs; we drive it via Tauri commands and listen for delta

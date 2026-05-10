@@ -6,6 +6,7 @@
   import HardwareSection from "./settings/HardwareSection.svelte";
   import UpdatesSection from "./settings/UpdatesSection.svelte";
   import RemoteSection from "./settings/RemoteSection.svelte";
+  import { updateUi } from "../update-state.svelte";
 
   type Tab =
     | "providers"
@@ -42,6 +43,13 @@
     { id: "remote", label: "Remote" },
     { id: "updates", label: "Updates" },
   ];
+
+  // Clear the attention dot once the user actually lands on the Updates
+  // tab — they've now "seen" it. A subsequent check that finds another
+  // version will re-set it.
+  $effect(() => {
+    if (active === "updates") updateUi.available = null;
+  });
 </script>
 
 <div class="overlay" onclick={onClose} role="presentation"></div>
@@ -55,7 +63,14 @@
     <nav class="v-tabs" aria-label="Settings sections">
       {#each tabs as t}
         <button class="v-tab" class:active={active === t.id} onclick={() => (active = t.id)}>
-          {t.label}
+          <span class="tab-label">{t.label}</span>
+          {#if t.id === "updates" && updateUi.available}
+            <span
+              class="attention-dot"
+              aria-label="Update available"
+              title="Update {updateUi.available.version} available"
+            ></span>
+          {/if}
         </button>
       {/each}
     </nav>
@@ -144,6 +159,9 @@
     flex-shrink: 0;
   }
   .v-tab {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
     text-align: left;
     background: none;
     border: none;
@@ -153,6 +171,18 @@
     padding: 0.5rem 0.65rem;
     border-radius: 6px;
     border-left: 2px solid transparent;
+  }
+  .tab-label {
+    flex: 1;
+    min-width: 0;
+  }
+  .attention-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #f59e0b;
+    box-shadow: 0 0 6px rgba(245, 158, 11, 0.7);
+    flex-shrink: 0;
   }
   .v-tab:hover {
     background: #161616;
