@@ -20,7 +20,7 @@
   "families": {
     "gemma4": {
       "label": "Gemma 4",
-      "description": "Google Gemma 4 — multimodal models (text + image input) with reasoning and configurable thinking modes. Smallest variant (e2b) is 7.2 GB on disk and needs roughly 10 GB of RAM at runtime, so very small machines should pick the Qwen family instead.",
+      "description": "Google Gemma 4 (Apache-2.0) — multimodal open models with agentic skills, multi-step planning, and audio-visual processing. The e2b/e4b edge variants use per-layer activations to keep the runtime footprint near 2B / 4B parameters, so they're a great fit for Raspberry Pi 5, NVIDIA Jetson Orin Nano, and other small / offline-only setups (e2b runs at ~7.6 tok/s on a Pi 5). The 26B MoE and 31B dense tiers scale up for workstation-class hardware.",
       "default_mode": "text",
       "modes": {
         "text": {
@@ -28,8 +28,8 @@
           "tiers": [
             { "min_vram_gb": 22, "min_ram_gb": 28, "disk_mb": 20480, "model": "gemma4:31b", "fallback": "gemma4:26b" },
             { "min_vram_gb": 20, "min_ram_gb": 24, "disk_mb": 18432, "model": "gemma4:26b", "fallback": "gemma4:e4b" },
-            { "min_vram_gb": 12, "min_ram_gb": 14, "disk_mb": 9830,  "model": "gemma4:e4b", "fallback": "gemma4:e2b" },
-            { "min_vram_gb": 9,  "min_ram_gb": 10, "disk_mb": 7373,  "model": "gemma4:e2b", "fallback": "gemma4:e2b" }
+            { "min_vram_gb": 6,  "min_ram_gb": 12, "disk_mb": 9830,  "model": "gemma4:e4b", "fallback": "gemma4:e2b" },
+            { "min_vram_gb": 0,  "min_ram_gb": 0,  "disk_mb": 7373,  "model": "gemma4:e2b", "fallback": "gemma4:e2b" }
           ]
         }
       }

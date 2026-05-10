@@ -57,14 +57,16 @@ On every request: re-resolve, hot-swap if upstream changed, return. A 5-minute b
 
 ### Small systems (Raspberry Pi 4 / Pi 5)
 
-AnyAI ships native `linux-aarch64` builds, so a 64-bit Raspberry Pi OS install is a one-liner. The hardware detector reads `/proc/device-tree/model` and `/proc/cpuinfo`, surfaces the board name (e.g. "Raspberry Pi 5 Model B") in the GUI and `anyai status`, and walks a CPU-friendly tier ladder so a 2 GB Pi 4 lands on `llama3.2:1b` while a 16 GB Pi 5 reaches `qwen3:8b`.
+AnyAI ships native `linux-aarch64` builds, so a 64-bit Raspberry Pi OS install is a one-liner. The hardware detector reads `/proc/device-tree/model` and `/proc/cpuinfo`, surfaces the board name (e.g. "Raspberry Pi 5 Model B") in the GUI and `anyai status`, and walks a CPU-friendly tier ladder so a 2 GB Pi 4 lands on `llama3.2:1b` while a 16 GB Pi 5 reaches `gemma4:e4b`.
+
+Gemma 4's edge variants (`e2b` / `e4b`) are the recommended default on Pi 5 — they're built for offline edge inference, are multimodal (text + image + audio-visual), and run completely offline at ~7.6 tok/s on a Pi 5 thanks to per-layer activations that keep the runtime footprint near 2B / 4B parameters regardless of the full weight count.
 
 | Board                 | Default text model |
 |-----------------------|--------------------|
 | Pi 4 / Pi 5 — 2 GB    | `llama3.2:1b`      |
 | Pi 4 / Pi 5 — 4 GB    | `llama3.2:3b`      |
-| Pi 4 / Pi 5 — 8 GB    | `gemma3:4b`        |
-| Pi 5 — 16 GB          | `qwen3:8b`         |
+| Pi 4 / Pi 5 — 8 GB    | `gemma4:e2b`       |
+| Pi 5 — 16 GB          | `gemma4:e4b`       |
 
 Notes:
 - Use **64-bit Raspberry Pi OS** (Bookworm or newer). 32-bit (`armv7l`) is not a release target.
@@ -682,7 +684,7 @@ A single manifest can expose multiple families — that's how you ship "use our 
   "families": {
     "gemma4": {
       "label": "Gemma 4",
-      "description": "Google Gemma 4 — versatile general-purpose models.",
+      "description": "Google Gemma 4 — agentic open models that run end-to-end on the edge (Pi 5, Jetson Orin Nano).",
       "default_mode": "text",
       "modes": {
         "text": {
@@ -695,6 +697,7 @@ A single manifest can expose multiple families — that's how you ship "use our 
             { "min_vram_gb": 6,  "min_ram_gb": 12, "model": "gemma4:e4b", "fallback": "gemma4:e2b" },
             { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "gemma4:e2b", "fallback": "gemma4:e2b" }
             // Always include a zero-threshold catch-all as the last tier.
+            // gemma4:e2b runs on a Pi 5 at ~7.6 tok/s, so it's a sane catch-all.
           ]
         }
       }
