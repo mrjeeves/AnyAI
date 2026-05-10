@@ -358,13 +358,30 @@
     flex: 1; overflow-y: auto; padding: .5rem .75rem 1rem;
     display: flex; flex-direction: column; gap: .6rem;
     min-height: 0;
+    /* Keep the scroll track always rendered so the user sees there's
+     * more below; the WebKit pseudo-elements style it to match the
+     * dark theme. */
+    scrollbar-width: thin;
+    scrollbar-color: #2a2a2a transparent;
   }
+  .detail-body::-webkit-scrollbar { width: 8px; }
+  .detail-body::-webkit-scrollbar-track { background: transparent; }
+  .detail-body::-webkit-scrollbar-thumb {
+    background: #2a2a2a;
+    border-radius: 4px;
+  }
+  .detail-body::-webkit-scrollbar-thumb:hover { background: #3a3a3a; }
 
   .mode-block {
     border: 1px solid #1e1e1e;
     background: #0f0f14;
     border-radius: 7px;
     overflow: hidden;
+    /* Don't let flex layout in `.detail-body` shrink these blocks — the
+     * outer scroll on `.detail-body` should be the only scroll, and
+     * `overflow: hidden` here (used for the rounded corners) would
+     * otherwise let the flex item shrink to 0 and clip the tier list. */
+    flex-shrink: 0;
   }
   .mode-head {
     display: flex; align-items: center; gap: .55rem;

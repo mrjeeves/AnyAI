@@ -1,6 +1,6 @@
 {
   "name": "AnyAI Default",
-  "version": "9",
+  "version": "10",
   "ttl_minutes": 360,
   "default_family": "gemma4",
   "shared_modes": {
@@ -9,12 +9,11 @@
       "input": "audio",
       "runtime": "whisper",
       "tiers": [
-        { "min_vram_gb": 5, "min_ram_gb": 8,  "disk_mb": 2952, "model": "large-v3",       "fallback": "large-v3-turbo" },
-        { "min_vram_gb": 3, "min_ram_gb": 6,  "disk_mb": 1550, "model": "large-v3-turbo", "fallback": "medium.en"      },
-        { "min_vram_gb": 2, "min_ram_gb": 4,  "disk_mb": 1463, "model": "medium.en",      "fallback": "small.en"       },
-        { "min_vram_gb": 1, "min_ram_gb": 3,  "disk_mb": 465,  "model": "small.en",       "fallback": "base.en"        },
-        { "min_vram_gb": 0, "min_ram_gb": 2,  "disk_mb": 141,  "model": "base.en",        "fallback": "tiny.en"        },
-        { "min_vram_gb": 0, "min_ram_gb": 0,  "disk_mb": 74,   "model": "tiny.en",        "fallback": "tiny.en"        }
+        { "min_vram_gb": 2, "min_ram_gb": 4, "disk_mb": 1550, "model": "large-v3-turbo", "fallback": "medium.en" },
+        { "min_vram_gb": 2, "min_ram_gb": 4, "disk_mb": 1463, "model": "medium.en",      "fallback": "small.en"  },
+        { "min_vram_gb": 1, "min_ram_gb": 3, "disk_mb": 465,  "model": "small.en",       "fallback": "base.en"   },
+        { "min_vram_gb": 0, "min_ram_gb": 2, "disk_mb": 141,  "model": "base.en",        "fallback": "tiny.en"   },
+        { "min_vram_gb": 0, "min_ram_gb": 0, "disk_mb": 74,   "model": "tiny.en",        "fallback": "tiny.en"   }
       ]
     }
   },
