@@ -207,11 +207,19 @@ export function allRecommendedModels(manifest: Manifest): Set<string> {
   return models;
 }
 
-/** Modes a specific family in a manifest defines tiers for. */
+/** Modes a specific family in a manifest defines tiers for. Transcribe
+ *  rides on a separate runtime (whisper-rs, models under
+ *  `~/.anyai/whisper/`) so it's always available regardless of whether
+ *  the family has Ollama-shaped tiers for it — manifest tiers for
+ *  transcribe would falsely advertise Ollama tags that don't exist. */
 export function familyModes(family: ManifestFamily): Set<Mode> {
   const out = new Set<Mode>();
-  for (const m of ["text", "vision", "code", "transcribe"] as Mode[]) {
+  for (const m of ["text", "vision", "code"] as Mode[]) {
     if (family.modes[m]) out.add(m);
   }
+  // Transcribe is built-in: whisper-rs ships with the binary and the
+  // model lives under ~/.anyai/whisper/. Surface it regardless of the
+  // family's Ollama tier table.
+  out.add("transcribe");
   return out;
 }
