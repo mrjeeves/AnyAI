@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import ModeBar from "./ModeBar.svelte";
   import StatusBar from "./StatusBar.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
@@ -10,7 +12,7 @@
     newConversation,
     type Conversation,
   } from "../conversations";
-  import type { HardwareProfile, Mode, MicConfig } from "../types";
+  import type { HardwareProfile, Mode } from "../types";
 
   let {
     activeModel,
@@ -44,34 +46,42 @@
     onNewSession: () => void;
   }>();
 
+  interface TranscribeFrame {
+    delta: string;
+    elapsed_ms: number;
+    final: boolean;
+  }
+  interface WhisperModelInfo {
+    name: string;
+    approx_size_bytes: number;
+    installed: boolean;
+    installed_size_bytes: number | null;
+  }
+
   let activeConversation = $state<Conversation | null>(null);
   let transcript = $state("");
   let talkingPoints = $state<string[]>([]);
   /** Title input — bound directly to the bottom-bar field. Persisted on
-   *  blur / record-start so we don't write a JSON file on every keystroke. */
+   *  Enter, blur, and at record-start so a recording always lives on disk
+   *  under whatever the user typed. */
   let sessionName = $state("");
-  let settingsTab = $state<"providers" | "families" | "models" | "storage" | null>(null);
+  let settingsTab = $state<
+    "providers" | "families" | "models" | "storage" | "transcription" | null
+  >(null);
 
-  // Recording state. We capture the raw mic stream so the VU meter can live
-  // next to the record button; actual transcription wiring is a follow-up
-  // (no ASR pipeline yet — see ARCHITECTURE.md).
+  // Recording state. Capture + ASR run on the Rust side via cpal +
+  // whisper-rs; we drive it via Tauri commands and listen for delta
+  // frames on a per-stream event channel.
   let recording = $state(false);
   let recordingStartedAt = $state(0);
   let elapsed = $state(0);
-  let level = $state(0);
-  let micError = $state("");
-  let stream: MediaStream | null = null;
-  let audioCtx: AudioContext | null = null;
-  let raf = 0;
+  let transcribeError = $state("");
+  /** Active stream id while a recording is going. Per-recording UUID so a
+   *  stale event from a previous session can't cross-contaminate the new
+   *  one if the user stops + starts quickly. */
+  let activeStreamId: string | null = null;
+  let unlistenStream: UnlistenFn | null = null;
   let elapsedTimer: ReturnType<typeof setInterval> | null = null;
-
-  /** Guard for WebViews (notably WebKitGTK / older WKWebView) that don't
-   *  expose mediaDevices.getUserMedia. We disable the Record button and
-   *  surface the limitation instead of letting the click crash. */
-  const canCaptureMic =
-    typeof navigator !== "undefined" &&
-    !!navigator.mediaDevices &&
-    typeof navigator.mediaDevices.getUserMedia === "function";
 
   // Load (or clear) a session whenever the active id changes.
   $effect(() => {
@@ -89,8 +99,6 @@
       activeConversation = c;
       transcript = c.transcript ?? "";
       talkingPoints = c.talking_points ?? [];
-      // Treat the placeholder title as "blank" so users see the prompt copy
-      // instead of literal "New chat" in the field.
       sessionName = c.title === "New chat" ? "" : c.title;
     });
     return () => {
@@ -137,84 +145,111 @@
     return conv;
   }
 
+  function onNameKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      persist().catch((err) => console.warn("save title failed:", err));
+      (e.currentTarget as HTMLInputElement).blur();
+    }
+  }
+
   function onNameBlur() {
     persist().catch((e) => console.warn("save title failed:", e));
   }
 
+  /** Pre-flight: confirm the configured whisper model is downloaded. If
+   *  not, surface a clear "go to Settings → Transcription" call to action
+   *  rather than letting the Rust side throw a model-not-found error. */
+  async function modelInstalled(name: string): Promise<boolean> {
+    try {
+      const all = await invoke<WhisperModelInfo[]>("whisper_models_list");
+      return all.find((m) => m.name === name)?.installed ?? false;
+    } catch {
+      return false;
+    }
+  }
+
   async function startRecording() {
     if (recording) return;
-    micError = "";
-    if (!canCaptureMic) {
-      micError =
-        "This WebView build can't open the microphone. Native audio capture " +
-        "is on the roadmap — see Hardware → Microphone for status.";
+    transcribeError = "";
+    const cfg = await loadConfig();
+    const mic = cfg.mic;
+    const model = mic.whisper_model || "tiny.en";
+
+    if (!(await modelInstalled(model))) {
+      transcribeError =
+        `The whisper '${model}' model isn't installed yet. Open Settings → ` +
+        `Transcription to download it.`;
       return;
     }
+
+    const streamId = crypto.randomUUID();
+    activeStreamId = streamId;
+
     try {
-      const cfg = await loadConfig();
-      const mic: MicConfig = cfg.mic;
-      const constraints: MediaStreamConstraints = {
-        audio: {
-          deviceId: mic.device_id ? { exact: mic.device_id } : undefined,
-          sampleRate: mic.sample_rate,
-          echoCancellation: mic.echo_cancellation,
-          noiseSuppression: mic.noise_suppression,
-          autoGainControl: mic.auto_gain_control,
+      // Listen first so we can't miss a fast-arriving frame between the
+      // invoke returning and the listener attaching.
+      unlistenStream = await listen<TranscribeFrame>(
+        `anyai://transcribe-stream/${streamId}`,
+        (e) => {
+          const f = e.payload;
+          if (f.delta) {
+            transcript = transcript + f.delta;
+          }
+          if (f.final) {
+            // Worker unwound on its own (error path or natural end). Make
+            // sure our state stays in sync.
+            if (recording) stopRecording();
+          }
         },
-      };
-      stream = await navigator.mediaDevices.getUserMedia(constraints);
-      const Ctx =
-        window.AudioContext ??
-        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      audioCtx = new Ctx();
-      const src = audioCtx.createMediaStreamSource(stream);
-      const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 1024;
-      src.connect(analyser);
-      const buf = new Float32Array(analyser.fftSize);
-      const tick = () => {
-        analyser.getFloatTimeDomainData(buf);
-        let sum = 0;
-        for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
-        level = Math.min(1, Math.sqrt(sum / buf.length) * 4);
-        raf = requestAnimationFrame(tick);
-      };
+      );
+
+      await invoke("transcribe_start", {
+        streamId,
+        model,
+        device: mic.device_name || null,
+      });
+
       recording = true;
       recordingStartedAt = Date.now();
       elapsed = 0;
       elapsedTimer = setInterval(() => {
         elapsed = Math.floor((Date.now() - recordingStartedAt) / 1000);
       }, 250);
-      tick();
-      // Snapshot the session name so a recording always lives on disk under
-      // whatever the user typed when they hit record.
+
+      // Snapshot the session name so a recording always lives on disk
+      // under whatever the user typed when they hit record.
       await persist({ force: true });
-    } catch (e: unknown) {
-      const err = e as { name?: string; message?: string };
-      if (err?.name === "NotAllowedError" || err?.name === "PermissionDeniedError") {
-        micError = "Microphone access was blocked. Allow it and try again.";
-      } else {
-        micError = String(err?.message ?? e);
-      }
-      stopRecording();
+    } catch (e) {
+      transcribeError = String(e);
+      // Tear down any partial state so a retry has a clean slate.
+      unlistenStream?.();
+      unlistenStream = null;
+      activeStreamId = null;
     }
   }
 
-  function stopRecording() {
+  async function stopRecording() {
+    const id = activeStreamId;
     recording = false;
-    level = 0;
-    if (raf) cancelAnimationFrame(raf);
-    raf = 0;
     if (elapsedTimer) clearInterval(elapsedTimer);
     elapsedTimer = null;
-    audioCtx?.close().catch(() => {});
-    audioCtx = null;
-    stream?.getTracks().forEach((t) => t.stop());
-    stream = null;
+    activeStreamId = null;
+    if (id) {
+      try {
+        await invoke("transcribe_stop", { streamId: id });
+      } catch (e) {
+        console.warn("transcribe_stop failed:", e);
+      }
+    }
+    unlistenStream?.();
+    unlistenStream = null;
+    // Persist the final transcript text.
+    persist().catch((e) => console.warn("save after stop failed:", e));
   }
 
   async function handleModeChange(mode: Mode) {
-    if (recording) stopRecording();
+    if (recording) await stopRecording();
     await onModeChange(mode);
   }
 
@@ -255,7 +290,8 @@
         {:else}
           <div class="placeholder">
             {#if recording}
-              Listening… transcription will stream in here.
+              Listening… transcription will stream in here every few
+              seconds.
             {:else}
               Press <strong>Record</strong> to start a session. The live
               transcript will appear in this pane.
@@ -293,8 +329,8 @@
     onChange={handleModeChange}
   />
 
-  {#if micError}
-    <div class="mic-error">{micError}</div>
+  {#if transcribeError}
+    <div class="mic-error">{transcribeError}</div>
   {/if}
 
   <div class="input-row">
@@ -306,6 +342,7 @@
       <input
         type="text"
         bind:value={sessionName}
+        onkeydown={onNameKeydown}
         onblur={onNameBlur}
         placeholder="Untitled session"
         spellcheck="false"
@@ -313,19 +350,11 @@
     </label>
     {#if recording}
       <button class="record-btn stop" onclick={stopRecording} title="Stop recording">
-        <span class="vu" aria-hidden="true">
-          <span class="vu-fill" style="width: {Math.round(level * 100)}%"></span>
-        </span>
         <span class="rec-square" aria-hidden="true"></span>
         Stop
       </button>
     {:else}
-      <button
-        class="record-btn"
-        onclick={startRecording}
-        title={canCaptureMic ? "Start recording" : "Microphone capture unavailable in this build"}
-        disabled={!canCaptureMic}
-      >
+      <button class="record-btn" onclick={startRecording} title="Start recording">
         <span class="rec-circle" aria-hidden="true"></span>
         Record
       </button>
@@ -524,20 +553,6 @@
     height: 9px;
     border-radius: 2px;
     background: #fff;
-  }
-  .vu {
-    display: inline-block;
-    width: 56px;
-    height: 5px;
-    background: rgba(0, 0, 0, .3);
-    border-radius: 3px;
-    overflow: hidden;
-  }
-  .vu-fill {
-    display: block;
-    height: 100%;
-    background: linear-gradient(90deg, #ffe7e7 0%, #fff 100%);
-    transition: width .05s linear;
   }
 
   @media (max-width: 700px) {

@@ -4,7 +4,7 @@
   import { loadConfig, updateConfig } from "../../config";
   import type { HardwareProfile, GpuType, MicConfig } from "../../types";
 
-  type Tab = "providers" | "families" | "models" | "storage" | "updates" | "hardware";
+  type Tab = "providers" | "families" | "models" | "storage" | "updates" | "hardware" | "transcription";
 
   let { setActive } = $props<{ setActive: (tab: Tab) => void }>();
 
@@ -13,13 +13,17 @@
   let loading = $state(true);
   let error = $state("");
 
-  // Microphone config + live device list. We populate `micDevices` lazily
-  // (after the user clicks "Allow access") so a never-used transcribe install
-  // doesn't ask for the mic permission on every Settings open.
+  // Microphone config + cpal-backed device list. Audio capture itself runs
+  // through Rust/cpal (see src-tauri/src/transcribe.rs); the WebView's
+  // mediaDevices is only used for the optional VU meter on platforms where
+  // it's exposed.
+  interface AudioInputDevice {
+    name: string;
+    is_default: boolean;
+  }
   let mic = $state<MicConfig | null>(null);
-  let micDevices = $state<MediaDeviceInfo[]>([]);
+  let micDevices = $state<AudioInputDevice[]>([]);
   let micError = $state("");
-  let micPermission = $state<"unknown" | "granted" | "denied">("unknown");
 
   // VU meter state for the Test button — last RMS sample (0..1) and the
   // refs we need to release the WebAudio graph cleanly when the user stops.
@@ -29,36 +33,25 @@
   let testCtx: AudioContext | null = null;
   let testRaf = 0;
 
-  /** True when the WebView exposes the standard mediaDevices API. The Tauri
-   *  WebKitGTK / WKWebView builds don't always — when this is false we hide
-   *  the Test button and surface an explanatory note instead of letting the
-   *  user click into a TypeError. */
-  const hasMediaDevices =
+  /** Whether the WebView's mediaDevices API is exposed. We only need it
+   *  for the optional Test button — the actual transcription pipeline
+   *  uses cpal in Rust, which works on every platform AnyAI ships on. */
+  const canPromptMic =
     typeof navigator !== "undefined" &&
     !!navigator.mediaDevices &&
-    typeof navigator.mediaDevices.enumerateDevices === "function";
-  const canPromptMic =
-    hasMediaDevices && typeof navigator.mediaDevices.getUserMedia === "function";
+    typeof navigator.mediaDevices.getUserMedia === "function";
 
   onMount(async () => {
     try {
-      const [hw, config] = await Promise.all([
+      const [hw, config, devices] = await Promise.all([
         invoke<HardwareProfile>("detect_hardware"),
         loadConfig(),
+        invoke<AudioInputDevice[]>("audio_input_devices").catch(() => []),
       ]);
       hardware = hw;
       conversationDir = config.conversation_dir ?? "";
       mic = { ...config.mic };
-      if (hasMediaDevices) {
-        // If the OS already granted access in a previous session, the device
-        // list comes back populated with labels — list it eagerly so the
-        // dropdown shows real device names instead of "Microphone (default)".
-        await refreshDevices(false);
-      } else {
-        micError =
-          "This build of the WebView doesn't expose audio devices. " +
-          "Live device listing is unavailable until native capture lands.";
-      }
+      micDevices = devices;
     } catch (e) {
       error = String(e);
     } finally {
@@ -68,35 +61,12 @@
 
   onDestroy(() => stopTest());
 
-  /** Read the device list from the browser. When `prompt` is true we first
-   *  call getUserMedia to coerce the OS permission dialog — without that the
-   *  enumerated MediaDeviceInfo entries come back with empty labels. */
-  async function refreshDevices(prompt: boolean) {
-    if (!hasMediaDevices) return;
+  async function refreshDevices() {
     try {
-      if (prompt && canPromptMic) {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        // Drop the temp stream straight away — we only needed it to unlock
-        // the device labels. The Test button opens its own stream.
-        stream.getTracks().forEach((t) => t.stop());
-        micPermission = "granted";
-      }
-      const all = await navigator.mediaDevices.enumerateDevices();
-      micDevices = all.filter((d) => d.kind === "audioinput");
-      // Heuristic: at least one device with a non-empty label means we have
-      // permission already; all-empty labels means we haven't asked yet.
-      if (micPermission === "unknown" && micDevices.some((d) => d.label)) {
-        micPermission = "granted";
-      }
+      micDevices = await invoke<AudioInputDevice[]>("audio_input_devices");
       micError = "";
-    } catch (e: unknown) {
-      const err = e as { name?: string; message?: string };
-      if (err?.name === "NotAllowedError" || err?.name === "PermissionDeniedError") {
-        micPermission = "denied";
-        micError = "Microphone access was blocked. Allow it in your OS / browser settings.";
-      } else {
-        micError = String(err?.message ?? e);
-      }
+    } catch (e) {
+      micError = String(e);
     }
   }
 
@@ -105,8 +75,6 @@
     const next = { ...mic, ...patch };
     mic = next;
     await updateConfig({ mic: next });
-    // Restart the running test with the new constraints so the user can
-    // hear their toggle take effect immediately.
     if (testing) {
       stopTest();
       await startTest();
@@ -117,14 +85,16 @@
     if (!mic) return;
     if (!canPromptMic) {
       micError =
-        "This WebView build can't open the microphone. Settings will still " +
-        "save, but the live test isn't available here.";
+        "This WebView build can't run the live VU meter. Recording itself " +
+        "still works — it captures via the native cpal path.";
       return;
     }
     try {
       const constraints: MediaStreamConstraints = {
         audio: {
-          deviceId: mic.device_id ? { exact: mic.device_id } : undefined,
+          // The MediaStream API matches by `deviceId`, which is opaque
+          // (per-origin hash); we don't have one stored, so let the
+          // browser pick the system default for the test only.
           sampleRate: mic.sample_rate,
           echoCancellation: mic.echo_cancellation,
           noiseSuppression: mic.noise_suppression,
@@ -132,13 +102,9 @@
         },
       };
       testStream = await navigator.mediaDevices.getUserMedia(constraints);
-      micPermission = "granted";
-      // After the first grant, the device list grows labels — refresh so the
-      // dropdown shows the real names without forcing a second prompt.
-      navigator.mediaDevices.enumerateDevices().then((all) => {
-        micDevices = all.filter((d) => d.kind === "audioinput");
-      });
-      const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const Ctx =
+        window.AudioContext ??
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       testCtx = new Ctx();
       const src = testCtx.createMediaStreamSource(testStream);
       const analyser = testCtx.createAnalyser();
@@ -147,8 +113,6 @@
       const buf = new Float32Array(analyser.fftSize);
       const tick = () => {
         analyser.getFloatTimeDomainData(buf);
-        // RMS over the buffer → smooth, log-ish meter that doesn't jitter
-        // wildly between frames.
         let sum = 0;
         for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
         const rms = Math.sqrt(sum / buf.length);
@@ -161,7 +125,6 @@
     } catch (e: unknown) {
       const err = e as { name?: string; message?: string };
       if (err?.name === "NotAllowedError" || err?.name === "PermissionDeniedError") {
-        micPermission = "denied";
         micError = "Microphone access was blocked. Allow it in your OS / browser settings.";
       } else {
         micError = String(err?.message ?? e);
@@ -299,8 +262,8 @@
       <div class="card">
         <div class="card-title">Microphone</div>
         <p class="card-meta">
-          Used by Transcribe mode. Settings apply the next time you start a
-          session.
+          Used by Transcribe mode. Devices come from the OS via the native
+          audio path; settings apply the next time you start a session.
         </p>
 
         {#if mic}
@@ -308,35 +271,30 @@
             <div class="full">
               <dt>Device</dt>
               <dd>
-                {#if !hasMediaDevices}
-                  <span class="dim">Device listing isn't available in this WebView.</span>
-                {:else if micDevices.length === 0}
-                  {#if canPromptMic}
-                    <button class="link-btn" onclick={() => refreshDevices(true)}>
-                      Allow microphone access
-                    </button>
-                    <span class="dim">to list devices</span>
-                  {:else}
-                    <span class="dim">No devices reported.</span>
-                  {/if}
+                {#if micDevices.length === 0}
+                  <span class="dim">No input devices detected.</span>
+                  <button class="link-btn" onclick={refreshDevices}>Refresh</button>
                 {:else}
                   <select
-                    value={mic.device_id}
-                    onchange={(e) => patchMic({ device_id: (e.currentTarget as HTMLSelectElement).value })}
+                    value={mic.device_name}
+                    onchange={(e) => patchMic({ device_name: (e.currentTarget as HTMLSelectElement).value })}
                   >
-                    <option value="">System default</option>
-                    {#each micDevices as d (d.deviceId)}
-                      <option value={d.deviceId}>
-                        {d.label || `Microphone ${d.deviceId.slice(0, 6)}`}
+                    <option value="">System default{micDevices.find((d) => d.is_default)
+                      ? ` (${micDevices.find((d) => d.is_default)?.name})`
+                      : ""}</option>
+                    {#each micDevices as d (d.name)}
+                      <option value={d.name}>
+                        {d.name}{d.is_default ? " (default)" : ""}
                       </option>
                     {/each}
                   </select>
+                  <button class="link-btn small" onclick={refreshDevices} title="Refresh device list">↻</button>
                 {/if}
               </dd>
             </div>
 
             <div>
-              <dt>Sample rate</dt>
+              <dt>Sample rate (capture)</dt>
               <dd>
                 <select
                   value={String(mic.sample_rate)}
@@ -348,6 +306,26 @@
                   <option value="44100">44.1 kHz</option>
                   <option value="48000">48 kHz</option>
                 </select>
+              </dd>
+            </div>
+
+            <div>
+              <dt>Whisper model</dt>
+              <dd>
+                <select
+                  value={mic.whisper_model}
+                  onchange={(e) =>
+                    patchMic({ whisper_model: (e.currentTarget as HTMLSelectElement).value })}
+                >
+                  <option value="tiny.en">tiny.en (~75 MB)</option>
+                  <option value="base.en">base.en (~140 MB)</option>
+                  <option value="small.en">small.en (~466 MB)</option>
+                  <option value="medium.en">medium.en (~1.5 GB)</option>
+                  <option value="large-v3">large-v3 (~3 GB)</option>
+                </select>
+                <button class="link-btn small" onclick={() => setActive("transcription")} title="Manage models">
+                  Manage →
+                </button>
               </dd>
             </div>
 
@@ -400,10 +378,6 @@
 
           {#if micError}
             <p class="card-meta error-text">{micError}</p>
-          {:else if micPermission === "unknown" && micDevices.length === 0}
-            <p class="card-meta">
-              Click <em>Allow microphone access</em> to populate the device list.
-            </p>
           {/if}
         {/if}
       </div>
@@ -476,6 +450,7 @@
     padding: .35rem .65rem; border-radius: 6px; font-size: .78rem; cursor: pointer;
   }
   .link-btn:hover { background: #1a1a2a; }
+  .link-btn.small { padding: .2rem .45rem; font-size: .72rem; }
 
   .footnote {
     font-size: .72rem; color: #555; line-height: 1.5;

@@ -6,8 +6,17 @@
   import HardwareSection from "./settings/HardwareSection.svelte";
   import UpdatesSection from "./settings/UpdatesSection.svelte";
   import RemoteSection from "./settings/RemoteSection.svelte";
+  import TranscriptionSection from "./settings/TranscriptionSection.svelte";
 
-  type Tab = "providers" | "families" | "models" | "storage" | "hardware" | "remote" | "updates";
+  type Tab =
+    | "providers"
+    | "families"
+    | "models"
+    | "storage"
+    | "hardware"
+    | "remote"
+    | "transcription"
+    | "updates";
 
   let {
     initialTab = "families",
@@ -28,6 +37,7 @@
     { id: "models", label: "Models" },
     { id: "storage", label: "Storage" },
     { id: "hardware", label: "Hardware" },
+    { id: "transcription", label: "Transcription" },
     { id: "remote", label: "Remote" },
     { id: "updates", label: "Updates" },
   ];
@@ -60,6 +70,8 @@
         <StorageSection setActive={(t) => (active = t)} />
       {:else if active === "hardware"}
         <HardwareSection setActive={(t) => (active = t)} />
+      {:else if active === "transcription"}
+        <TranscriptionSection />
       {:else if active === "remote"}
         <RemoteSection />
       {:else if active === "updates"}

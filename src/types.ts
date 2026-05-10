@@ -85,20 +85,25 @@ export interface RemoteUiConfig {
   port: number;
 }
 
-/** Microphone capture settings used by transcribe mode. The `device_id` is
- *  the value `MediaDeviceInfo.deviceId` returns for the chosen input — empty
- *  string means "let the browser pick the system default". */
+/** Microphone + transcription settings used by transcribe mode. Audio
+ *  capture runs through cpal on the Rust side; `device_name` is matched
+ *  against `cpal::Device::name()`. Empty string = system default. */
 export interface MicConfig {
-  device_id: string;
-  /** Target capture rate in Hz. 16000 is what most ASR models want; 48000
-   *  matches typical USB / Bluetooth mics. The browser will resample for us. */
+  device_name: string;
+  /** Target capture rate in Hz. 16000 is what whisper wants; the cpal
+   *  capture path resamples to 16k regardless, so this is just a hint to
+   *  any future browser-side fallback. */
   sample_rate: number;
-  /** WebRTC echo cancellation — useful when the speakers are nearby. */
+  /** WebRTC echo cancellation — only applies if a future build uses the
+   *  WebView mic path; cpal doesn't expose an equivalent. */
   echo_cancellation: boolean;
-  /** WebRTC noise suppression — strips constant fan / room hum. */
+  /** WebRTC noise suppression — same caveat as above. */
   noise_suppression: boolean;
-  /** WebRTC auto gain control — keeps quiet speakers from clipping out. */
+  /** WebRTC auto gain control — same caveat as above. */
   auto_gain_control: boolean;
+  /** Selected whisper model name (e.g. "tiny.en", "base.en"). Resolves
+   *  to `~/.anyai/whisper/ggml-{name}.bin` at runtime. */
+  whisper_model: string;
 }
 
 export interface Config {

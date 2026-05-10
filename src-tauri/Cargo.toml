@@ -41,6 +41,15 @@ sha2 = "0.10"
 hex = "0.4"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
+# Local transcription stack. whisper-rs builds whisper.cpp from source via
+# its build.rs (needs cmake + a C++ compiler at build time, no prebuilt
+# binaries shipped). cpal handles cross-platform audio capture (CoreAudio /
+# WASAPI / ALSA on macOS / Windows / Linux). All audio + ASR work runs
+# in-process; nothing is sent over the network at runtime.
+whisper-rs = { version = "0.13", default-features = false }
+cpal = "0.15"
+crossbeam-channel = "0.5"
+
 [profile.release]
 panic = "abort"
 codegen-units = 1
