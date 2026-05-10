@@ -5,6 +5,12 @@
   import { loadConfig, saveConfig } from "../../config";
   import type { HardwareProfile, OllamaModel } from "../../types";
 
+  interface WhisperInfo {
+    name: string;
+    installed: boolean;
+    installed_size_bytes: number | null;
+  }
+
   type Tab = "providers" | "families" | "models" | "storage" | "updates";
 
   let { setActive } = $props<{ setActive: (tab: Tab) => void }>();
@@ -27,14 +33,28 @@
 
   onMount(async () => {
     try {
-      const [pulled, hw, config, backlog] = await Promise.all([
+      const [pulled, whisper, hw, config, backlog] = await Promise.all([
         invoke<OllamaModel[]>("ollama_list_models").catch(() => [] as OllamaModel[]),
+        invoke<WhisperInfo[]>("whisper_models_list").catch(() => [] as WhisperInfo[]),
         invoke<HardwareProfile>("detect_hardware").catch(() => null),
         loadConfig(),
         invoke<number>("transcribe_buffer_size_bytes").catch(() => 0),
       ]);
-      totalBytes = pulled.reduce((acc, m) => acc + m.size, 0);
-      modelCount = pulled.length;
+      // Whisper models live under ~/.anyai/whisper/, not in Ollama's library,
+      // so the on-disk total has to sum both backends or it under-reports
+      // every transcribe install. Only count installed entries with a known
+      // size — pending downloads and unknown-size rows would inflate the
+      // total without representing real bytes on disk.
+      const ollamaBytes = pulled.reduce((acc, m) => acc + m.size, 0);
+      const whisperInstalled = whisper.filter(
+        (w) => w.installed && (w.installed_size_bytes ?? 0) > 0,
+      );
+      const whisperBytes = whisperInstalled.reduce(
+        (acc, w) => acc + (w.installed_size_bytes ?? 0),
+        0,
+      );
+      totalBytes = ollamaBytes + whisperBytes;
+      modelCount = pulled.length + whisperInstalled.length;
       diskFreeGb = hw?.disk_free_gb ?? null;
       transcribeBacklogBytes = backlog;
       conversationDir = config.conversation_dir ?? "";
@@ -104,7 +124,7 @@
   {#if loading}
     <p class="loading">Loading…</p>
   {:else}
-    <div class="cards">
+    <div class="cards scroll-fade">
       <div class="card">
         <div class="card-row">
           <div class="card-info">
@@ -186,7 +206,7 @@
   .lede { font-size: .78rem; color: #888; line-height: 1.5; }
   .lede code { font-family: monospace; font-size: .76rem; color: #aaa; background: #1a1a22; padding: 0 .25rem; border-radius: 3px; }
 
-  .cards { flex: 1; overflow-y: scroll; padding: .75rem; display: flex; flex-direction: column; gap: .6rem; min-height: 0; }
+  .cards { flex: 1; overflow-y: scroll; padding: .75rem; display: flex; flex-direction: column; gap: .6rem; min-height: 0; --scroll-fade-bg: #111; }
   .card {
     border: 1px solid #1e1e1e;
     background: #131318;

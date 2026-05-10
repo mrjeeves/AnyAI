@@ -60,7 +60,7 @@
     </p>
   </div>
 
-  <div class="list">
+  <div class="list scroll-fade">
     {#each providers as p}
       <div class="item" class:active={p.name === activeProvider}>
         <button class="item-name" onclick={() => switchProvider(p.name)}>
@@ -93,7 +93,7 @@
   .head { padding: .75rem 1rem; border-bottom: 1px solid #1e1e1e; flex-shrink: 0; }
   .lede { font-size: .78rem; color: #888; line-height: 1.5; }
   .lede strong { color: #ccc; font-weight: 600; }
-  .list { flex: 1; overflow-y: auto; padding: .5rem; display: flex; flex-direction: column; gap: .25rem; min-height: 0; }
+  .list { flex: 1; overflow-y: auto; padding: .5rem; display: flex; flex-direction: column; gap: .25rem; min-height: 0; --scroll-fade-bg: #111; }
   .item {
     display: flex; align-items: stretch; gap: .4rem;
     padding: .35rem .5rem; border-radius: 6px;
