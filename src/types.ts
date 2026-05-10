@@ -13,9 +13,15 @@ export interface HardwareProfile {
 
 export type Mode = "text" | "vision" | "code" | "transcribe";
 
+export type ModelRuntime = "ollama" | "whisper";
+
 export interface ManifestTier {
   min_vram_gb: number;
   min_ram_gb?: number;
+  /** Approximate on-disk size of the model file(s) in MB. Surfaced in the
+   *  Settings → Family tier ladder so users can see what each rung costs
+   *  before committing. Optional: tiers without it just hide the column. */
+  disk_mb?: number;
   model: string;
   fallback: string;
 }
@@ -23,6 +29,11 @@ export interface ManifestTier {
 export interface ManifestMode {
   label: string;
   input?: "audio";
+  /** Which runtime executes models in this mode. Defaults to "ollama"
+   *  (the LLM stack); transcribe modes set "whisper" so the resolver
+   *  knows the `model` strings name files under `~/.anyai/whisper/`
+   *  rather than Ollama tags. */
+  runtime?: ModelRuntime;
   tiers: ManifestTier[];
 }
 
@@ -85,14 +96,16 @@ export interface RemoteUiConfig {
   port: number;
 }
 
-/** Microphone + transcription settings used by transcribe mode. Audio
- *  capture runs through cpal on the Rust side; `device_name` is matched
- *  against `cpal::Device::name()`. Empty string = system default. */
+/** Microphone capture settings used by transcribe mode. Audio capture
+ *  runs through cpal on the Rust side; `device_name` is matched against
+ *  `cpal::Device::name()`. Empty string = system default. The whisper
+ *  model itself is picked by the active family's tier resolver — set
+ *  `mode_overrides.transcribe` to override (e.g. "small.en"). */
 export interface MicConfig {
   device_name: string;
   /** Target capture rate in Hz. 16000 is what whisper wants; the cpal
-   *  capture path resamples to 16k regardless, so this is just a hint to
-   *  any future browser-side fallback. */
+   *  capture path resamples to 16k regardless, so this is just a hint
+   *  to any future browser-side fallback. */
   sample_rate: number;
   /** WebRTC echo cancellation — only applies if a future build uses the
    *  WebView mic path; cpal doesn't expose an equivalent. */
@@ -101,9 +114,6 @@ export interface MicConfig {
   noise_suppression: boolean;
   /** WebRTC auto gain control — same caveat as above. */
   auto_gain_control: boolean;
-  /** Selected whisper model name (e.g. "tiny.en", "base.en"). Resolves
-   *  to `~/.anyai/whisper/ggml-{name}.bin` at runtime. */
-  whisper_model: string;
 }
 
 export interface Config {

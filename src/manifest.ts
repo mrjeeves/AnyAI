@@ -1,7 +1,14 @@
 import { fetch } from "@tauri-apps/plugin-http";
 import { readTextFile, writeTextFile, exists, mkdir } from "@tauri-apps/plugin-fs";
 import { homeDir } from "@tauri-apps/api/path";
-import type { Manifest, ManifestFamily, HardwareProfile, Mode } from "./types";
+import type {
+  Manifest,
+  ManifestFamily,
+  ManifestTier,
+  ModelRuntime,
+  HardwareProfile,
+  Mode,
+} from "./types";
 import BUNDLED_MANIFEST_JSON from "../manifests/default.json";
 
 const DEFAULT_TTL_MINUTES = 360;
@@ -149,6 +156,64 @@ export function pickFamily(manifest: Manifest, requested?: string): { name: stri
   return { name: keys[0], family: manifest.families[keys[0]] };
 }
 
+/** Detailed resolution result. `model` is the bare tag/name (e.g.
+ *  `gemma4:e2b` or `tiny.en`); `runtime` tells the caller which engine
+ *  to use. The picked tier comes through too so callers can show
+ *  hardware cost in the UI. */
+export interface ResolvedModel {
+  model: string;
+  runtime: ModelRuntime;
+  /** The matched tier, or null if the resolver fell back to the bottom
+   *  of the ladder without any min_*_gb threshold being satisfied. */
+  tier: ManifestTier | null;
+  /** Whether the model came from `mode_overrides` rather than the
+   *  hardware-walked tier ladder. */
+  override: boolean;
+}
+
+export function resolveModelEx(
+  hardware: HardwareProfile,
+  manifest: Manifest,
+  mode: Mode,
+  modeOverrides?: Partial<Record<Mode, string | null>>,
+  familyName?: string,
+): ResolvedModel {
+  const picked = pickFamily(manifest, familyName);
+  const family = picked?.family;
+  const modeSpec = family
+    ? (family.modes[mode] ?? family.modes[family.default_mode])
+    : null;
+  const runtime: ModelRuntime = modeSpec?.runtime ?? "ollama";
+
+  const override = modeOverrides?.[mode];
+  if (override) {
+    return { model: override, runtime, tier: null, override: true };
+  }
+
+  if (!modeSpec) {
+    return { model: "tinyllama", runtime: "ollama", tier: null, override: false };
+  }
+
+  const vram = effectiveVramGb(hardware);
+  const ram = hardware.ram_gb;
+
+  for (const tier of modeSpec.tiers) {
+    if (vram >= tier.min_vram_gb || ram >= (tier.min_ram_gb ?? 0)) {
+      return { model: tier.model, runtime, tier, override: false };
+    }
+  }
+  const last = modeSpec.tiers.at(-1) ?? null;
+  return {
+    model: last?.model ?? "tinyllama",
+    runtime,
+    tier: last,
+    override: false,
+  };
+}
+
+/** Backwards-compatible string-only resolution used by call sites that
+ *  don't need the runtime/tier breakdown. New code should prefer
+ *  `resolveModelEx`. */
 export function resolveModel(
   hardware: HardwareProfile,
   manifest: Manifest,
@@ -156,25 +221,7 @@ export function resolveModel(
   modeOverrides?: Partial<Record<Mode, string | null>>,
   familyName?: string,
 ): string {
-  const override = modeOverrides?.[mode];
-  if (override) return override;
-
-  const picked = pickFamily(manifest, familyName);
-  if (!picked) return "tinyllama";
-
-  const { family } = picked;
-  const modeSpec = family.modes[mode] ?? family.modes[family.default_mode];
-  if (!modeSpec) return "tinyllama";
-
-  const vram = effectiveVramGb(hardware);
-  const ram = hardware.ram_gb;
-
-  for (const tier of modeSpec.tiers) {
-    if (vram >= tier.min_vram_gb || ram >= (tier.min_ram_gb ?? 0)) {
-      return tier.model;
-    }
-  }
-  return modeSpec.tiers.at(-1)!.model;
+  return resolveModelEx(hardware, manifest, mode, modeOverrides, familyName).model;
 }
 
 /**
@@ -207,19 +254,20 @@ export function allRecommendedModels(manifest: Manifest): Set<string> {
   return models;
 }
 
-/** Modes a specific family in a manifest defines tiers for. Transcribe
- *  rides on a separate runtime (whisper-rs, models under
- *  `~/.anyai/whisper/`) so it's always available regardless of whether
- *  the family has Ollama-shaped tiers for it — manifest tiers for
- *  transcribe would falsely advertise Ollama tags that don't exist. */
+/** Modes a specific family in a manifest defines tiers for. Now driven
+ *  purely by the manifest — transcribe lives there too (with
+ *  `runtime: "whisper"`) so callers don't need to special-case it. */
 export function familyModes(family: ManifestFamily): Set<Mode> {
   const out = new Set<Mode>();
-  for (const m of ["text", "vision", "code"] as Mode[]) {
+  for (const m of ["text", "vision", "code", "transcribe"] as Mode[]) {
     if (family.modes[m]) out.add(m);
   }
-  // Transcribe is built-in: whisper-rs ships with the binary and the
-  // model lives under ~/.anyai/whisper/. Surface it regardless of the
-  // family's Ollama tier table.
-  out.add("transcribe");
   return out;
+}
+
+/** True if a mode resolves to whisper-rs (rather than Ollama) under the
+ *  active family. Lets the model-pull / FirstRun guards short-circuit
+ *  without re-running the full resolver. */
+export function isWhisperMode(family: ManifestFamily, mode: Mode): boolean {
+  return family.modes[mode]?.runtime === "whisper";
 }

@@ -8,7 +8,7 @@
   import Sidebar from "./Sidebar.svelte";
   import { loadConfig, updateConfig } from "../config";
   import { getActiveManifest } from "../providers";
-  import { resolveModel, pickFamily, familyModes } from "../manifest";
+  import { resolveModelEx, pickFamily, familyModes } from "../manifest";
   import { runCleanup } from "../model-lifecycle";
   import { onModeSwap } from "../watcher";
   import {
@@ -98,25 +98,23 @@
   ): Set<Mode> {
     if (!manifest) return new Set(["text", "vision", "code", "transcribe"]);
     const picked = pickFamily(manifest, familyName);
-    if (!picked) return new Set(["transcribe"]);
+    if (!picked) return new Set();
     return familyModes(picked.family);
   }
 
-  /** What to display in the status bar / pass downstream as the
-   *  "active model". Transcribe rides on whisper-rs (models live under
-   *  `~/.anyai/whisper/`), so its display tag comes from MicConfig
-   *  rather than the manifest's Ollama tier table. */
+  /** What to display in the status bar / pass downstream as the "active
+   *  model". The manifest now declares the runtime per mode, so
+   *  transcribe and text both flow through the same resolver — we just
+   *  prefix whisper picks so the UI can't confuse `tiny.en` (a whisper
+   *  filename) with an Ollama tag. */
   function displayModelFor(
     mode: Mode,
     hw: HardwareProfile,
     manifest: Awaited<ReturnType<typeof getActiveManifest>>,
     config: Awaited<ReturnType<typeof loadConfig>>,
   ): string {
-    if (mode === "transcribe") {
-      const m = config.mic?.whisper_model || "tiny.en";
-      return `whisper:${m}`;
-    }
-    return resolveModel(hw, manifest, mode, config.mode_overrides, config.active_family);
+    const r = resolveModelEx(hw, manifest, mode, config.mode_overrides, config.active_family);
+    return r.runtime === "whisper" ? `whisper:${r.model}` : r.model;
   }
 
   async function refreshConversations() {
@@ -142,16 +140,23 @@
       const picked = pickFamily(manifest, config.active_family);
       activeFamilyName = picked?.name ?? manifest.default_family ?? "";
       supportedModes = modesForActiveFamily(manifest, activeFamilyName);
-      activeModel = displayModelFor(activeMode, hw, manifest, config);
+      const activeResolved = resolveModelEx(
+        hw,
+        manifest,
+        activeMode,
+        config.mode_overrides,
+        activeFamilyName,
+      );
+      activeModel =
+        activeResolved.runtime === "whisper"
+          ? `whisper:${activeResolved.model}`
+          : activeResolved.model;
 
-      // Transcribe rides on whisper-rs / cpal — there's no Ollama model
-      // to pull for it. Boot straight into chat so the user sees the
-      // transcribe view; whisper model presence is checked at Record-time
-      // by TranscribeView, which deep-links to Settings → Transcription
-      // when the configured model isn't installed.
-      if (activeMode === "transcribe") {
-        // Best-effort: still warm Ollama if it happens to be present, so
-        // a quick mode switch back to text doesn't pay the cold-start.
+      // The pull guard only applies to Ollama-runtime modes. Whisper
+      // models live under `~/.anyai/whisper/` and are managed by
+      // Settings → Transcription; TranscribeView's pre-flight surfaces
+      // a deep-link if the picked model isn't installed yet.
+      if (activeResolved.runtime !== "ollama") {
         invoke<boolean>("ollama_installed")
           .then((installed) => {
             if (installed) invoke("ollama_ensure_running").catch(() => {});
@@ -165,7 +170,7 @@
         } else {
           // Check if the model needs pulling
           const pulled = await invoke<Array<{ name: string }>>("ollama_list_models");
-          const hasCurrent = pulled.some((m) => m.name === activeModel);
+          const hasCurrent = pulled.some((m) => m.name === activeResolved.model);
           if (!hasCurrent) {
             view = "first-run";
           } else {

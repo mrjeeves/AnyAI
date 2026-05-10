@@ -2,6 +2,10 @@
   import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { getActiveManifest } from "../../providers";
+  import { resolveModelEx } from "../../manifest";
+  import { loadConfig, updateConfig } from "../../config";
+  import type { HardwareProfile } from "../../types";
 
   interface WhisperModelInfo {
     name: string;
@@ -24,15 +28,57 @@
   let pulling = $state<Record<string, PullProgress>>({});
   let unlisteners: UnlistenFn[] = [];
 
+  /** What the family/tier resolver would pick on this hardware right now,
+   *  and what (if anything) the user has set as `mode_overrides.transcribe`.
+   *  Both surface in the UI so the user knows what's automatic vs. manual. */
+  let recommended = $state<string>("");
+  let recommendedSource = $state<"family" | "override">("family");
+  let activeFamily = $state("");
+  let override = $state<string>("");
+
   onMount(async () => {
     try {
-      models = await invoke<WhisperModelInfo[]>("whisper_models_list");
+      const [list, manifest, config, hw] = await Promise.all([
+        invoke<WhisperModelInfo[]>("whisper_models_list"),
+        getActiveManifest(),
+        loadConfig(),
+        invoke<HardwareProfile>("detect_hardware"),
+      ]);
+      models = list;
+      activeFamily = config.active_family;
+      override = config.mode_overrides.transcribe ?? "";
+      const r = resolveModelEx(hw, manifest, "transcribe", config.mode_overrides, activeFamily);
+      recommended = r.model;
+      recommendedSource = r.override ? "override" : "family";
     } catch (e) {
       error = String(e);
     } finally {
       loading = false;
     }
   });
+
+  async function setOverride(name: string) {
+    const next = name || null;
+    override = name;
+    const cfg = await loadConfig();
+    await updateConfig({
+      mode_overrides: { ...cfg.mode_overrides, transcribe: next },
+    });
+    if (next) {
+      recommended = next;
+      recommendedSource = "override";
+    } else {
+      // Re-derive from the family/tier ladder.
+      const [manifest, config, hw] = await Promise.all([
+        getActiveManifest(),
+        loadConfig(),
+        invoke<HardwareProfile>("detect_hardware"),
+      ]);
+      const r = resolveModelEx(hw, manifest, "transcribe", config.mode_overrides, activeFamily);
+      recommended = r.model;
+      recommendedSource = "family";
+    }
+  }
 
   onDestroy(() => {
     for (const u of unlisteners) u();
@@ -107,6 +153,34 @@
     <p class="error">{error}</p>
   {:else}
     <div class="cards">
+      <div class="card">
+        <div class="card-title">Currently selected</div>
+        <div class="selected">
+          <div class="selected-row">
+            <code class="model-name big">{recommended || "—"}</code>
+            {#if recommendedSource === "override"}
+              <span class="badge override">manual override</span>
+            {:else}
+              <span class="badge auto">picked by {activeFamily} for your hardware</span>
+            {/if}
+          </div>
+          <label class="override-row">
+            <span class="override-label">Override pick:</span>
+            <select
+              value={override}
+              onchange={(e) => setOverride((e.currentTarget as HTMLSelectElement).value)}
+            >
+              <option value="">— use family / tier resolver —</option>
+              {#each models as m (m.name)}
+                <option value={m.name}>
+                  {m.name} {m.installed ? "(installed)" : ""}
+                </option>
+              {/each}
+            </select>
+          </label>
+        </div>
+      </div>
+
       <div class="card">
         <div class="card-title">Available models</div>
         <div class="rows">
@@ -203,6 +277,31 @@
     border-color: #1e3325;
     color: #6c6;
   }
+  .badge.override {
+    background: #2a1a14;
+    border-color: #4a3325;
+    color: #d49a3b;
+  }
+  .badge.auto {
+    background: #14182a;
+    border-color: #1e2545;
+    color: #8a8af0;
+  }
+  .selected { display: flex; flex-direction: column; gap: .55rem; }
+  .selected-row { display: flex; align-items: center; gap: .55rem; flex-wrap: wrap; }
+  .model-name.big { font-size: 1rem; color: #e8e8e8; }
+  .override-row { display: flex; align-items: center; gap: .55rem; flex-wrap: wrap; }
+  .override-label { font-size: .76rem; color: #888; }
+  .override-row select {
+    background: #0f0f12;
+    color: #e8e8e8;
+    border: 1px solid #2a2a2a;
+    border-radius: 6px;
+    padding: .3rem .4rem;
+    font-size: .8rem;
+    font-family: inherit;
+  }
+  .override-row select:focus { outline: none; border-color: #6e6ef7; }
   .row-actions { display: flex; align-items: center; gap: .5rem; }
   .link-btn {
     background: none; border: 1px solid #2a2a3a; color: #6e6ef7;

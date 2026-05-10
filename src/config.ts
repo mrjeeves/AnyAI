@@ -41,7 +41,6 @@ const DEFAULT_MIC: MicConfig = {
   echo_cancellation: true,
   noise_suppression: true,
   auto_gain_control: true,
-  whisper_model: "tiny.en",
 };
 
 const DEFAULT_CONFIG: Config = {
@@ -128,7 +127,7 @@ function mergeDefaults(raw: Record<string, unknown>): Config {
     },
     mic: {
       ...DEFAULT_MIC,
-      ...((raw as { mic?: Partial<MicConfig> }).mic ?? {}),
+      ...((raw as { mic?: Partial<MicConfig> & { whisper_model?: string } }).mic ?? {}),
     },
     mode_overrides: (raw as { mode_overrides?: Config["mode_overrides"] }).mode_overrides ?? {},
     kept_models: (raw as { kept_models?: string[] }).kept_models ?? [],
@@ -139,6 +138,18 @@ function mergeDefaults(raw: Record<string, unknown>): Config {
   };
   // Strip removed legacy fields so they don't linger in the saved config.
   delete (merged as unknown as { sources?: unknown }).sources;
+  // `mic.whisper_model` was the v0.1.19 way to pick a transcribe model; the
+  // family/tier resolver now owns that decision (and `mode_overrides.transcribe`
+  // is the user-override path). If a legacy value is present, transplant it
+  // to `mode_overrides.transcribe` so the user's pick survives the migration.
+  const legacyMic = (raw as { mic?: { whisper_model?: string } }).mic;
+  if (legacyMic?.whisper_model && !merged.mode_overrides.transcribe) {
+    merged.mode_overrides = {
+      ...merged.mode_overrides,
+      transcribe: legacyMic.whisper_model,
+    };
+  }
+  delete (merged.mic as unknown as { whisper_model?: string }).whisper_model;
   // One-shot upgrade: seed tracked_modes from active_mode for legacy configs.
   if (!merged.tracked_modes || merged.tracked_modes.length === 0) {
     merged.tracked_modes = [merged.active_mode];
