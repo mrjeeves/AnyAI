@@ -13,6 +13,7 @@
   } from "../../model-lifecycle";
   import { getAllManifests } from "../../providers";
   import { loadConfig } from "../../config";
+  import { resolveModel } from "../../manifest";
   import type { HardwareProfile, Mode } from "../../types";
 
   type ModelMeta = Awaited<ReturnType<typeof getModelStatusWithMeta>>[number];
@@ -134,16 +135,28 @@
       // (regardless of which mode the user is currently in) — the picked
       // whisper model is one click away from being needed and it doesn't
       // appear in the ollama family tiers, so the activeMode probe alone
-      // misses it on every text/code/vision session.
+      // misses it on every text/code/vision session. We resolve directly
+      // against the active manifest rather than via lookupModelUsage so the
+      // transcribe pick from `shared_modes` (which most LLM families inherit
+      // rather than redeclare) is captured.
       if (hardware) {
-        try {
-          const probe = await lookupModelUsage("__probe__", hardware, activeMode);
-          if (probe.activeTag) lockSet.add(probe.activeTag);
-        } catch {}
-        try {
-          const probeT = await lookupModelUsage("__probe__", hardware, "transcribe");
-          if (probeT.activeTag) lockSet.add(probeT.activeTag);
-        } catch {}
+        const activeEntry = allManifests.find(
+          (e) => e.provider.name === config.active_provider,
+        );
+        if (activeEntry) {
+          for (const mode of [activeMode, "transcribe" as Mode]) {
+            try {
+              const tag = resolveModel(
+                hardware,
+                activeEntry.manifest,
+                mode,
+                config.mode_overrides,
+                config.active_family,
+              );
+              if (tag) lockSet.add(tag);
+            } catch {}
+          }
+        }
       }
 
       activeFamilyTags = lockSet;

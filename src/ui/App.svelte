@@ -762,27 +762,27 @@
      fully covering the viewport. */
   :global(*) {
     scrollbar-width: auto;
-    scrollbar-color: #4a4a5e #161616;
+    scrollbar-color: #6a6a85 #1a1a1a;
   }
   :global(*::-webkit-scrollbar) {
-    width: 12px;
-    height: 12px;
+    width: 14px;
+    height: 14px;
   }
   :global(*::-webkit-scrollbar-track) {
-    background: #161616;
-    border-left: 1px solid #1f1f1f;
+    background: #1a1a1a;
+    border-left: 1px solid #242428;
   }
   :global(*::-webkit-scrollbar-thumb) {
-    background: #4a4a5e;
-    border-radius: 6px;
-    border: 2px solid #161616;
-    min-height: 32px;
+    background: #6a6a85;
+    border-radius: 7px;
+    border: 1px solid #1a1a1a;
+    min-height: 36px;
   }
   :global(*::-webkit-scrollbar-thumb:hover) {
     background: #6e6ef7;
   }
   :global(*::-webkit-scrollbar-corner) {
-    background: #161616;
+    background: #1a1a1a;
   }
   .app {
     height: 100vh;
