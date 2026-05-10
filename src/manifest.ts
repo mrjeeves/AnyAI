@@ -59,6 +59,19 @@ function isStale(cachedAt: string, ttlMinutes: number): boolean {
   return (Date.now() - new Date(cachedAt).getTime()) / 60_000 > ttlMinutes;
 }
 
+/** Compare manifest schema versions. Newer-bundled means the binary
+ *  understands a manifest format the cached file might predate, so we
+ *  refuse to use the cache and re-fetch (or fall back to the bundled
+ *  copy). Versions are simple integers stringified — `parseInt` does
+ *  the right thing across "6" / "7" / "8" / "9" / "10". */
+function bundledVersionIsNewer(cached: Manifest | null | undefined): boolean {
+  if (!cached) return false;
+  const bundledV = parseInt((BUNDLED_MANIFEST_JSON as Manifest).version ?? "", 10);
+  const cachedV = parseInt(cached.version ?? "", 10);
+  if (Number.isNaN(bundledV) || Number.isNaN(cachedV)) return false;
+  return bundledV > cachedV;
+}
+
 async function fetchManifestRaw(url: string): Promise<Manifest> {
   const response = await fetch(url, { method: "GET", connectTimeout: 10000 });
   if (!response.ok) throw new Error(`HTTP ${response.status} fetching ${url}`);
@@ -72,14 +85,22 @@ async function fetchOne(url: string): Promise<Manifest> {
   const cached = await readCache(url);
   if (cached) {
     const ttl = cached.manifest.ttl_minutes ?? DEFAULT_TTL_MINUTES;
-    if (!isStale(cached.fetched_at, ttl)) return cached.manifest;
+    // Cache is OK if it's still fresh AND the bundled binary doesn't
+    // already know about a newer schema. The version-bump escape hatch
+    // keeps `just dev` rebuilds from staring at a stale cached manifest
+    // for up to TTL hours after bumping the manifest version.
+    if (!isStale(cached.fetched_at, ttl) && !bundledVersionIsNewer(cached.manifest)) {
+      return cached.manifest;
+    }
   }
   try {
     const manifest = await fetchManifestRaw(url);
     await writeCache(url, manifest);
     return manifest;
   } catch {
-    if (cached) return cached.manifest;
+    // Network failed — prefer the cache, but if our bundled is newer
+    // than the cache, the bundled manifest is the more accurate source.
+    if (cached && !bundledVersionIsNewer(cached.manifest)) return cached.manifest;
     return BUNDLED_MANIFEST_JSON as unknown as Manifest;
   }
 }
