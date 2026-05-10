@@ -41,21 +41,27 @@ install_linux_deps() {
       sudo apt-get update -qq
       # xdg-utils is required by Tauri's AppImage bundler (xdg-open ships
       # inside the AppImage); preinstalled on ubuntu-latest x86_64 runners
-      # but missing on ubuntu-24.04-arm and Raspberry Pi OS.
+      # but missing on ubuntu-24.04-arm and Raspberry Pi OS. cmake +
+      # libasound2-dev are needed by the local-transcription stack —
+      # whisper-rs builds whisper.cpp from source via cmake, and cpal
+      # links against ALSA on Linux.
       sudo apt-get install -y --no-install-recommends \
         libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
-        librsvg2-dev libssl-dev xdg-utils curl wget file build-essential pkg-config
+        librsvg2-dev libssl-dev xdg-utils curl wget file build-essential \
+        pkg-config cmake libasound2-dev
       ;;
     fedora|rhel|centos)
       log "Installing Tauri build deps (dnf)…"
       sudo dnf install -y \
         webkit2gtk4.1-devel gtk3-devel libappindicator-gtk3-devel \
-        librsvg2-devel openssl-devel curl wget file gcc gcc-c++ make pkgconf-pkg-config
+        librsvg2-devel openssl-devel curl wget file gcc gcc-c++ make \
+        pkgconf-pkg-config cmake alsa-lib-devel
       ;;
     arch|manjaro)
       log "Installing Tauri build deps (pacman)…"
       sudo pacman -S --needed --noconfirm \
-        webkit2gtk-4.1 gtk3 libayatana-appindicator librsvg openssl curl wget file base-devel
+        webkit2gtk-4.1 gtk3 libayatana-appindicator librsvg openssl curl \
+        wget file base-devel cmake alsa-lib
       ;;
     *)
       warn "Unrecognised Linux distro (${ID:-?}). Install Tauri deps manually:"
@@ -71,6 +77,13 @@ install_macos_deps() {
   fi
   if ! have brew; then
     warn "Homebrew not found. Install from https://brew.sh and re-run."
+    return
+  fi
+  # cmake is required by whisper-rs's build.rs (it builds whisper.cpp from
+  # source). Skipped if already present so re-runs stay fast.
+  if ! have cmake; then
+    log "Installing cmake (needed by whisper-rs)…"
+    brew install cmake
   fi
 }
 

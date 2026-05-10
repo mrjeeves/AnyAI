@@ -961,10 +961,15 @@ The `manifests/` cache stores one entry per URL. When a manifest reached via an 
 - [Node.js](https://nodejs.org) 18+
 - [pnpm](https://pnpm.io) 8+
 - [Tauri CLI v2](https://tauri.app): `cargo install tauri-cli`
+- `cmake` — whisper-rs builds whisper.cpp from source for local transcription
 
-**Linux:** `sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev`
+**Linux:** `sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev libasound2-dev cmake`
+(`libasound2-dev` is the ALSA dev headers cpal links against for mic capture.)
 
-**macOS:** Xcode Command Line Tools (`xcode-select --install`)
+**macOS:** Xcode Command Line Tools (`xcode-select --install`) and `brew install cmake`
+
+**Windows:** WebView2 (auto-installed by `bootstrap.ps1`) and CMake
+(`winget install Kitware.CMake`)
 
 ### Build
 

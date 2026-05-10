@@ -54,6 +54,15 @@ if (-not $webView2) {
     winget install --id Microsoft.EdgeWebView2Runtime --silent --accept-source-agreements --accept-package-agreements
 }
 
+# cmake is required by whisper-rs's build.rs (it builds whisper.cpp from
+# source for local transcription). Visual Studio Build Tools provide the
+# C++ toolchain whisper.cpp needs at link time.
+if (-not (Have "cmake")) {
+    Log "Installing CMake (needed by whisper-rs)…"
+    winget install --id Kitware.CMake --silent --accept-source-agreements --accept-package-agreements
+    $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+}
+
 Log "Installing tauri-cli@^2…"
 cargo install tauri-cli --version "^2" --locked
 
