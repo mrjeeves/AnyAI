@@ -29,6 +29,17 @@
   let testCtx: AudioContext | null = null;
   let testRaf = 0;
 
+  /** True when the WebView exposes the standard mediaDevices API. The Tauri
+   *  WebKitGTK / WKWebView builds don't always — when this is false we hide
+   *  the Test button and surface an explanatory note instead of letting the
+   *  user click into a TypeError. */
+  const hasMediaDevices =
+    typeof navigator !== "undefined" &&
+    !!navigator.mediaDevices &&
+    typeof navigator.mediaDevices.enumerateDevices === "function";
+  const canPromptMic =
+    hasMediaDevices && typeof navigator.mediaDevices.getUserMedia === "function";
+
   onMount(async () => {
     try {
       const [hw, config] = await Promise.all([
@@ -38,10 +49,16 @@
       hardware = hw;
       conversationDir = config.conversation_dir ?? "";
       mic = { ...config.mic };
-      // If the OS already granted access in a previous session, the device
-      // list comes back populated with labels — list it eagerly so the
-      // dropdown shows real device names instead of "Microphone (default)".
-      await refreshDevices(false);
+      if (hasMediaDevices) {
+        // If the OS already granted access in a previous session, the device
+        // list comes back populated with labels — list it eagerly so the
+        // dropdown shows real device names instead of "Microphone (default)".
+        await refreshDevices(false);
+      } else {
+        micError =
+          "This build of the WebView doesn't expose audio devices. " +
+          "Live device listing is unavailable until native capture lands.";
+      }
     } catch (e) {
       error = String(e);
     } finally {
@@ -55,8 +72,9 @@
    *  call getUserMedia to coerce the OS permission dialog — without that the
    *  enumerated MediaDeviceInfo entries come back with empty labels. */
   async function refreshDevices(prompt: boolean) {
+    if (!hasMediaDevices) return;
     try {
-      if (prompt) {
+      if (prompt && canPromptMic) {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         // Drop the temp stream straight away — we only needed it to unlock
         // the device labels. The Test button opens its own stream.
@@ -97,6 +115,12 @@
 
   async function startTest() {
     if (!mic) return;
+    if (!canPromptMic) {
+      micError =
+        "This WebView build can't open the microphone. Settings will still " +
+        "save, but the live test isn't available here.";
+      return;
+    }
     try {
       const constraints: MediaStreamConstraints = {
         audio: {
@@ -284,11 +308,17 @@
             <div class="full">
               <dt>Device</dt>
               <dd>
-                {#if micDevices.length === 0}
-                  <button class="link-btn" onclick={() => refreshDevices(true)}>
-                    Allow microphone access
-                  </button>
-                  <span class="dim">to list devices</span>
+                {#if !hasMediaDevices}
+                  <span class="dim">Device listing isn't available in this WebView.</span>
+                {:else if micDevices.length === 0}
+                  {#if canPromptMic}
+                    <button class="link-btn" onclick={() => refreshDevices(true)}>
+                      Allow microphone access
+                    </button>
+                    <span class="dim">to list devices</span>
+                  {:else}
+                    <span class="dim">No devices reported.</span>
+                  {/if}
                 {:else}
                   <select
                     value={mic.device_id}
@@ -321,19 +351,21 @@
               </dd>
             </div>
 
-            <div>
-              <dt>Test level</dt>
-              <dd>
-                {#if testing}
-                  <button class="link-btn" onclick={stopTest}>Stop</button>
-                {:else}
-                  <button class="link-btn" onclick={startTest}>Test</button>
-                {/if}
-                <div class="vu" aria-label="Microphone level">
-                  <div class="vu-fill" style="width: {Math.round(level * 100)}%"></div>
-                </div>
-              </dd>
-            </div>
+            {#if canPromptMic}
+              <div>
+                <dt>Test level</dt>
+                <dd>
+                  {#if testing}
+                    <button class="link-btn" onclick={stopTest}>Stop</button>
+                  {:else}
+                    <button class="link-btn" onclick={startTest}>Test</button>
+                  {/if}
+                  <div class="vu" aria-label="Microphone level">
+                    <div class="vu-fill" style="width: {Math.round(level * 100)}%"></div>
+                  </div>
+                </dd>
+              </div>
+            {/if}
           </dl>
 
           <div class="toggles">

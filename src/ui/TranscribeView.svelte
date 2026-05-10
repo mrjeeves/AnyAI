@@ -65,6 +65,14 @@
   let raf = 0;
   let elapsedTimer: ReturnType<typeof setInterval> | null = null;
 
+  /** Guard for WebViews (notably WebKitGTK / older WKWebView) that don't
+   *  expose mediaDevices.getUserMedia. We disable the Record button and
+   *  surface the limitation instead of letting the click crash. */
+  const canCaptureMic =
+    typeof navigator !== "undefined" &&
+    !!navigator.mediaDevices &&
+    typeof navigator.mediaDevices.getUserMedia === "function";
+
   // Load (or clear) a session whenever the active id changes.
   $effect(() => {
     const id = conversationId;
@@ -136,6 +144,12 @@
   async function startRecording() {
     if (recording) return;
     micError = "";
+    if (!canCaptureMic) {
+      micError =
+        "This WebView build can't open the microphone. Native audio capture " +
+        "is on the roadmap — see Hardware → Microphone for status.";
+      return;
+    }
     try {
       const cfg = await loadConfig();
       const mic: MicConfig = cfg.mic;
@@ -306,7 +320,12 @@
         Stop
       </button>
     {:else}
-      <button class="record-btn" onclick={startRecording} title="Start recording">
+      <button
+        class="record-btn"
+        onclick={startRecording}
+        title={canCaptureMic ? "Start recording" : "Microphone capture unavailable in this build"}
+        disabled={!canCaptureMic}
+      >
         <span class="rec-circle" aria-hidden="true"></span>
         Record
       </button>
@@ -488,7 +507,8 @@
     cursor: pointer;
     transition: background .12s;
   }
-  .record-btn:hover { background: #5a5ae0; }
+  .record-btn:hover:not(:disabled) { background: #5a5ae0; }
+  .record-btn:disabled { opacity: .5; cursor: not-allowed; }
   .record-btn.stop { background: #b04444; }
   .record-btn.stop:hover { background: #c25050; }
 
