@@ -8,8 +8,8 @@ interface ExportBundle {
 
 export async function importFromUrl(url: string): Promise<{ providers: string[] }> {
   let json: string;
-  if (url.startsWith("anyai:import:")) {
-    json = base64Decode(url.slice("anyai:import:".length));
+  if (url.startsWith("myownllm:import:")) {
+    json = base64Decode(url.slice("myownllm:import:".length));
   } else {
     const resp = await fetch(url, { method: "GET", connectTimeout: 10000 });
     if (!resp.ok) throw new Error(`HTTP ${resp.status} fetching ${url}`);
@@ -42,7 +42,7 @@ export async function exportBundle(): Promise<ExportBundle> {
 
 export async function exportAsUrl(): Promise<string> {
   const bundle = await exportBundle();
-  return `anyai:import:${base64Encode(JSON.stringify(bundle))}`;
+  return `myownllm:import:${base64Encode(JSON.stringify(bundle))}`;
 }
 
 function base64Encode(str: string): string {

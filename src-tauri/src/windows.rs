@@ -5,7 +5,7 @@
 // 1. The release binary uses `windows_subsystem = "windows"` (GUI subsystem)
 //    so a console window doesn't flash when the GUI launches from Explorer.
 //    The cost is that cmd.exe / PowerShell don't get any stdio handles when
-//    they invoke `anyai.exe` for a CLI command — every println!/eprintln!
+//    they invoke `myownllm.exe` for a CLI command — every println!/eprintln!
 //    silently goes to the bit bucket. AttachConsole(ATTACH_PARENT_PROCESS) +
 //    SetStdHandle re-points stdio at the parent shell, which has to happen
 //    BEFORE the std streams are first touched (Rust caches the OS handle on

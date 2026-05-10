@@ -66,7 +66,7 @@ async function conversationsDir(): Promise<string> {
   const cfg = await loadConfig();
   if (cfg.conversation_dir) return cfg.conversation_dir;
   const home = await homeDir();
-  return `${home}/.anyai/conversations`;
+  return `${home}/.myownllm/conversations`;
 }
 
 async function ensureDir(): Promise<string> {

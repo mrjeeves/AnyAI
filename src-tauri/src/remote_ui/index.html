@@ -10,7 +10,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="format-detection" content="telephone=no" />
-    <title>AnyAI · Remote</title>
+    <title>MyOwnLLM · Remote</title>
     <style>
       :root {
         --bg: #0f0f0f;
@@ -425,7 +425,7 @@
     <div class="app">
       <header>
         <button class="hamburger" id="hamburger" aria-label="Show conversations" title="Conversations">☰</button>
-        <div class="brand">AnyAI <small>remote</small></div>
+        <div class="brand">MyOwnLLM <small>remote</small></div>
         <select class="model" id="model"></select>
       </header>
       <div class="layout">
@@ -439,7 +439,7 @@
         <div class="sidebar-scrim" id="sidebarScrim" hidden></div>
         <main id="log">
           <div class="empty" id="empty">
-            You're chatting with this AnyAI instance over the LAN.<br />
+            You're chatting with this MyOwnLLM instance over the LAN.<br />
             Send a message to start.
           </div>
         </main>
@@ -451,7 +451,7 @@
     </div>
     <script>
       const SESSION_ID = (() => {
-        const k = "anyai_remote_session";
+        const k = "myownllm_remote_session";
         let v = sessionStorage.getItem(k);
         if (!v) {
           v = "remote-" + Math.random().toString(36).slice(2, 10) + "-" + Date.now().toString(36);
@@ -541,8 +541,8 @@
           }
         } catch {
           const o = document.createElement("option");
-          o.value = "anyai-text";
-          o.textContent = "anyai · text";
+          o.value = "myownllm-text";
+          o.textContent = "myownllm · text";
           modelSel.appendChild(o);
         }
       }
@@ -739,7 +739,7 @@
         const slot = appendAssistantBubble();
         let assistantContent = "";
         let assistantThinking = "";
-        const modelAtSend = modelSel.value || "anyai-text";
+        const modelAtSend = modelSel.value || "myownllm-text";
         setSending(true);
         await streamChat(
           {

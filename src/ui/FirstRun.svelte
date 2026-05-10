@@ -144,7 +144,7 @@
     }
 
     if (whisperModel) {
-      const event = `anyai://whisper-pull/${whisperModel}`;
+      const event = `myownllm://whisper-pull/${whisperModel}`;
       unlisteners.push(
         await listen<WhisperPullEvent>(event, (e) => {
           if (!whisperProgress) return;
@@ -292,7 +292,7 @@
 
 <div class="first-run">
   <div class="content">
-    <h1>AnyAI</h1>
+    <h1>MyOwnLLM</h1>
 
     {#if hardware}
       <p class="hw">

@@ -31,7 +31,7 @@ export interface ManifestMode {
   input?: "audio";
   /** Which runtime executes models in this mode. Defaults to "ollama"
    *  (the LLM stack); transcribe modes set "whisper" so the resolver
-   *  knows the `model` strings name files under `~/.anyai/whisper/`
+   *  knows the `model` strings name files under `~/.myownllm/whisper/`
    *  rather than Ollama tags. */
   runtime?: ModelRuntime;
   tiers: ManifestTier[];
@@ -97,7 +97,7 @@ export interface AutoUpdateConfig {
 }
 
 /** Optional in-process server that exposes a minimal browser shell over the
- *  LAN so phones / other machines can chat with this AnyAI instance. Off by
+ *  LAN so phones / other machines can chat with this MyOwnLLM instance. Off by
  *  default — turning it on binds 0.0.0.0:port. Single-user: the local Tauri
  *  UI is curtained off while a remote session is active. */
 export interface RemoteUiConfig {
@@ -133,8 +133,8 @@ export interface Config {
   kept_models: string[];
   mode_overrides: Partial<Record<Mode, string | null>>;
   tracked_modes: Mode[];
-  /** Where AnyAI persists conversations and generated artifacts. Defaults to
-   *  `~/.anyai/conversations/`. Stored as an absolute path so exported
+  /** Where MyOwnLLM persists conversations and generated artifacts. Defaults to
+   *  `~/.myownllm/conversations/`. Stored as an absolute path so exported
    *  configs are readable, though new machines re-default on first load. */
   conversation_dir: string;
   api: ApiConfig;

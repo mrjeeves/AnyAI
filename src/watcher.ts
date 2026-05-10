@@ -11,5 +11,5 @@ export interface ModeSwapEvent {
  * Returns an unsubscribe function.
  */
 export async function onModeSwap(handler: (e: ModeSwapEvent) => void): Promise<UnlistenFn> {
-  return listen<ModeSwapEvent>("anyai://mode-swap", (msg) => handler(msg.payload));
+  return listen<ModeSwapEvent>("myownllm://mode-swap", (msg) => handler(msg.payload));
 }

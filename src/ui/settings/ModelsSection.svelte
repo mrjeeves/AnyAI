@@ -225,7 +225,7 @@
         try { await unkeepModel(deleteTarget.name); } catch {}
       }
       // Route the delete to the right backend — whisper models live
-      // under `~/.anyai/whisper/`, not in Ollama's library.
+      // under `~/.myownllm/whisper/`, not in Ollama's library.
       if (deleteTarget.runtime === "whisper") {
         await invoke("whisper_model_remove", { name: deleteTarget.name });
       } else {
@@ -546,7 +546,7 @@
           {/each}
         </ul>
         <p class="confirm-warn-tail">
-          You can still delete it; AnyAI will re-pull when you switch.
+          You can still delete it; MyOwnLLM will re-pull when you switch.
         </p>
       {/if}
 

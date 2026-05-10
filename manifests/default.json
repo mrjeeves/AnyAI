@@ -1,5 +1,5 @@
 {
-  "name": "AnyAI Default",
+  "name": "MyOwnLLM Default",
   "version": "10",
   "ttl_minutes": 360,
   "default_family": "gemma4",

@@ -1,13 +1,13 @@
 #!/bin/sh
-# AnyAI end-user installer.
+# MyOwnLLM end-user installer.
 #
 # Tries (in order):
 #   1. Download a pre-built release binary from GitHub for the current platform.
 #   2. Fall back to building from source via scripts/bootstrap.sh.
 #
 # Usage:
-#   curl -fsSL https://anyai.run/install.sh | sh
-#   curl -fsSL https://anyai.run/install.sh | sh -s -- --run
+#   curl -fsSL https://myownllm.run/install.sh | sh
+#   curl -fsSL https://myownllm.run/install.sh | sh -s -- --run
 #   ./scripts/install.sh --dry-run
 #
 # This script is intentionally POSIX sh-compatible so that `curl … | sh` works
@@ -21,10 +21,10 @@ if (set -o pipefail) 2>/dev/null; then
   set -o pipefail
 fi
 
-REPO="${ANYAI_REPO:-mrjeeves/AnyAI}"
+REPO="${MYOWNLLM_REPO:-mrjeeves/MyOwnLLM}"
 DRY_RUN=false
 RUN_AFTER=false
-PREFIX_DIR="${ANYAI_PREFIX:-}"
+PREFIX_DIR="${MYOWNLLM_PREFIX:-}"
 FORCE_SOURCE=false
 
 for arg in "$@"; do
@@ -53,7 +53,7 @@ case "$ARCH_RAW" in
   aarch64|arm64) ARCH="aarch64" ;;
   *)             ARCH="$ARCH_RAW" ;;
 esac
-ASSET="anyai-${OS}-${ARCH}.tar.gz"
+ASSET="myownllm-${OS}-${ARCH}.tar.gz"
 
 # Pick install prefix. Prefer /usr/local/bin if writable; else ~/.local/bin.
 if [ -z "$PREFIX_DIR" ]; then
@@ -68,19 +68,19 @@ install_binary() {
   src="$1"
   mkdir -p "$PREFIX_DIR"
   if [ -w "$PREFIX_DIR" ]; then
-    install -m 0755 "$src" "$PREFIX_DIR/anyai"
+    install -m 0755 "$src" "$PREFIX_DIR/myownllm"
   else
-    sudo install -m 0755 "$src" "$PREFIX_DIR/anyai"
+    sudo install -m 0755 "$src" "$PREFIX_DIR/myownllm"
   fi
-  log "Installed: $PREFIX_DIR/anyai"
+  log "Installed: $PREFIX_DIR/myownllm"
 }
 
-# AnyAI is a Tauri app: every binary, including CLI subcommands, is dynamically
+# MyOwnLLM is a Tauri app: every binary, including CLI subcommands, is dynamically
 # linked against libwebkit2gtk-4.1.so.0 (Tauri's webview). On a fresh Linux box
 # without those system libs, the dynamic loader bails before main() runs and
 # the user sees:
-#   anyai: error while loading shared libraries: libwebkit2gtk-4.1.so.0: …
-# Even `anyai setup` can't recover from that — the binary never executes.
+#   myownllm: error while loading shared libraries: libwebkit2gtk-4.1.so.0: …
+# Even `myownllm setup` can't recover from that — the binary never executes.
 # Install the runtime libs at install time so the first launch just works.
 install_linux_runtime_deps() {
   [ "$OS" = "linux" ] || return 0
@@ -95,7 +95,7 @@ install_linux_runtime_deps() {
       sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends $pkgs
     else
       warn "Cannot run sudo non-interactively; skipping runtime-lib install."
-      warn "If 'anyai' fails with 'libwebkit2gtk-4.1.so.0: cannot open shared object file', run:"
+      warn "If 'myownllm' fails with 'libwebkit2gtk-4.1.so.0: cannot open shared object file', run:"
       warn "  sudo apt-get install -y $pkgs"
     fi
   elif command -v dnf >/dev/null 2>&1; then
@@ -116,7 +116,7 @@ install_linux_runtime_deps() {
     fi
   else
     warn "Unrecognized Linux distro — cannot auto-install runtime libs."
-    warn "If 'anyai' fails with 'libwebkit2gtk-4.1.so.0: cannot open shared object file',"
+    warn "If 'myownllm' fails with 'libwebkit2gtk-4.1.so.0: cannot open shared object file',"
     warn "install your distro's webkit2gtk-4.1, libayatana-appindicator3, and librsvg2 packages."
   fi
 }
@@ -127,7 +127,7 @@ ensure_on_path() {
   esac
 
   shell_name="$(basename "${SHELL:-bash}")"
-  marker="# added by anyai installer"
+  marker="# added by myownllm installer"
   case "$shell_name" in
     zsh)
       rc="$HOME/.zshrc"
@@ -198,7 +198,7 @@ try_release() {
     warn "No SHA256 sidecar; skipping integrity check."
   fi
   tar -xzf "$_TRY_RELEASE_TMP/$ASSET" -C "$_TRY_RELEASE_TMP"
-  install_binary "$_TRY_RELEASE_TMP/anyai"
+  install_binary "$_TRY_RELEASE_TMP/myownllm"
   _cleanup_try_release
   trap - EXIT INT TERM
   return 0
@@ -214,7 +214,7 @@ build_from_source() {
     repo_dir="$(pwd)"
     log "Using current directory as source: $repo_dir"
   else
-    repo_dir="$(mktemp -d)/AnyAI"
+    repo_dir="$(mktemp -d)/MyOwnLLM"
     log "Cloning into $repo_dir"
     if [ "$DRY_RUN" != "true" ]; then
       git clone --depth 1 "https://github.com/${REPO}.git" "$repo_dir"
@@ -226,7 +226,7 @@ build_from_source() {
   fi
   ( cd "$repo_dir" && bash scripts/bootstrap.sh )
   ( cd "$repo_dir" && pnpm install --frozen-lockfile && pnpm tauri build )
-  built="$repo_dir/src-tauri/target/release/anyai"
+  built="$repo_dir/src-tauri/target/release/myownllm"
   if [ ! -x "$built" ]; then
     err "Build did not produce $built"
     exit 1
@@ -248,8 +248,8 @@ if [ "$DRY_RUN" != "true" ]; then
 fi
 
 if [ "$RUN_AFTER" = "true" ] && [ "$DRY_RUN" != "true" ]; then
-  log "Launching anyai run…"
-  exec "$PREFIX_DIR/anyai" run
+  log "Launching myownllm run…"
+  exec "$PREFIX_DIR/myownllm" run
 fi
 
-log "Done. Try: anyai run | anyai serve | anyai preload text vision"
+log "Done. Try: myownllm run | myownllm serve | myownllm preload text vision"

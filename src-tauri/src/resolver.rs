@@ -15,11 +15,11 @@ use tokio::time::Duration;
 
 use crate::hardware::HardwareProfile;
 
-pub const VIRTUAL_PREFIX: &str = "anyai-";
+pub const VIRTUAL_PREFIX: &str = "myownllm-";
 pub const KNOWN_MODES: &[&str] = &["text", "vision", "code", "transcribe"];
 const DEFAULT_TTL_MIN: f64 = 360.0;
 const FALLBACK_MANIFEST_URL: &str =
-    "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/manifests/default.json";
+    "https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/manifests/default.json";
 
 /// Resolve a single mode against the active provider's manifest using current hardware.
 pub async fn resolve(mode: &str) -> Result<String> {
@@ -228,7 +228,7 @@ pub fn tags_in_manifest(manifest: &Value) -> Vec<String> {
     let mut out = Vec::new();
     let mut push_mode = |mode_spec: &Value| {
         // Cleanup is Ollama-only: skip non-Ollama runtimes (whisper
-        // models live under ~/.anyai/whisper/ and aren't reachable
+        // models live under ~/.myownllm/whisper/ and aren't reachable
         // from `ollama list` anyway).
         let runtime = mode_spec
             .get("runtime")
@@ -280,7 +280,7 @@ pub fn tracked_modes() -> Result<Vec<String>> {
     Ok(modes)
 }
 
-/// Translate a virtual model ID (e.g. "anyai-text") to its current resolved tag.
+/// Translate a virtual model ID (e.g. "myownllm-text") to its current resolved tag.
 /// Returns the input unchanged if it doesn't look like a virtual ID.
 pub async fn translate_virtual(requested: &str) -> Result<String> {
     if let Some(mode) = requested.strip_prefix(VIRTUAL_PREFIX) {
@@ -466,7 +466,7 @@ fn write_manifest_cache(url: &str, manifest: &Value) -> Result<()> {
 }
 
 fn manifest_cache_path(url: &str) -> Result<PathBuf> {
-    Ok(crate::anyai_dir()?
+    Ok(crate::myownllm_dir()?
         .join("cache/manifests")
         .join(format!("{:x}.json", djb2(url))))
 }
@@ -546,7 +546,7 @@ fn chrono_iso_now() -> String {
 // ---------------------------------------------------------------------------
 
 pub fn load_config_value() -> Result<Value> {
-    let path = crate::anyai_dir()?.join("config.json");
+    let path = crate::myownllm_dir()?.join("config.json");
     if !path.exists() {
         return Ok(default_config_value());
     }
@@ -556,7 +556,7 @@ pub fn load_config_value() -> Result<Value> {
 }
 
 pub fn save_config_value(config: &Value) -> Result<()> {
-    let path = crate::anyai_dir()?.join("config.json");
+    let path = crate::myownllm_dir()?.join("config.json");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -576,11 +576,11 @@ pub fn active_provider_url(config: &Value) -> Option<String> {
 }
 
 pub fn default_config_value() -> Value {
-    let conv_dir = crate::anyai_dir()
+    let conv_dir = crate::myownllm_dir()
         .map(|d| d.join("conversations").to_string_lossy().into_owned())
         .unwrap_or_default();
     serde_json::json!({
-        "active_provider": "AnyAI Default",
+        "active_provider": "MyOwnLLM Default",
         "active_family": "gemma4",
         "active_mode": "text",
         "model_cleanup_days": 1,
@@ -607,8 +607,8 @@ pub fn default_config_value() -> Value {
         },
         "providers": [
             {
-                "name": "AnyAI Default",
-                "url": "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/manifests/default.json"
+                "name": "MyOwnLLM Default",
+                "url": "https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/manifests/default.json"
             }
         ]
     })
@@ -617,7 +617,7 @@ pub fn default_config_value() -> Value {
 /// Shallow-merge missing top-level + nested-object keys from defaults so users
 /// upgrading from older configs don't see crashes on first load. Also seeds
 /// `tracked_modes` from `active_mode` for legacy configs, rewrites any saved
-/// `anyai.run` provider URLs to the canonical raw.githubusercontent.com URL
+/// `myownllm.run` provider URLs to the canonical raw.githubusercontent.com URL
 /// (the host they used to point to is no longer authoritative), and drops
 /// removed fields (e.g. the retired `sources`).
 pub fn merge_defaults(mut config: Value) -> Value {
@@ -643,7 +643,7 @@ pub fn merge_defaults(mut config: Value) -> Value {
             }
         }
     }
-    // Rewrite stale anyai.run provider URLs from pre-1.0 builds.
+    // Rewrite stale myownllm.run provider URLs from pre-1.0 builds.
     rewrite_legacy_provider_urls(&mut config);
     // One-shot upgrade: if tracked_modes is empty, seed from active_mode.
     let needs_seed = config["tracked_modes"]
@@ -660,7 +660,7 @@ pub fn merge_defaults(mut config: Value) -> Value {
     }
     // Fill conversation_dir on legacy configs (predates the Storage tab).
     if config["conversation_dir"].as_str().unwrap_or("").is_empty() {
-        if let Ok(d) = crate::anyai_dir() {
+        if let Ok(d) = crate::myownllm_dir() {
             config["conversation_dir"] =
                 serde_json::json!(d.join("conversations").to_string_lossy());
         }
@@ -669,7 +669,7 @@ pub fn merge_defaults(mut config: Value) -> Value {
 }
 
 const CANONICAL_DEFAULT_URL: &str =
-    "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/manifests/default.json";
+    "https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/manifests/default.json";
 
 fn rewrite_legacy_provider_urls(config: &mut Value) {
     let Some(arr) = config["providers"].as_array_mut() else {
@@ -679,12 +679,12 @@ fn rewrite_legacy_provider_urls(config: &mut Value) {
         let Some(url) = entry.get("url").and_then(|v| v.as_str()) else {
             continue;
         };
-        // Match by host so `anyai.run`, `www.anyai.run`, etc. all retarget.
+        // Match by host so `myownllm.run`, `www.myownllm.run`, etc. all retarget.
         let host_start = url.find("//").map(|i| i + 2).unwrap_or(0);
         let after_host = &url[host_start..];
         let host_end = after_host.find('/').unwrap_or(after_host.len());
         let host = &after_host[..host_end];
-        if host == "anyai.run" || host == "www.anyai.run" {
+        if host == "myownllm.run" || host == "www.myownllm.run" {
             entry["url"] = serde_json::json!(CANONICAL_DEFAULT_URL);
         }
     }

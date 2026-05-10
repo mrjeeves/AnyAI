@@ -4,15 +4,15 @@ import type { Config, ApiConfig, AutoUpdateConfig, RemoteUiConfig, MicConfig } f
 
 async function configPath(): Promise<string> {
   const home = await homeDir();
-  return `${home}/.anyai/config.json`;
+  return `${home}/.myownllm/config.json`;
 }
 
 /** Default location for persisted chats / artifacts. Lives under the same
- *  `~/.anyai/` tree as the rest of AnyAI's state so a single directory holds
+ *  `~/.myownllm/` tree as the rest of MyOwnLLM's state so a single directory holds
  *  everything the user might want to back up or wipe. */
 async function defaultConversationDir(): Promise<string> {
   const home = await homeDir();
-  return `${home}/.anyai/conversations`;
+  return `${home}/.myownllm/conversations`;
 }
 
 const DEFAULT_API: ApiConfig = {
@@ -44,7 +44,7 @@ const DEFAULT_MIC: MicConfig = {
 };
 
 const DEFAULT_CONFIG: Config = {
-  active_provider: "AnyAI Default",
+  active_provider: "MyOwnLLM Default",
   active_family: "gemma4",
   active_mode: "text",
   model_cleanup_days: 1,
@@ -59,8 +59,8 @@ const DEFAULT_CONFIG: Config = {
   mic: { ...DEFAULT_MIC },
   providers: [
     {
-      name: "AnyAI Default",
-      url: "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/manifests/default.json",
+      name: "MyOwnLLM Default",
+      url: "https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/manifests/default.json",
     },
   ],
 };
@@ -90,19 +90,19 @@ export async function loadConfig(): Promise<Config> {
   return _cached;
 }
 
-/** Pre-1.0 builds shipped this URL for the AnyAI Default provider. The host
- *  no longer serves the manifest; rewrite it on load so users with an older
- *  config don't see a dead URL in the Providers tab. Cheap; runs once per
- *  load and persists via saveConfig. */
-const LEGACY_ANYAI_RUN_HOST = "anyai.run";
+/** Pre-1.0 builds (when the project was named AnyAI) shipped this URL for the
+ *  Default provider. The host no longer serves the manifest; rewrite it on
+ *  load so users with an older config don't see a dead URL in the Providers
+ *  tab. Cheap; runs once per load and persists via saveConfig. */
+const LEGACY_MYOWNLLM_RUN_HOST = "anyai.run";
 const CANONICAL_DEFAULT_URL =
-  "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/manifests/default.json";
+  "https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/manifests/default.json";
 
 function rewriteLegacyProviderUrls(providers: Config["providers"]): Config["providers"] {
   return providers.map((p) => {
     try {
       const host = new URL(p.url).hostname;
-      if (host === LEGACY_ANYAI_RUN_HOST) {
+      if (host === LEGACY_MYOWNLLM_RUN_HOST) {
         return { ...p, url: CANONICAL_DEFAULT_URL };
       }
     } catch {

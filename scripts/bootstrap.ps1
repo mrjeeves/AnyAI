@@ -1,4 +1,4 @@
-# AnyAI dev bootstrap (Windows). Idempotent: re-running is a no-op.
+# MyOwnLLM dev bootstrap (Windows). Idempotent: re-running is a no-op.
 # Run from an elevated PowerShell prompt: `powershell -ExecutionPolicy Bypass -File scripts/bootstrap.ps1`
 
 $ErrorActionPreference = "Stop"

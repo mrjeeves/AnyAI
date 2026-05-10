@@ -1,12 +1,12 @@
-# AnyAI end-user installer (Windows).
+# MyOwnLLM end-user installer (Windows).
 #
 # Tries (in order):
 #   1. Download a pre-built release binary from GitHub for the current platform.
 #   2. Fall back to building from source via scripts/bootstrap.ps1.
 #
 # Usage (PowerShell):
-#   irm https://raw.githubusercontent.com/mrjeeves/AnyAI/main/scripts/install.ps1 | iex
-#   iex "& { $(irm https://raw.githubusercontent.com/mrjeeves/AnyAI/main/scripts/install.ps1) } -Run"
+#   irm https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/scripts/install.ps1 | iex
+#   iex "& { $(irm https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/scripts/install.ps1) } -Run"
 #   .\scripts\install.ps1 -DryRun
 
 [CmdletBinding()]
@@ -14,8 +14,8 @@ param(
     [switch]$DryRun,
     [switch]$Run,
     [switch]$FromSource,
-    [string]$Prefix = "$env:LOCALAPPDATA\Programs\AnyAI",
-    [string]$Repo = $(if ($env:ANYAI_REPO) { $env:ANYAI_REPO } else { "mrjeeves/AnyAI" })
+    [string]$Prefix = "$env:LOCALAPPDATA\Programs\MyOwnLLM",
+    [string]$Repo = $(if ($env:MYOWNLLM_REPO) { $env:MYOWNLLM_REPO } else { "mrjeeves/MyOwnLLM" })
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,16 +29,16 @@ $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
     "ARM64" { "aarch64" }
     default { $env:PROCESSOR_ARCHITECTURE.ToLower() }
 }
-$asset = "anyai-windows-$arch.zip"
+$asset = "myownllm-windows-$arch.zip"
 
 function Install-FromZip([string]$zipPath) {
     if (-not (Test-Path $Prefix)) {
         New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
     }
     Expand-Archive -Path $zipPath -DestinationPath $Prefix -Force
-    $exe = Join-Path $Prefix "anyai.exe"
+    $exe = Join-Path $Prefix "myownllm.exe"
     if (-not (Test-Path $exe)) {
-        throw "anyai.exe not found in $zipPath after extraction"
+        throw "myownllm.exe not found in $zipPath after extraction"
     }
     Log "Installed: $exe"
 
@@ -55,7 +55,7 @@ function Try-Release {
     $api = "https://api.github.com/repos/$Repo/releases/latest"
     Log "Looking up latest release: $api"
     try {
-        $release = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent" = "anyai-installer" }
+        $release = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent" = "myownllm-installer" }
     } catch {
         Warn "GitHub releases unreachable (or no release yet): $($_.Exception.Message)"
         return $false
@@ -69,7 +69,7 @@ function Try-Release {
     Log "Downloading $url"
     if ($DryRun) { Log "(dry-run) would download $url"; return $true }
 
-    $tmp = New-Item -ItemType Directory -Force -Path (Join-Path $env:TEMP "anyai-install-$([guid]::NewGuid())")
+    $tmp = New-Item -ItemType Directory -Force -Path (Join-Path $env:TEMP "myownllm-install-$([guid]::NewGuid())")
     try {
         $zip = Join-Path $tmp $asset
         Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
@@ -103,7 +103,7 @@ function Build-FromSource {
         $repoDir = (Get-Location).Path
         Log "Using current directory as source: $repoDir"
     } else {
-        $repoDir = Join-Path $env:TEMP "AnyAI-$([guid]::NewGuid())"
+        $repoDir = Join-Path $env:TEMP "MyOwnLLM-$([guid]::NewGuid())"
         Log "Cloning into $repoDir"
         if (-not $DryRun) { git clone --depth 1 "https://github.com/$Repo.git" $repoDir }
     }
@@ -114,7 +114,7 @@ function Build-FromSource {
         & powershell -ExecutionPolicy Bypass -File (Join-Path $repoDir "scripts\bootstrap.ps1")
         pnpm install --frozen-lockfile
         pnpm tauri build
-        $built = Join-Path $repoDir "src-tauri\target\release\anyai.exe"
+        $built = Join-Path $repoDir "src-tauri\target\release\myownllm.exe"
         if (-not (Test-Path $built)) {
             Err "Build did not produce $built"
             exit 1
@@ -122,8 +122,8 @@ function Build-FromSource {
         if (-not (Test-Path $Prefix)) {
             New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
         }
-        Copy-Item -Force $built (Join-Path $Prefix "anyai.exe")
-        Log "Installed: $(Join-Path $Prefix 'anyai.exe')"
+        Copy-Item -Force $built (Join-Path $Prefix "myownllm.exe")
+        Log "Installed: $(Join-Path $Prefix 'myownllm.exe')"
     } finally {
         Pop-Location
     }
@@ -134,10 +134,10 @@ if ($FromSource -or -not (Try-Release)) {
 }
 
 if ($Run -and -not $DryRun) {
-    Log "Launching anyai run…"
-    & (Join-Path $Prefix "anyai.exe") run
+    Log "Launching myownllm run…"
+    & (Join-Path $Prefix "myownllm.exe") run
     exit $LASTEXITCODE
 }
 
-Log "Done. Try: anyai run | anyai serve | anyai preload text vision"
+Log "Done. Try: myownllm run | myownllm serve | myownllm preload text vision"
 Log "Open a new terminal so the updated PATH takes effect."

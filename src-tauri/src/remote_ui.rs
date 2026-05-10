@@ -14,7 +14,7 @@
 //! remote session has heartbeated within `REMOTE_TIMEOUT`, `remote_active`
 //! flips to true; the GUI listens and curtains itself off.
 //!
-//! Single-user by design: AnyAI doesn't multiplex chats yet, so showing the
+//! Single-user by design: MyOwnLLM doesn't multiplex chats yet, so showing the
 //! local user a curtain prevents two people stomping on each other.
 
 use anyhow::{anyhow, Result};
@@ -179,7 +179,7 @@ pub fn set_active_conversation(id: Option<String>) {
 }
 
 /// Subscribe to active-conversation changes. main.rs bridges this to the
-/// `anyai://active-conversation-changed` Tauri event so the desktop UI
+/// `myownllm://active-conversation-changed` Tauri event so the desktop UI
 /// can react to switches the remote made without polling.
 pub fn subscribe_active_conversation() -> watch::Receiver<Option<String>> {
     state().conv_rx.clone()
@@ -423,7 +423,7 @@ async fn api_models() -> impl IntoResponse {
     for mode in crate::resolver::KNOWN_MODES {
         data.push(ModelEntry {
             id: format!("{}{}", crate::resolver::VIRTUAL_PREFIX, mode),
-            label: format!("anyai · {mode}"),
+            label: format!("myownllm · {mode}"),
         });
     }
     Json(json!({ "models": data }))

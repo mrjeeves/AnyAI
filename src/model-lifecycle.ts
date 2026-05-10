@@ -8,7 +8,7 @@ import type { HardwareProfile, ModelStatusCache, OllamaModel, Mode } from "./typ
 
 async function statusCachePath(): Promise<string> {
   const home = await homeDir();
-  return `${home}/.anyai/cache/model-status.json`;
+  return `${home}/.myownllm/cache/model-status.json`;
 }
 
 async function readStatusCache(): Promise<ModelStatusCache> {
@@ -267,7 +267,7 @@ export async function getModelStatusWithMeta(): Promise<ModelMeta[]> {
     runtime: "ollama",
   }));
 
-  // Whisper models live under ~/.anyai/whisper/. They're treated like
+  // Whisper models live under ~/.myownllm/whisper/. They're treated like
   // any other model in the unified Models list — the dual-download
   // behaviour means they're already part of the active family's pick
   // set, and users shouldn't need a separate page to see them.

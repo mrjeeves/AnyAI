@@ -1,4 +1,4 @@
-# AnyAI — one-command operations.
+# MyOwnLLM — one-command operations.
 # Install `just` (https://just.systems) then run `just setup` to get going.
 
 set shell := ["bash", "-cu"]
@@ -24,8 +24,8 @@ build:
 
 # Run the binary (build first if needed).
 run *ARGS:
-    @if [ -x src-tauri/target/release/anyai ]; then \
-        src-tauri/target/release/anyai {{ARGS}}; \
+    @if [ -x src-tauri/target/release/myownllm ]; then \
+        src-tauri/target/release/myownllm {{ARGS}}; \
     else \
         cargo run --release --manifest-path src-tauri/Cargo.toml -- {{ARGS}}; \
     fi

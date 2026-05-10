@@ -22,7 +22,7 @@ export interface PreloadOpts {
 export async function preloadModes(modes: Mode[], opts: PreloadOpts = {}): Promise<void> {
   let unlisten: UnlistenFn | null = null;
   if (opts.onEvent) {
-    unlisten = await listen<PreloadEvent>("anyai://preload-progress", (e) => {
+    unlisten = await listen<PreloadEvent>("myownllm://preload-progress", (e) => {
       opts.onEvent?.(e.payload);
     });
   }

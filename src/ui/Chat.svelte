@@ -242,7 +242,7 @@
     let assistantIdx = -1;
     try {
       unlisten = await listen<StreamFrame>(
-        `anyai://chat-stream/${streamId}`,
+        `myownllm://chat-stream/${streamId}`,
         (e) => {
           const frame = e.payload;
           if (frame.thinking_delta) {

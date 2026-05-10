@@ -120,24 +120,24 @@ jobs:
         shell: bash
         run: |
           set -e
-          BIN=src-tauri/target/${{ matrix.platform.target }}/release/anyai
+          BIN=src-tauri/target/${{ matrix.platform.target }}/release/myownllm
           if [[ "${{ runner.os }}" == "Windows" ]]; then BIN="${BIN}.exe"; fi
           if [[ ! -f "$BIN" ]]; then
             echo "binary not found at $BIN"; exit 1
           fi
           mkdir -p dist-bin
-          NAME="anyai-${{ matrix.platform.name }}"
+          NAME="myownllm-${{ matrix.platform.name }}"
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cp "$BIN" "dist-bin/anyai.exe"
+            cp "$BIN" "dist-bin/myownllm.exe"
             # chdir before hashing so the `.sha256` sidecar records just the
             # basename — matching how the GitHub asset is uploaded. Hashing
             # `dist-bin/<file>` from the repo root would bake `dist-bin/`
             # into the recorded filename and break self-update verification.
-            (cd dist-bin && 7z a "${NAME}.zip" anyai.exe)
+            (cd dist-bin && 7z a "${NAME}.zip" myownllm.exe)
             (cd dist-bin && (sha256sum "${NAME}.zip" || shasum -a 256 "${NAME}.zip") > "${NAME}.zip.sha256")
           else
-            cp "$BIN" "dist-bin/anyai"
-            tar -czf "dist-bin/${NAME}.tar.gz" -C dist-bin anyai
+            cp "$BIN" "dist-bin/myownllm"
+            tar -czf "dist-bin/${NAME}.tar.gz" -C dist-bin myownllm
             (cd dist-bin && (sha256sum "${NAME}.tar.gz" || shasum -a 256 "${NAME}.tar.gz") > "${NAME}.tar.gz.sha256")
           fi
 
@@ -145,7 +145,7 @@ jobs:
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
-            dist-bin/anyai-*
+            dist-bin/myownllm-*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

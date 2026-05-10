@@ -5,8 +5,8 @@
 //! tick, pulls any new tags, and invokes the model-status recompute so the eviction
 //! clock starts on tags that just became unrecommended.
 //!
-//! Process safety: a single advisory file lock at `~/.anyai/watcher.lock` prevents two
-//! processes (e.g. GUI + a separate `anyai serve`) from both ticking. First wins.
+//! Process safety: a single advisory file lock at `~/.myownllm/watcher.lock` prevents two
+//! processes (e.g. GUI + a separate `myownllm serve`) from both ticking. First wins.
 
 use anyhow::Result;
 use std::sync::OnceLock;
@@ -31,7 +31,7 @@ pub fn spawn_background() -> bool {
     drop(guard);
 
     if !acquire_process_lock() {
-        eprintln!("watcher: another anyai process holds the watcher lock; skipping.");
+        eprintln!("watcher: another myownllm process holds the watcher lock; skipping.");
         return false;
     }
 
@@ -66,7 +66,7 @@ async fn tick() -> Result<()> {
 fn recompute_status_from_disk() -> Result<()> {
     use serde_json::{json, Map, Value};
 
-    let dir = crate::anyai_dir()?;
+    let dir = crate::myownllm_dir()?;
     let status_path = dir.join("cache/model-status.json");
 
     let pulled = match list_pulled_sync() {
@@ -195,14 +195,14 @@ fn iso_from_secs(secs: i64) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Process-wide advisory lock so two `anyai` processes don't both watch.
+// Process-wide advisory lock so two `myownllm` processes don't both watch.
 // ---------------------------------------------------------------------------
 
 fn acquire_process_lock() -> bool {
     use std::fs::OpenOptions;
     use std::io::Write;
 
-    let path = match crate::anyai_dir() {
+    let path = match crate::myownllm_dir() {
         Ok(d) => d.join("watcher.lock"),
         Err(_) => return true,
     };

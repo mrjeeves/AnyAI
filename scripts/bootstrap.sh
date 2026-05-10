@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AnyAI dev bootstrap: install Rust, Node, pnpm, Tauri CLI, and platform dev libs.
+# MyOwnLLM dev bootstrap: install Rust, Node, pnpm, Tauri CLI, and platform dev libs.
 # Idempotent — safe to re-run. Skips anything already present.
 
 set -euo pipefail

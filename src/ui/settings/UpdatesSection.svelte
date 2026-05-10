@@ -101,7 +101,7 @@
     <div class="content">
       <div class="header-row">
         <div>
-          <div class="version">anyai {status.current_version}</div>
+          <div class="version">myownllm {status.current_version}</div>
           <div class="meta">
             installed via {installKindLabel(status.install_kind)} ·
             {status.channel} channel
@@ -114,14 +114,14 @@
 
       {#if !status.enabled}
         <div class="notice warn">
-          Auto-update is disabled in <code>~/.anyai/config.json</code>
+          Auto-update is disabled in <code>~/.myownllm/config.json</code>
           (<code>auto_update.enabled = false</code>). Re-enable it to use this tab.
         </div>
       {/if}
 
       {#if status.install_kind === "package_manager"}
         <div class="notice warn">
-          AnyAI was installed via a package manager (Homebrew, apt, rpm, MSI, Chocolatey).
+          MyOwnLLM was installed via a package manager (Homebrew, apt, rpm, MSI, Chocolatey).
           Use your package manager to upgrade — self-update is intentionally disabled here.
         </div>
       {/if}
@@ -148,7 +148,7 @@
             <strong>{status.pending.version}</strong>
           </div>
           <div class="pending-meta">
-            staged {formatStagedAt(status.pending.staged_at)} — restart AnyAI to apply.
+            staged {formatStagedAt(status.pending.staged_at)} — restart MyOwnLLM to apply.
           </div>
           <button class="apply-btn" onclick={applyNow}>Restart &amp; apply now</button>
         </div>
@@ -172,7 +172,7 @@
           {:else if outcome.kind === "policy_blocked"}
             <strong>{outcome.latest}</strong> is available but
             <code>auto_apply = "{outcome.policy}"</code> doesn't permit this jump from
-            {outcome.current}. Edit <code>~/.anyai/config.json</code> to allow it.
+            {outcome.current}. Edit <code>~/.myownllm/config.json</code> to allow it.
           {/if}
         </div>
       {/if}
