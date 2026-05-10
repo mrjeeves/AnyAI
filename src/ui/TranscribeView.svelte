@@ -5,6 +5,7 @@
   import ModeBar from "./ModeBar.svelte";
   import StatusBar from "./StatusBar.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
+  import { updateUi, type SettingsTab } from "../update-state.svelte";
   import { loadConfig } from "../config";
   import {
     loadConversation,
@@ -65,9 +66,19 @@
    *  Enter, blur, and at record-start so a recording always lives on disk
    *  under whatever the user typed. */
   let sessionName = $state("");
-  let settingsTab = $state<
-    "providers" | "families" | "models" | "storage" | "transcription" | null
-  >(null);
+  let settingsTab = $state<SettingsTab | null>(null);
+
+  // Open the SettingsPanel on a specific tab when App requests it (e.g.
+  // user clicked "yes" on the startup update prompt). Mirrors Chat.svelte —
+  // see the comment there for why a nonce is needed.
+  let lastOpenSettingsNonce = -1;
+  $effect(() => {
+    const req = updateUi.openSettingsRequest;
+    if (!req) return;
+    if (req.nonce === lastOpenSettingsNonce) return;
+    lastOpenSettingsNonce = req.nonce;
+    settingsTab = req.tab;
+  });
 
   // Recording state. Capture + ASR run on the Rust side via cpal +
   // whisper-rs; we drive it via Tauri commands and listen for delta
