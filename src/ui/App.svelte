@@ -2,6 +2,8 @@
   import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { getVersion } from "@tauri-apps/api/app";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import FirstRun from "./FirstRun.svelte";
   import Chat from "./Chat.svelte";
   import TranscribeView from "./TranscribeView.svelte";
@@ -78,6 +80,7 @@
   type View = "loading" | "first-run" | "chat";
 
   let view = $state<View>("loading");
+  let appVersion = $state("");
   let hardware = $state<HardwareProfile | null>(null);
   let activeModel = $state("");
   let activeMode = $state<Mode>("text");
@@ -149,6 +152,16 @@
   }
 
   onMount(async () => {
+    // Pulled from Cargo.toml (Tauri's source of truth — bump-version.sh
+    // keeps it in sync with package.json). Fire-and-forget so a failure
+    // here doesn't block startup.
+    getVersion()
+      .then((v) => {
+        appVersion = v;
+        getCurrentWindow().setTitle(`MyOwnLLM ${v}`).catch(() => {});
+      })
+      .catch(() => {});
+
     try {
       const [hw, config] = await Promise.all([
         invoke<HardwareProfile>("detect_hardware"),
@@ -774,6 +787,9 @@
     <div class="splash">
       <div class="spinner"></div>
       <p>Detecting hardware…</p>
+      {#if appVersion}
+        <p class="splash-version">v{appVersion}</p>
+      {/if}
     </div>
   {:else if view === "first-run"}
     <FirstRun
@@ -1018,6 +1034,11 @@
     justify-content: center;
     gap: 1rem;
     color: #888;
+  }
+  .splash-version {
+    font-size: 0.7rem;
+    color: #555;
+    margin-top: -0.5rem;
   }
   .spinner {
     width: 28px;
