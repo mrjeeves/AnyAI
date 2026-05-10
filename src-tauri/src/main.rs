@@ -289,6 +289,35 @@ fn transcribe_stop(stream_id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn transcribe_pause(stream_id: String) -> Result<(), String> {
+    transcribe::pause(&stream_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn transcribe_resume(stream_id: String) -> Result<(), String> {
+    transcribe::resume(&stream_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn transcribe_buffer_size_bytes() -> u64 {
+    transcribe::buffer_size_bytes()
+}
+
+#[tauri::command]
+fn transcribe_pending_streams() -> Vec<transcribe::PendingStream> {
+    transcribe::list_pending_streams()
+}
+
+#[tauri::command]
+fn transcribe_drain_start(
+    stream_id: String,
+    model: String,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
+    transcribe::start_drain(stream_id, model, window).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn whisper_models_list() -> Result<Vec<transcribe::WhisperModelInfo>, String> {
     transcribe::list_models().map_err(|e| e.to_string())
 }
@@ -431,6 +460,11 @@ fn main() {
             remote_ui_kick,
             transcribe_start,
             transcribe_stop,
+            transcribe_pause,
+            transcribe_resume,
+            transcribe_buffer_size_bytes,
+            transcribe_pending_streams,
+            transcribe_drain_start,
             whisper_models_list,
             whisper_model_pull,
             whisper_model_remove,

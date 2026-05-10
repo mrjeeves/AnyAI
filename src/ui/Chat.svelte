@@ -28,6 +28,8 @@
     onModeChange,
     onProviderChange,
     onConversationChanged,
+    onRequestStopTranscribe,
+    onJumpToTranscribe,
   } = $props<{
     activeModel: string;
     activeMode: Mode;
@@ -44,6 +46,12 @@
     onModeChange: (mode: Mode) => void;
     onProviderChange: () => void;
     onConversationChanged: (id: string) => void;
+    /** Forwarded into StatusBar so the in-bar Stop button on a recording
+     *  chip pops the App-level confirm dialog (which warns when pending
+     *  chunks would be lost). Mounted at App scope so the dialog
+     *  survives mode switches. */
+    onRequestStopTranscribe: () => void;
+    onJumpToTranscribe: () => void;
   }>();
 
   interface Message extends StoredMessage {
@@ -347,6 +355,8 @@
     {sidebarOpen}
     {onToggleSidebar}
     onOpenSettings={(tab) => (settingsTab = tab)}
+    onRequestStopTranscribe={() => onRequestStopTranscribe()}
+    onJumpToTranscribe={() => onJumpToTranscribe()}
   />
 
   <div class="messages" bind:this={messagesEl}>

@@ -389,7 +389,7 @@
   .loading, .error { padding: 2rem; text-align: center; color: #555; font-size: .82rem; }
   .error { color: #d66; }
 
-  .cards { flex: 1; overflow-y: auto; padding: .75rem; display: flex; flex-direction: column; gap: .6rem; min-height: 0; }
+  .cards { flex: 1; overflow-y: scroll; padding: .75rem; display: flex; flex-direction: column; gap: .6rem; min-height: 0; }
   .group-label {
     font-size: .68rem; color: #666; text-transform: uppercase;
     letter-spacing: .06em; margin: .35rem .15rem -.1rem;
