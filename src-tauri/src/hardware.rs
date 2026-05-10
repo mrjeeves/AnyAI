@@ -1,6 +1,6 @@
+use crate::process::quiet_command;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use crate::process::quiet_command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HardwareProfile {

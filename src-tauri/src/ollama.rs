@@ -1,3 +1,4 @@
+use crate::process::quiet_tokio_command;
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -7,7 +8,6 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tauri::Emitter;
 use tokio::process::Child;
-use crate::process::quiet_tokio_command;
 use tokio::sync::{Mutex, Notify};
 
 static OLLAMA_PROCESS: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
