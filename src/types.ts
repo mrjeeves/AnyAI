@@ -61,6 +61,15 @@ export interface Manifest {
   default_family: string;
   /** URLs of other manifests whose families are merged into this one. */
   imports?: string[];
+  /**
+   * Mode blocks every family inherits unless it declares its own.
+   * Used today for the canonical whisper transcribe ladder so we don't
+   * have to copy-paste the same six tiers into every family — and so a
+   * family can override (e.g. a coding-focused family that wants
+   * `large-v3` everywhere) without forking the schema. The family's own
+   * `modes[k]` always wins on collision.
+   */
+  shared_modes?: Record<string, ManifestMode>;
   families: Record<string, ManifestFamily>;
 }
 

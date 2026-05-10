@@ -111,10 +111,20 @@ pub fn resolve_full(
     let (_family_name, family) = pick_family(manifest, active_family)
         .ok_or_else(|| anyhow!("manifest exposes no families"))?;
 
+    // Look up the mode in the family first, then the manifest's
+    // shared_modes block (the canonical whisper transcribe ladder
+    // lives there). The family's own declaration always wins so a
+    // family can override a shared mode without forking the schema.
     let exact_spec = family
         .get("modes")
         .and_then(|m| m.get(mode))
-        .and_then(|v| v.as_object());
+        .and_then(|v| v.as_object())
+        .or_else(|| {
+            manifest
+                .get("shared_modes")
+                .and_then(|m| m.get(mode))
+                .and_then(|v| v.as_object())
+        });
 
     // Runtime is bound to the requested mode, not the fallback. If the
     // requested mode isn't declared we use the well-known default for
@@ -184,7 +194,14 @@ pub fn mode_runtime(manifest: &Value, mode: &str, active_family: &str) -> Option
         .get("modes")
         .and_then(|m| m.get(mode))
         .and_then(|v| v.get("runtime"))
-        .and_then(|v| v.as_str());
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            manifest
+                .get("shared_modes")
+                .and_then(|m| m.get(mode))
+                .and_then(|v| v.get("runtime"))
+                .and_then(|v| v.as_str())
+        });
     Some(
         declared
             .unwrap_or_else(|| default_runtime_for(mode))
@@ -209,22 +226,40 @@ fn effective_vram_gb(hw: &HardwareProfile) -> f64 {
 /// All model tags recommended by a manifest across every family/mode/tier.
 pub fn tags_in_manifest(manifest: &Value) -> Vec<String> {
     let mut out = Vec::new();
+    let mut push_mode = |mode_spec: &Value| {
+        // Cleanup is Ollama-only: skip non-Ollama runtimes (whisper
+        // models live under ~/.anyai/whisper/ and aren't reachable
+        // from `ollama list` anyway).
+        let runtime = mode_spec
+            .get("runtime")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ollama");
+        if runtime != "ollama" {
+            return;
+        }
+        if let Some(tiers) = mode_spec["tiers"].as_array() {
+            for tier in tiers {
+                if let Some(t) = tier["model"].as_str() {
+                    out.push(t.to_string());
+                }
+                if let Some(t) = tier["fallback"].as_str() {
+                    out.push(t.to_string());
+                }
+            }
+        }
+    };
     if let Some(families) = manifest["families"].as_object() {
         for (_name, family) in families {
             if let Some(modes) = family["modes"].as_object() {
                 for (_, mode_spec) in modes {
-                    if let Some(tiers) = mode_spec["tiers"].as_array() {
-                        for tier in tiers {
-                            if let Some(t) = tier["model"].as_str() {
-                                out.push(t.to_string());
-                            }
-                            if let Some(t) = tier["fallback"].as_str() {
-                                out.push(t.to_string());
-                            }
-                        }
-                    }
+                    push_mode(mode_spec);
                 }
             }
+        }
+    }
+    if let Some(shared) = manifest["shared_modes"].as_object() {
+        for (_, mode_spec) in shared {
+            push_mode(mode_spec);
         }
     }
     out.sort();
@@ -282,6 +317,7 @@ fn walk_manifest<'a>(
 
         let raw = fetch_one_manifest(url).await?;
         let mut merged_families: Map<String, Value> = Map::new();
+        let mut merged_shared: Map<String, Value> = Map::new();
 
         if let Some(imports) = raw["imports"].as_array() {
             for imp in imports {
@@ -297,13 +333,23 @@ fn walk_manifest<'a>(
                         merged_families.insert(k.clone(), v.clone());
                     }
                 }
+                if let Some(shared) = imported["shared_modes"].as_object() {
+                    for (k, v) in shared {
+                        merged_shared.insert(k.clone(), v.clone());
+                    }
+                }
             }
         }
 
-        // Importing file wins on family-key collision (closer publisher).
+        // Importing file wins on key collision (closer publisher).
         if let Some(families) = raw["families"].as_object() {
             for (k, v) in families {
                 merged_families.insert(k.clone(), v.clone());
+            }
+        }
+        if let Some(shared) = raw["shared_modes"].as_object() {
+            for (k, v) in shared {
+                merged_shared.insert(k.clone(), v.clone());
             }
         }
 
@@ -312,6 +358,7 @@ fn walk_manifest<'a>(
             "version": raw["version"].clone(),
             "ttl_minutes": raw["ttl_minutes"].clone(),
             "default_family": raw["default_family"].clone(),
+            "shared_modes": Value::Object(merged_shared),
             "families": Value::Object(merged_families),
         }))
     })

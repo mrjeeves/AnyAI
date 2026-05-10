@@ -72,12 +72,24 @@ pub fn model_path(name: &str) -> Result<PathBuf> {
 /// an HTML error page or a truncated stream and gets rejected post-hoc.
 pub const KNOWN_MODELS: &[(&str, u64, u64)] = &[
     // (name, approx_size_bytes, min_acceptable_bytes)
+    // English-only (.en) variants — faster/more accurate on English
+    // input. Default tier picks use these.
     ("tiny.en", 77_704_715, 50_000_000),
     ("base.en", 147_964_211, 100_000_000),
     ("small.en", 487_614_201, 400_000_000),
     ("medium.en", 1_533_774_781, 1_300_000_000),
+    // Multilingual variants — same architectures, trained without the
+    // English-only filter. Pick these via `mode_overrides.transcribe`
+    // when the speaker isn't English.
+    ("tiny", 77_691_713, 50_000_000),
+    ("base", 147_951_465, 100_000_000),
+    ("small", 487_601_967, 400_000_000),
+    ("medium", 1_533_763_059, 1_300_000_000),
+    // Large variants are multilingual-only.
     ("large-v3-turbo", 1_624_555_275, 1_400_000_000),
     ("large-v3", 3_095_033_483, 2_700_000_000),
+    ("large-v2", 3_094_623_691, 2_700_000_000),
+    ("large-v1", 3_094_623_691, 2_700_000_000),
 ];
 
 fn known(name: &str) -> Option<&'static (&'static str, u64, u64)> {
