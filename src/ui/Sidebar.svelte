@@ -13,6 +13,7 @@
     onRename,
     onDelete,
     onMove,
+    onMoveFolder,
     onCreateFolder,
     onRenameFolder,
     onDeleteFolder,
@@ -31,6 +32,9 @@
     onDelete: (id: string) => void;
     /** Move a conversation file into the given folder path (POSIX, "" for root). */
     onMove: (id: string, folder: string) => void;
+    /** Move/rename a folder into a new parent. `newPath` is the full POSIX
+     *  path (parent + "/" + name; just `name` for root). */
+    onMoveFolder: (oldPath: string, newPath: string) => void;
     onCreateFolder: (path: string) => void;
     onRenameFolder: (oldPath: string, newPath: string) => void;
     onDeleteFolder: (path: string) => void;
@@ -66,11 +70,6 @@
 
   /** Folder paths the user has collapsed. Folders default to expanded. */
   let collapsed = $state<Set<string>>(new Set());
-
-  /** Drop target highlighting. We track the path the user is currently
-   *  hovering with a drag so the row paints a border / background and the
-   *  user knows where the file will land. "" === root. */
-  let dragOverPath = $state<string | null>(null);
 
   function openItemMenu(e: MouseEvent, id: string) {
     e.preventDefault();
@@ -285,39 +284,251 @@
   }
 
   // ---------------------------------------------------------------------
-  // Drag-drop. We use HTML5 DnD with a string payload of the conversation
-  // id; folder rows accept the drop and call onMove. We intentionally
-  // don't support drag-reordering within a folder yet — the spec just
-  // calls for moving between folders.
+  // Drag-drop. Custom pointer-based implementation: the HTML5 DnD API
+  // doesn't fire reliably under WebKitGTK (Tauri's Linux webview), and we
+  // want OS-style affordances anyway — a ghost that follows the cursor,
+  // drop highlighting on folders, hover-to-expand for collapsed folders,
+  // and folder-into-folder dragging. Items resolve the drop target by
+  // walking up from `document.elementFromPoint` until we find a node with
+  // a `data-drop-path` attribute.
   // ---------------------------------------------------------------------
 
-  function onDragStart(e: DragEvent, id: string) {
-    if (!e.dataTransfer) return;
-    e.dataTransfer.setData("application/x-anyai-conv", id);
-    e.dataTransfer.effectAllowed = "move";
+  type DragSrc =
+    | { kind: "item"; id: string; label: string; mode: Mode }
+    | { kind: "folder"; path: string; label: string };
+
+  type DragState = {
+    src: DragSrc;
+    /** Pointer position in viewport coords. */
+    x: number;
+    y: number;
+    /** Cursor offset within the source row, so the ghost lines up with
+     *  where the user grabbed it. */
+    offsetX: number;
+    offsetY: number;
+    /** Current drop target path (`""` for root, `null` for "none"). */
+    overPath: string | null;
+    /** Did we cross the threshold yet? Below the threshold, this is a
+     *  click-in-progress and we leave the row alone. */
+    active: boolean;
+  };
+
+  let drag = $state<DragState | null>(null);
+
+  type PendingDrag = {
+    src: DragSrc;
+    startX: number;
+    startY: number;
+    offsetX: number;
+    offsetY: number;
+    pointerId: number;
+  };
+  let pendingDrag: PendingDrag | null = null;
+
+  /** Hover-to-expand: a collapsed folder under the pointer pops open after
+   *  this long, mirroring Finder / Explorer / VS Code. */
+  const HOVER_EXPAND_MS = 600;
+  /** Pointer movement threshold before we treat a press-and-drag as a drag
+   *  rather than a click. */
+  const DRAG_THRESHOLD = 5;
+
+  let hoverExpandTimer: number | null = null;
+  /** Set in pointerup when a drag actually ran, so the synthetic click that
+   *  follows on the same element doesn't toggle/select. */
+  let suppressNextClick = false;
+
+  /** Visible drop highlight target. Folder rows and the list root key off
+   *  this to paint their hover state. */
+  const dragOverPath = $derived(drag && drag.active ? drag.overPath : null);
+
+  function srcLabel(src: DragSrc): string {
+    return src.label || (src.kind === "folder" ? "Folder" : "Untitled");
   }
 
-  function onDragOver(e: DragEvent, path: string) {
-    if (!e.dataTransfer) return;
-    if (!e.dataTransfer.types.includes("application/x-anyai-conv")) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-    dragOverPath = path;
+  function startItemDrag(e: PointerEvent, c: ConversationMeta) {
+    if (!shouldStartDrag(e)) return;
+    const el = e.currentTarget as HTMLElement;
+    const rect = el.getBoundingClientRect();
+    pendingDrag = {
+      src: { kind: "item", id: c.id, label: c.title, mode: c.mode },
+      startX: e.clientX,
+      startY: e.clientY,
+      offsetX: e.clientX - rect.left,
+      offsetY: e.clientY - rect.top,
+      pointerId: e.pointerId,
+    };
+    armDragListeners();
   }
 
-  function onDragLeave(path: string) {
-    if (dragOverPath === path) dragOverPath = null;
+  function startFolderDrag(e: PointerEvent, node: Node) {
+    if (!shouldStartDrag(e)) return;
+    const el = e.currentTarget as HTMLElement;
+    const rect = el.getBoundingClientRect();
+    pendingDrag = {
+      src: { kind: "folder", path: node.path, label: node.name },
+      startX: e.clientX,
+      startY: e.clientY,
+      offsetX: e.clientX - rect.left,
+      offsetY: e.clientY - rect.top,
+      pointerId: e.pointerId,
+    };
+    armDragListeners();
   }
 
-  function onDrop(e: DragEvent, path: string) {
-    e.preventDefault();
-    dragOverPath = null;
-    const id = e.dataTransfer?.getData("application/x-anyai-conv");
-    if (!id) return;
-    const item = items.find((c: ConversationMeta) => c.id === id);
-    if (!item) return;
-    if (item.path === path) return;
-    onMove(id, path);
+  /** Common preflight: only left-button presses on non-input descendants of
+   *  the row count as drag starts. Keeps rename inputs and the kebab menu
+   *  click-friendly. */
+  function shouldStartDrag(e: PointerEvent): boolean {
+    if (e.button !== 0) return false;
+    if (editingId || editingFolder || creatingFolderParent !== null) return false;
+    const target = e.target as HTMLElement | null;
+    if (target && target.closest("input, textarea, button")) return false;
+    return true;
+  }
+
+  function armDragListeners() {
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerCancel);
+    window.addEventListener("keydown", onDragKey);
+  }
+
+  function disarmDragListeners() {
+    window.removeEventListener("pointermove", onPointerMove);
+    window.removeEventListener("pointerup", onPointerUp);
+    window.removeEventListener("pointercancel", onPointerCancel);
+    window.removeEventListener("keydown", onDragKey);
+  }
+
+  function onPointerMove(e: PointerEvent) {
+    if (!pendingDrag) return;
+    if (e.pointerId !== pendingDrag.pointerId) return;
+    if (!drag) {
+      const dx = e.clientX - pendingDrag.startX;
+      const dy = e.clientY - pendingDrag.startY;
+      if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+      drag = {
+        src: pendingDrag.src,
+        x: e.clientX,
+        y: e.clientY,
+        offsetX: pendingDrag.offsetX,
+        offsetY: pendingDrag.offsetY,
+        overPath: null,
+        active: true,
+      };
+      // Dismiss any open context menu so it doesn't float over the drag.
+      closeMenu();
+    }
+    drag.x = e.clientX;
+    drag.y = e.clientY;
+    updateOverPath(pathFromPoint(e.clientX, e.clientY));
+  }
+
+  function onPointerUp(e: PointerEvent) {
+    if (!pendingDrag) return;
+    if (e.pointerId !== pendingDrag.pointerId) return;
+    const wasActive = !!(drag && drag.active);
+    if (wasActive) {
+      finishDrop();
+      suppressNextClick = true;
+      // Click follows pointerup synchronously; clear on next macrotask in
+      // case the platform skips the click (e.g. drop landed off-source).
+      setTimeout(() => (suppressNextClick = false), 0);
+    }
+    pendingDrag = null;
+    drag = null;
+    clearHoverExpand();
+    disarmDragListeners();
+  }
+
+  function onPointerCancel(e: PointerEvent) {
+    if (!pendingDrag) return;
+    if (e.pointerId !== pendingDrag.pointerId) return;
+    cancelDrag();
+  }
+
+  function onDragKey(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      cancelDrag();
+    }
+  }
+
+  function cancelDrag() {
+    pendingDrag = null;
+    drag = null;
+    clearHoverExpand();
+    disarmDragListeners();
+  }
+
+  /** Walk up from the element under the pointer until we hit a node carrying
+   *  a `data-drop-path` attribute. Returns `null` if the pointer isn't over
+   *  any sidebar drop zone (e.g. the user dragged outside the sidebar). */
+  function pathFromPoint(x: number, y: number): string | null {
+    let el = document.elementFromPoint(x, y) as HTMLElement | null;
+    while (el) {
+      const v = el.dataset?.dropPath;
+      if (v !== undefined) return v;
+      el = el.parentElement;
+    }
+    return null;
+  }
+
+  function updateOverPath(path: string | null) {
+    if (!drag) return;
+    if (path !== null && !canDropAt(path)) path = null;
+    if (path === drag.overPath) return;
+    drag.overPath = path;
+    clearHoverExpand();
+    if (path && collapsed.has(path)) {
+      hoverExpandTimer = window.setTimeout(() => {
+        if (drag && drag.overPath === path && collapsed.has(path)) {
+          const next = new Set(collapsed);
+          next.delete(path);
+          collapsed = next;
+        }
+        hoverExpandTimer = null;
+      }, HOVER_EXPAND_MS);
+    }
+  }
+
+  function canDropAt(path: string): boolean {
+    if (!drag) return false;
+    if (drag.src.kind === "folder") {
+      // Can't drop a folder into itself or any of its descendants.
+      if (path === drag.src.path) return false;
+      if (drag.src.path && path.startsWith(drag.src.path + "/")) return false;
+      // Already directly under this parent? Highlight it anyway as the
+      // "same place" target — finishDrop will no-op. Keeps the affordance
+      // consistent with file managers, which still show the hover ring.
+    }
+    return true;
+  }
+
+  function clearHoverExpand() {
+    if (hoverExpandTimer !== null) {
+      window.clearTimeout(hoverExpandTimer);
+      hoverExpandTimer = null;
+    }
+  }
+
+  function finishDrop() {
+    if (!drag) return;
+    const target = drag.overPath;
+    if (target === null) return;
+    if (drag.src.kind === "item") {
+      const id = drag.src.id;
+      const item = items.find((c: ConversationMeta) => c.id === id);
+      if (!item) return;
+      if (item.path === target) return;
+      onMove(id, target);
+    } else {
+      const fromPath = drag.src.path;
+      const folderName = fromPath.split("/").pop() ?? "";
+      const newPath = target ? `${target}/${folderName}` : folderName;
+      if (newPath === fromPath) return;
+      onMoveFolder(fromPath, newPath);
+    }
   }
 
   function toggleCollapsed(path: string) {
@@ -325,6 +536,29 @@
     if (next.has(path)) next.delete(path);
     else next.add(path);
     collapsed = next;
+  }
+
+  function handleRowClick(id: string) {
+    if (suppressNextClick) {
+      suppressNextClick = false;
+      return;
+    }
+    onSelect(id);
+  }
+
+  function handleFolderClick(path: string) {
+    if (suppressNextClick) {
+      suppressNextClick = false;
+      return;
+    }
+    toggleCollapsed(path);
+  }
+
+  function isDragSource(kind: "item" | "folder", key: string): boolean {
+    if (!drag || !drag.active) return false;
+    if (kind === "item" && drag.src.kind === "item") return drag.src.id === key;
+    if (kind === "folder" && drag.src.kind === "folder") return drag.src.path === key;
+    return false;
   }
 </script>
 
@@ -364,9 +598,7 @@
     class:drop-root={dragOverPath === ""}
     onclick={closeMenu}
     role="presentation"
-    ondragover={(e) => onDragOver(e, "")}
-    ondragleave={() => onDragLeave("")}
-    ondrop={(e) => onDrop(e, "")}
+    data-drop-path=""
   >
     {#if items.length === 0 && folders.length === 0}
       <div class="empty">{emptyLabel}</div>
@@ -396,17 +628,17 @@
   <div
     class="folder"
     class:drop-target={dragOverPath === node.path}
+    class:dragging={isDragSource("folder", node.path)}
     style="--depth: {node.depth};"
     role="button"
     tabindex="0"
     title={node.path}
+    data-drop-path={node.path}
     oncontextmenu={(e) => openFolderMenu(e, node.path)}
-    ondragover={(e) => onDragOver(e, node.path)}
-    ondragleave={() => onDragLeave(node.path)}
-    ondrop={(e) => onDrop(e, node.path)}
+    onpointerdown={(e) => startFolderDrag(e, node)}
     onclick={(e) => {
       e.stopPropagation();
-      toggleCollapsed(node.path);
+      handleFolderClick(node.path);
     }}
     onkeydown={(e) => {
       if (e.key === "Enter" || e.key === " ") {
@@ -472,11 +704,12 @@
   <div
     class="row"
     class:active={c.id === activeId}
+    class:dragging={isDragSource("item", c.id)}
     style="--depth: {depth};"
     role="button"
     tabindex="0"
-    draggable="true"
-    onclick={() => onSelect(c.id)}
+    data-drop-path={c.path}
+    onclick={() => handleRowClick(c.id)}
     onkeydown={(e) => {
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
@@ -484,7 +717,7 @@
       }
     }}
     oncontextmenu={(e) => openItemMenu(e, c.id)}
-    ondragstart={(e) => onDragStart(e, c.id)}
+    onpointerdown={(e) => startItemDrag(e, c)}
     title={c.title}
   >
     {#if c.mode === "transcribe"}
@@ -544,6 +777,31 @@
   </div>
 {/if}
 
+{#if drag && drag.active}
+  <div
+    class="drag-ghost"
+    style="left: {drag.x - drag.offsetX}px; top: {drag.y - drag.offsetY}px;"
+    aria-hidden="true"
+  >
+    {#if drag.src.kind === "folder"}
+      <svg viewBox="0 0 24 24" width="13" height="13">
+        <path
+          fill="currentColor"
+          d="M10 4l2 2h6a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h6z"
+        />
+      </svg>
+    {:else if drag.src.mode === "transcribe"}
+      <svg viewBox="0 0 24 24" width="11" height="11">
+        <path
+          fill="currentColor"
+          d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"
+        />
+      </svg>
+    {/if}
+    <span class="drag-ghost-label">{srcLabel(drag.src)}</span>
+  </div>
+{/if}
+
 <style>
   .sidebar {
     width: 260px;
@@ -555,6 +813,10 @@
     height: 100%;
     overflow: hidden;
     transition: margin-left .18s ease, width .18s ease;
+    /* Sidebar text isn't user content — clicks and right-clicks should
+     * never start a selection. Inputs below opt back in. */
+    user-select: none;
+    -webkit-user-select: none;
   }
   .sidebar:not(.open) {
     margin-left: -260px;
@@ -628,13 +890,16 @@
     color: #ccc;
     font-size: .8rem;
     cursor: pointer;
-    user-select: none;
     transition: background .1s;
   }
   .folder:hover { background: #161616; }
   .folder.drop-target {
     background: rgba(110, 110, 247, .1);
     box-shadow: inset 0 0 0 1px #6e6ef7;
+  }
+  .folder.dragging,
+  .row.dragging {
+    opacity: .4;
   }
   .folder-caret {
     width: 10px;
@@ -663,7 +928,6 @@
     color: #bbb;
     font-size: .82rem;
     cursor: pointer;
-    user-select: none;
     overflow: hidden;
     transition: background .1s, color .1s;
   }
@@ -688,6 +952,8 @@
     border-radius: 5px;
     font-size: .82rem;
     font-family: inherit;
+    user-select: text;
+    -webkit-user-select: text;
   }
   .rename:focus { outline: none; border-color: #6e6ef7; }
 
@@ -725,4 +991,34 @@
   .menu button:hover { background: #1f1f33; }
   .menu button.danger { color: #ff8b8b; }
   .menu button.danger:hover { background: #2a1818; }
+
+  /* Pointer-following ghost while dragging. Position is updated from the
+   * pointermove handler; pointer-events:none keeps it from blocking
+   * elementFromPoint hit-testing. The double box-shadow gives the
+   * "stack of cards" feel without needing extra DOM nodes. */
+  .drag-ghost {
+    position: fixed;
+    z-index: 60;
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+    gap: .35rem;
+    padding: .35rem .55rem;
+    background: #1c1c2e;
+    color: #fff;
+    border: 1px solid #3a3a55;
+    border-radius: 6px;
+    font-size: .82rem;
+    max-width: 240px;
+    box-shadow:
+      0 6px 14px rgba(0, 0, 0, 0.5),
+      4px 4px 0 -1px #131320,
+      4px 4px 0 0 #2a2a3a;
+    opacity: .96;
+  }
+  .drag-ghost-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 </style>
