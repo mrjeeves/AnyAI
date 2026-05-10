@@ -310,20 +310,10 @@
             </div>
 
             <div>
-              <dt>Whisper model</dt>
-              <dd>
-                <select
-                  value={mic.whisper_model}
-                  onchange={(e) =>
-                    patchMic({ whisper_model: (e.currentTarget as HTMLSelectElement).value })}
-                >
-                  <option value="tiny.en">tiny.en (~75 MB)</option>
-                  <option value="base.en">base.en (~140 MB)</option>
-                  <option value="small.en">small.en (~466 MB)</option>
-                  <option value="medium.en">medium.en (~1.5 GB)</option>
-                  <option value="large-v3">large-v3 (~3 GB)</option>
-                </select>
-                <button class="link-btn small" onclick={() => setActive("transcription")} title="Manage models">
+              <dt>Transcribe model</dt>
+              <dd class="dim">
+                Picked automatically by the active family's tier ladder.
+                <button class="link-btn small" onclick={() => setActive("transcription")} title="Manage whisper models">
                   Manage →
                 </button>
               </dd>

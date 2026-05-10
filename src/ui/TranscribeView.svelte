@@ -174,7 +174,12 @@
     transcribeError = "";
     const cfg = await loadConfig();
     const mic = cfg.mic;
-    const model = mic.whisper_model || "tiny.en";
+    // `activeModel` is the family/tier-resolved pick from App.svelte,
+    // prefixed `whisper:` so the status bar can't confuse it with an
+    // Ollama tag. Strip the prefix for the bare ggml filename.
+    const model = activeModel.startsWith("whisper:")
+      ? activeModel.slice("whisper:".length)
+      : activeModel || "tiny.en";
 
     if (!(await modelInstalled(model))) {
       transcribeError =

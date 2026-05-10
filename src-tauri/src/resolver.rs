@@ -80,6 +80,20 @@ pub fn resolve_in_manifest(
     mode: &str,
     active_family: &str,
 ) -> Result<String> {
+    Ok(resolve_full(manifest, hw, mode, active_family)?.0)
+}
+
+/// Resolve a `(model, runtime)` pair against the active family's tier
+/// table. The runtime defaults to `"ollama"` if the mode block doesn't
+/// declare one — that's how every text/vision/code mode currently works.
+/// Whisper modes set `runtime: "whisper"` so callers can route around
+/// the Ollama pull / list path entirely.
+pub fn resolve_full(
+    manifest: &Value,
+    hw: &HardwareProfile,
+    mode: &str,
+    active_family: &str,
+) -> Result<(String, String)> {
     let (_family_name, family) = pick_family(manifest, active_family)
         .ok_or_else(|| anyhow!("manifest exposes no families"))?;
 
@@ -99,6 +113,12 @@ pub fn resolve_in_manifest(
         })
         .ok_or_else(|| anyhow!("mode '{mode}' not found in active family"))?;
 
+    let runtime = mode_spec
+        .get("runtime")
+        .and_then(|v| v.as_str())
+        .unwrap_or("ollama")
+        .to_string();
+
     let tiers = mode_spec
         .get("tiers")
         .and_then(|t| t.as_array())
@@ -112,16 +132,30 @@ pub fn resolve_in_manifest(
         let min_ram = tier["min_ram_gb"].as_f64().unwrap_or(0.0);
         if vram >= min_vram || ram >= min_ram {
             if let Some(model) = tier["model"].as_str() {
-                return Ok(model.to_string());
+                return Ok((model.to_string(), runtime));
             }
         }
     }
 
-    tiers
+    let last = tiers
         .last()
         .and_then(|t| t["model"].as_str())
         .map(str::to_string)
-        .ok_or_else(|| anyhow!("no model found in active family tiers"))
+        .ok_or_else(|| anyhow!("no model found in active family tiers"))?;
+    Ok((last, runtime))
+}
+
+/// Look up the runtime declared on `mode` for the active family without
+/// resolving a tier. Used by preload to skip Ollama-pull machinery for
+/// whisper-runtime modes.
+pub fn mode_runtime(manifest: &Value, mode: &str, active_family: &str) -> Option<String> {
+    let (_, family) = pick_family(manifest, active_family)?;
+    family
+        .get("modes")?
+        .get(mode)?
+        .get("runtime")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// VRAM the resolver should credit toward `min_vram_gb` checks. Mirrors

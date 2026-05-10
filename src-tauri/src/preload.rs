@@ -31,20 +31,44 @@ pub async fn preload<F: FnMut(PreloadEvent)>(
         persist_tracked(modes)?;
     }
 
+    // Look up the active family's manifest once so we can ask each mode
+    // which runtime owns it and skip the Ollama pull step for non-Ollama
+    // runtimes (whisper today; possibly more later) without round-tripping
+    // through `resolve()` for each one.
+    let (active_family, manifest_opt) = match crate::resolver::load_config_value() {
+        Ok(cfg) => {
+            let family = cfg["active_family"].as_str().unwrap_or("").to_string();
+            let url = crate::resolver::active_provider_url(&cfg);
+            let manifest = if let Some(u) = url {
+                crate::resolver::fetch_or_load_manifest(&u).await.ok()
+            } else {
+                None
+            };
+            (family, manifest)
+        }
+        Err(_) => (String::new(), None),
+    };
+
     for mode in modes {
-        // Transcribe runs on whisper-rs (models live under
-        // `~/.anyai/whisper/`), not Ollama. Skip it in the Ollama
-        // preload loop instead of resolving + pulling a phantom tag —
-        // the previous behaviour pulled a non-existent `whisper:*`
-        // manifest from Ollama Hub and silently wrote nothing to disk.
-        if mode == "transcribe" {
-            on_event(PreloadEvent {
-                mode: mode.clone(),
-                model: String::new(),
-                status: "ready".into(),
-                detail: "transcribe uses whisper-rs (manage via Settings → Transcription)".into(),
-            });
-            continue;
+        // Modes whose runtime isn't Ollama (whisper today) live under
+        // `~/.anyai/whisper/` and are managed by Settings →
+        // Transcription, not by `ollama pull`. Skipping here avoids the
+        // pre-#59 footgun of pulling a phantom tag like `whisper:medium`
+        // and silently writing nothing to disk.
+        if let Some(ref m) = manifest_opt {
+            if let Some(rt) = crate::resolver::mode_runtime(m, mode, &active_family) {
+                if rt != "ollama" {
+                    on_event(PreloadEvent {
+                        mode: mode.clone(),
+                        model: String::new(),
+                        status: "ready".into(),
+                        detail: format!(
+                            "{mode} uses the {rt} runtime (manage via Settings → Transcription)"
+                        ),
+                    });
+                    continue;
+                }
+            }
         }
         let model = match crate::resolver::resolve(mode).await {
             Ok(m) => m,

@@ -1,39 +1,64 @@
 {
   "name": "AnyAI Default",
-  "version": "6",
+  "version": "7",
   "ttl_minutes": 360,
   "default_family": "gemma4",
   "families": {
     "gemma4": {
       "label": "Gemma 4",
-      "description": "Google Gemma 4 — versatile general-purpose models with strong instruction following.",
+      "description": "Google Gemma 4 — multimodal models (text + image input) with reasoning and configurable thinking modes. Same models serve text, vision, and code modes.",
       "default_mode": "text",
       "modes": {
         "text": {
           "label": "Text",
           "tiers": [
-            { "min_vram_gb": 20, "min_ram_gb": 40, "model": "gemma4:31b",  "fallback": "gemma4:26b" },
-            { "min_vram_gb": 14, "min_ram_gb": 28, "model": "gemma4:26b",  "fallback": "gemma4:e4b" },
-            { "min_vram_gb": 6,  "min_ram_gb": 12, "model": "gemma4:e4b",  "fallback": "gemma4:e2b" },
-            { "min_vram_gb": 4,  "min_ram_gb": 8,  "model": "gemma4:e2b",  "fallback": "gemma4:e2b" },
-            { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "gemma4:e2b",  "fallback": "gemma4:e2b" }
+            { "min_vram_gb": 20, "min_ram_gb": 40, "disk_mb": 20480, "model": "gemma4:31b",  "fallback": "gemma4:26b" },
+            { "min_vram_gb": 14, "min_ram_gb": 28, "disk_mb": 18432, "model": "gemma4:26b",  "fallback": "gemma4:e4b" },
+            { "min_vram_gb": 8,  "min_ram_gb": 16, "disk_mb": 9830,  "model": "gemma4:e4b",  "fallback": "gemma4:e2b" },
+            { "min_vram_gb": 0,  "min_ram_gb": 8,  "disk_mb": 7373,  "model": "gemma4:e2b",  "fallback": "gemma4:e2b" }
+          ]
+        },
+        "transcribe": {
+          "label": "Transcribe",
+          "input": "audio",
+          "runtime": "whisper",
+          "tiers": [
+            { "min_vram_gb": 6, "min_ram_gb": 12, "disk_mb": 2952, "model": "large-v3",       "fallback": "large-v3-turbo" },
+            { "min_vram_gb": 4, "min_ram_gb": 8,  "disk_mb": 1550, "model": "large-v3-turbo", "fallback": "medium.en"      },
+            { "min_vram_gb": 3, "min_ram_gb": 6,  "disk_mb": 1463, "model": "medium.en",      "fallback": "small.en"       },
+            { "min_vram_gb": 1, "min_ram_gb": 4,  "disk_mb": 465,  "model": "small.en",       "fallback": "base.en"        },
+            { "min_vram_gb": 0, "min_ram_gb": 2,  "disk_mb": 141,  "model": "base.en",        "fallback": "tiny.en"        },
+            { "min_vram_gb": 0, "min_ram_gb": 0,  "disk_mb": 74,   "model": "tiny.en",        "fallback": "tiny.en"        }
           ]
         }
       }
     },
-    "qwen3": {
-      "label": "Qwen 3",
-      "description": "Alibaba Qwen 3 — strong multilingual and reasoning performance at every size.",
+    "qwen3.6": {
+      "label": "Qwen 3.6",
+      "description": "Alibaba Qwen 3.6 — strong multilingual + reasoning, dense and MoE variants. The 3.6 release only ships at 27B and 35B, so smaller hardware tiers fall back to Qwen 3.5 (which has 0.8B / 2B / 9B).",
       "default_mode": "text",
       "modes": {
         "text": {
           "label": "Text",
           "tiers": [
-            { "min_vram_gb": 24, "min_ram_gb": 48, "model": "qwen3.6:35b", "fallback": "qwen3.6:27b" },
-            { "min_vram_gb": 16, "min_ram_gb": 32, "model": "qwen3.6:27b", "fallback": "qwen3.5:9b"  },
-            { "min_vram_gb": 8,  "min_ram_gb": 16, "model": "qwen3.5:9b",  "fallback": "qwen3.5:1b"  },
-            { "min_vram_gb": 4,  "min_ram_gb": 8,  "model": "qwen3.5:1b",  "fallback": "qwen3.5:1b"  },
-            { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "qwen3.5:1b",  "fallback": "qwen3.5:1b"  }
+            { "min_vram_gb": 24, "min_ram_gb": 48, "disk_mb": 24576, "model": "qwen3.6:35b", "fallback": "qwen3.6:27b" },
+            { "min_vram_gb": 16, "min_ram_gb": 32, "disk_mb": 17408, "model": "qwen3.6:27b", "fallback": "qwen3.5:9b"  },
+            { "min_vram_gb": 8,  "min_ram_gb": 16, "disk_mb": 6758,  "model": "qwen3.5:9b",  "fallback": "qwen3.5:2b"  },
+            { "min_vram_gb": 4,  "min_ram_gb": 8,  "disk_mb": 2765,  "model": "qwen3.5:2b",  "fallback": "qwen3.5:0.8b"},
+            { "min_vram_gb": 0,  "min_ram_gb": 0,  "disk_mb": 1024,  "model": "qwen3.5:0.8b","fallback": "qwen3.5:0.8b"}
+          ]
+        },
+        "transcribe": {
+          "label": "Transcribe",
+          "input": "audio",
+          "runtime": "whisper",
+          "tiers": [
+            { "min_vram_gb": 6, "min_ram_gb": 12, "disk_mb": 2952, "model": "large-v3",       "fallback": "large-v3-turbo" },
+            { "min_vram_gb": 4, "min_ram_gb": 8,  "disk_mb": 1550, "model": "large-v3-turbo", "fallback": "medium.en"      },
+            { "min_vram_gb": 3, "min_ram_gb": 6,  "disk_mb": 1463, "model": "medium.en",      "fallback": "small.en"       },
+            { "min_vram_gb": 1, "min_ram_gb": 4,  "disk_mb": 465,  "model": "small.en",       "fallback": "base.en"        },
+            { "min_vram_gb": 0, "min_ram_gb": 2,  "disk_mb": 141,  "model": "base.en",        "fallback": "tiny.en"        },
+            { "min_vram_gb": 0, "min_ram_gb": 0,  "disk_mb": 74,   "model": "tiny.en",        "fallback": "tiny.en"        }
           ]
         }
       }
