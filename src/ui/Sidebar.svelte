@@ -52,6 +52,17 @@
   let editingId = $state<string | null>(null);
   let editingFolder = $state<string | null>(null);
   let editValue = $state("");
+  /** When non-null, an inline input is rendered as a child of this path
+   *  (`""` = root) so the user can name a new folder without a native
+   *  dialog. WebKitGTK silently no-ops `window.prompt()`, which made the
+   *  old prompt-based flow look broken on Linux. */
+  let creatingFolderParent = $state<string | null>(null);
+  let newFolderName = $state("");
+
+  function autofocus(node: HTMLInputElement) {
+    node.focus();
+    node.select();
+  }
 
   /** Folder paths the user has collapsed. Folders default to expanded. */
   let collapsed = $state<Set<string>>(new Set());
@@ -160,17 +171,41 @@
     if (confirm(prompt)) onDeleteFolder(path);
   }
 
-  function promptCreateFolder(parent: string) {
+  function startCreateFolder(parent: string) {
     closeMenu();
-    const name = window.prompt(
-      parent
-        ? `New folder name (inside "${parent}"):`
-        : "New folder name:",
-    );
-    if (!name) return;
-    const trimmed = name.trim();
+    // Expand the parent (if any) so the inline input renders into view.
+    if (parent && collapsed.has(parent)) {
+      const next = new Set(collapsed);
+      next.delete(parent);
+      collapsed = next;
+    }
+    newFolderName = "";
+    creatingFolderParent = parent;
+  }
+
+  function commitCreateFolder() {
+    if (creatingFolderParent === null) return;
+    const parent = creatingFolderParent;
+    const trimmed = newFolderName.trim();
+    creatingFolderParent = null;
+    newFolderName = "";
     if (!trimmed) return;
     onCreateFolder(parent ? `${parent}/${trimmed}` : trimmed);
+  }
+
+  function cancelCreateFolder() {
+    creatingFolderParent = null;
+    newFolderName = "";
+  }
+
+  function onCreateFolderKey(e: KeyboardEvent) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commitCreateFolder();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      cancelCreateFolder();
+    }
   }
 
   function moveToRoot(id: string) {
@@ -306,7 +341,7 @@
     </button>
     <button
       class="folder-btn"
-      onclick={() => promptCreateFolder("")}
+      onclick={() => startCreateFolder("")}
       title="New folder"
       aria-label="New folder"
     >
@@ -344,6 +379,10 @@
           {@render row(c, 0)}
         {/each}
       {/each}
+    {/if}
+
+    {#if creatingFolderParent === ""}
+      {@render newFolderInput(0)}
     {/if}
 
     {#each tree.children as child (child.path)}
@@ -396,6 +435,9 @@
     {/if}
   </div>
   {#if !isCollapsed}
+    {#if creatingFolderParent === node.path}
+      {@render newFolderInput(node.depth + 1)}
+    {/if}
     {#each node.items as c (c.id)}
       {@render row(c, node.depth + 1)}
     {/each}
@@ -403,6 +445,27 @@
       {@render folder(child)}
     {/each}
   {/if}
+{/snippet}
+
+{#snippet newFolderInput(depth: number)}
+  <div class="folder ghost" style="--depth: {depth};">
+    <span class="folder-caret" aria-hidden="true">▾</span>
+    <svg class="folder-icon" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
+      <path
+        fill="currentColor"
+        d="M10 4l2 2h6a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h6z"
+      />
+    </svg>
+    <input
+      class="rename"
+      placeholder="Folder name"
+      bind:value={newFolderName}
+      onblur={commitCreateFolder}
+      onkeydown={onCreateFolderKey}
+      onclick={(e) => e.stopPropagation()}
+      use:autofocus
+    />
+  </div>
 {/snippet}
 
 {#snippet row(c: ConversationMeta, depth: number)}
@@ -474,7 +537,7 @@
       <button class="danger" onclick={() => deleteItemWithConfirm(targetId)}>Delete</button>
     {:else}
       {@const targetPath = menu.target.path}
-      <button onclick={() => promptCreateFolder(targetPath)}>New subfolder</button>
+      <button onclick={() => startCreateFolder(targetPath)}>New subfolder</button>
       <button onclick={() => startRenameFolder(targetPath)}>Rename</button>
       <button class="danger" onclick={() => deleteFolderWithConfirm(targetPath)}>Delete</button>
     {/if}
