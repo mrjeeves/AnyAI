@@ -57,9 +57,19 @@ impl ApplyPolicy {
 /// work. Idempotent. Errors are logged and swallowed: an update problem must
 /// not prevent the binary from starting.
 pub fn apply_pending_if_any() {
+    cleanup_old_replaced_binary();
     if let Err(e) = apply_pending() {
         eprintln!("self-update: apply skipped: {e}");
     }
+}
+
+/// Apply pending and surface the error. Used by the GUI's "Restart to apply"
+/// flow which needs to know whether the swap actually happened before it
+/// triggers `app.restart()` — otherwise a non-fatal swap failure would leave
+/// the user looking at the old version and assuming the update worked.
+pub fn apply_pending_strict() -> Result<()> {
+    cleanup_old_replaced_binary();
+    apply_pending()
 }
 
 fn apply_pending() -> Result<()> {
@@ -723,7 +733,7 @@ fn extract_binary_if_archived(archive: &Path, dest_dir: &Path, verbose: bool) ->
     if verbose {
         println!("Extracting {name}…");
     }
-    let status = std::process::Command::new("tar")
+    let status = crate::process::quiet_command("tar")
         .arg("-xf")
         .arg(archive)
         .arg("-C")
@@ -820,8 +830,17 @@ fn atomic_replace(staged: &Path, target: &Path) -> Result<()> {
     }
     // Atomic rename over the running binary. Unix allows replacing a running
     // executable; the running process keeps the old inode until exit.
-    // Windows blocks open executables; on Windows we fall back to scheduling
-    // a rename at next boot via MoveFileEx.
+    // Windows blocks rename of an open .exe, so we use the side-rename trick:
+    // move the running binary to a sibling `.old` name (which Windows DOES
+    // allow even while the file is mapped), then rename the new binary into
+    // its place. The `.old` file is cleaned up on the next launch by
+    // `cleanup_old_replaced_binary`.
+    //
+    // We avoid `MoveFileExW(MOVEFILE_DELAY_UNTIL_REBOOT)` deliberately: it
+    // requires admin to write the pending entry to HKLM and only takes effect
+    // on a full OS reboot, not when the user restarts MyOwnLLM. That mismatch
+    // was why "Restart to apply" looked like it worked but never actually
+    // changed the version on Windows.
     #[cfg(unix)]
     {
         std::fs::rename(&tmp, target)?;
@@ -831,11 +850,7 @@ fn atomic_replace(staged: &Path, target: &Path) -> Result<()> {
     {
         match std::fs::rename(&tmp, target) {
             Ok(()) => Ok(()),
-            Err(_) => {
-                // Schedule the swap for next boot. The current process keeps
-                // running; the new binary takes over at reboot/restart.
-                schedule_replace_on_reboot_windows(&tmp, target)
-            }
+            Err(_) => rename_into_place_via_side_swap_windows(&tmp, target),
         }
     }
     #[cfg(not(any(unix, windows)))]
@@ -846,34 +861,50 @@ fn atomic_replace(staged: &Path, target: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn schedule_replace_on_reboot_windows(src: &Path, dst: &Path) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    let src_w: Vec<u16> = src
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let dst_w: Vec<u16> = dst
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-    const MOVEFILE_DELAY_UNTIL_REBOOT: u32 = 0x4;
-    extern "system" {
-        fn MoveFileExW(src: *const u16, dst: *const u16, flags: u32) -> i32;
+fn rename_into_place_via_side_swap_windows(src: &Path, dst: &Path) -> Result<()> {
+    let old = old_binary_path(dst);
+    // A leftover .old from a previous swap would block this rename; remove it
+    // first. If the old binary is still being held by another running process
+    // the remove will fail silently and the rename below will surface the
+    // real error.
+    if old.exists() {
+        let _ = std::fs::remove_file(&old);
     }
-    let ok = unsafe {
-        MoveFileExW(
-            src_w.as_ptr(),
-            dst_w.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_DELAY_UNTIL_REBOOT,
-        )
-    };
-    if ok == 0 {
-        return Err(anyhow!("MoveFileExW failed"));
+    std::fs::rename(dst, &old)
+        .with_context(|| format!("could not rename running binary aside to {}", old.display()))?;
+    if let Err(e) = std::fs::rename(src, dst) {
+        // Roll back: put the original binary back so we don't leave the
+        // install in a half-broken state where `dst` doesn't exist.
+        let _ = std::fs::rename(&old, dst);
+        return Err(anyhow!(
+            "swap-in failed after side-rename ({e}); restored original binary"
+        ));
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn old_binary_path(target: &Path) -> PathBuf {
+    let mut name = target
+        .file_name()
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| std::ffi::OsString::from("myownllm"));
+    name.push(".old");
+    target.with_file_name(name)
+}
+
+/// Delete the `<exe>.old` file left behind by a previous Windows side-swap.
+/// Cheap and idempotent — runs once at startup. The file is the previous
+/// version's binary; once we're running, nothing keeps it open and it can be
+/// freely deleted.
+fn cleanup_old_replaced_binary() {
+    #[cfg(windows)]
+    if let Ok(exe) = std::env::current_exe() {
+        let old = old_binary_path(&exe);
+        if old.exists() {
+            let _ = std::fs::remove_file(&old);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

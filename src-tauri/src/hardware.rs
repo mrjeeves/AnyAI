@@ -1,6 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::process::Command;
+use crate::process::quiet_command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HardwareProfile {
@@ -80,7 +80,7 @@ pub fn detect() -> Result<HardwareProfile> {
 }
 
 fn detect_nvidia_vram() -> Option<f64> {
-    let out = Command::new("nvidia-smi")
+    let out = quiet_command("nvidia-smi")
         .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
         .output()
         .ok()?;
@@ -93,7 +93,7 @@ fn detect_nvidia_vram() -> Option<f64> {
 }
 
 fn detect_amd_vram() -> Option<f64> {
-    let out = Command::new("rocm-smi")
+    let out = quiet_command("rocm-smi")
         .args(["--showmeminfo", "vram", "--json"])
         .output()
         .ok()?;
@@ -113,7 +113,7 @@ fn detect_amd_vram() -> Option<f64> {
 fn detect_apple_unified_memory() -> Option<f64> {
     #[cfg(target_os = "macos")]
     {
-        let out = Command::new("system_profiler")
+        let out = quiet_command("system_profiler")
             .args(["SPHardwareDataType", "-json"])
             .output()
             .ok()?;
@@ -152,7 +152,7 @@ fn detect_ram_gb() -> f64 {
     }
 
     #[cfg(target_os = "macos")]
-    if let Ok(out) = Command::new("sysctl").args(["-n", "hw.memsize"]).output() {
+    if let Ok(out) = quiet_command("sysctl").args(["-n", "hw.memsize"]).output() {
         if let Ok(s) = String::from_utf8(out.stdout) {
             if let Ok(bytes) = s.trim().parse::<u64>() {
                 return bytes as f64 / 1024.0 / 1024.0 / 1024.0;
@@ -188,7 +188,7 @@ fn parse_meminfo_total_kb(content: &str) -> Option<u64> {
 
 #[cfg(target_os = "linux")]
 fn read_free_b_gb() -> Option<f64> {
-    let out = Command::new("free").args(["-b"]).output().ok()?;
+    let out = quiet_command("free").args(["-b"]).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -208,7 +208,7 @@ fn read_getconf_phys_pages_gb() -> Option<f64> {
 
 #[cfg(target_os = "linux")]
 fn run_getconf(key: &str) -> Option<u64> {
-    let out = Command::new("getconf").arg(key).output().ok()?;
+    let out = quiet_command("getconf").arg(key).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -250,7 +250,7 @@ fn disk_probe_targets() -> Vec<String> {
 
 #[cfg(unix)]
 fn df_k_gb(path: &str) -> Option<f64> {
-    let out = Command::new("df").args(["-k", path]).output().ok()?;
+    let out = quiet_command("df").args(["-k", path]).output().ok()?;
     if !out.status.success() {
         return None;
     }

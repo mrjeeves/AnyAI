@@ -8,6 +8,7 @@ mod conversations;
 mod hardware;
 mod ollama;
 mod preload;
+mod process;
 mod remote_ui;
 mod resolver;
 mod self_update;
@@ -349,13 +350,19 @@ async fn update_check_now() -> Result<self_update::CheckOutcome, String> {
     self_update::check_now().await.map_err(|e| e.to_string())
 }
 
-/// Relaunch the GUI so `apply_pending_if_any` swaps in the staged binary on
-/// next process start. The UI is expected to call this only after a
-/// successful check that produced a `Staged` outcome (or if `pending` is
-/// already non-null in `update_status`).
+/// Apply the staged update on disk, then relaunch the GUI so the new binary
+/// is the one that loads. Critical that the swap happens BEFORE `app.restart()`
+/// — Tauri spawns the new process via `current_exe`, and if we restart first
+/// then apply in `apply_pending_if_any`, the spawned process has already
+/// loaded the OLD binary into memory before the swap lands. The user sees a
+/// "restarted" window still on the old version and assumes the update silently
+/// failed. The UI is expected to call this only after a successful check that
+/// produced a `Staged` outcome (or if `pending` is already non-null in
+/// `update_status`).
 #[tauri::command]
-fn update_apply_now(app: tauri::AppHandle) {
-    app.restart();
+fn update_apply_now(app: tauri::AppHandle) -> Result<(), String> {
+    self_update::apply_pending_strict().map_err(|e| e.to_string())?;
+    app.restart()
 }
 
 /// WebKitGTK's DMA-BUF zero-copy renderer produces scrambled / torn frames

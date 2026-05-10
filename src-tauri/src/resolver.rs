@@ -435,7 +435,7 @@ async fn fetch_one_manifest(url: &str) -> Result<Value> {
 async fn fetch_manifest_http(url: &str) -> Result<Value> {
     let body = tokio::time::timeout(
         Duration::from_secs(10),
-        tokio::process::Command::new("curl")
+        crate::process::quiet_tokio_command("curl")
             .args(["-sf", "--max-time", "10", url])
             .output(),
     )

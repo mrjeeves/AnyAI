@@ -146,8 +146,9 @@ fn recompute_status_from_disk() -> Result<()> {
 }
 
 fn list_pulled_sync() -> Result<Vec<String>> {
-    use std::process::Command;
-    let out = Command::new("ollama").args(["list", "--json"]).output()?;
+    let out = crate::process::quiet_command("ollama")
+        .args(["list", "--json"])
+        .output()?;
     if !out.status.success() {
         return Ok(vec![]);
     }
