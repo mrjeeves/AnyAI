@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { getActiveManifest, getActiveProvider, setActiveFamily } from "../../providers";
-  import { resolveModel } from "../../manifest";
+  import { resolveModel, modeFor, defaultRuntimeFor } from "../../manifest";
   import { loadConfig, invalidateConfigCache } from "../../config";
   import type {
     HardwareProfile,
@@ -130,10 +130,20 @@
     return (mb / 1024).toFixed(1) + " GB";
   }
 
-  /** Modes the family declares tiers for, in canonical order. */
-  function modesIn(family: ManifestFamily): Mode[] {
+  /** Modes the family advertises (its own + manifest.shared_modes), in
+   *  canonical order. The manifest's shared_modes block contributes
+   *  modes (e.g. transcribe) that the family inherits without
+   *  redeclaring. */
+  function modesIn(m: Manifest, family: ManifestFamily): Mode[] {
     const order: Mode[] = ["text", "vision", "code", "transcribe"];
-    return order.filter((m) => !!family.modes[m]);
+    return order.filter((mode) => !!modeFor(m, family, mode));
+  }
+
+  /** True when a mode block is the shared / inherited one (i.e. comes
+   *  from manifest.shared_modes rather than the family's own
+   *  declaration). Surfaces in the detail UI as a "shared" badge. */
+  function isShared(m: Manifest, family: ManifestFamily, mode: Mode): boolean {
+    return !family.modes[mode] && !!m.shared_modes?.[mode];
   }
 
   function familyOrFirst(name: string | null): { name: string; family: ManifestFamily } | null {
@@ -203,7 +213,7 @@
       <p class="empty">Family not found.</p>
     {:else}
       {@const isActive = picked.name === activeFamily}
-      {@const modes = modesIn(picked.family)}
+      {@const modes = modesIn(manifest, picked.family)}
       <div class="detail-head">
         <button class="back" onclick={() => (detailFamily = null)} aria-label="Back to families">
           ← Families
@@ -225,16 +235,20 @@
           <p class="empty-note">This family declares no modes.</p>
         {:else}
           {#each modes as modeName}
-            {@const modeSpec = picked.family.modes[modeName]!}
+            {@const modeSpec = modeFor(manifest, picked.family, modeName)!}
             {@const pickedModel = pickedTag(picked.name, modeName)}
             {@const isActiveCell = isActive && modeName === activeMode}
-            {@const runtime = modeSpec.runtime ?? "ollama"}
+            {@const runtime = modeSpec.runtime ?? defaultRuntimeFor(modeName)}
+            {@const shared = isShared(manifest, picked.family, modeName)}
             <div class="mode-block">
               <div class="mode-head">
                 <span class="mode-name">{modeSpec.label || modeName}</span>
                 <span class="runtime-tag" class:whisper={runtime === "whisper"}>
                   {runtime === "whisper" ? "whisper.cpp" : "ollama"}
                 </span>
+                {#if shared}
+                  <span class="shared-tag" title="Inherited from the manifest's shared_modes block — same ladder for every family unless they override.">shared</span>
+                {/if}
                 {#if isActiveCell}
                   <span class="mode-tag active-mode">your active mode</span>
                 {/if}
@@ -386,6 +400,17 @@
     color: #d4a64a;
     border-color: #4a3a1a;
     background: #1f1812;
+  }
+  .shared-tag {
+    font-size: .62rem;
+    color: #8a8af0;
+    background: #14182a;
+    padding: 0 .35rem;
+    border-radius: 4px;
+    text-transform: lowercase;
+    letter-spacing: 0;
+    border: 1px solid #1e2545;
+    cursor: help;
   }
   .dl-hint { color: #555; font-size: .68rem; margin-left: .15rem; }
 

@@ -4,6 +4,7 @@ import { homeDir } from "@tauri-apps/api/path";
 import type {
   Manifest,
   ManifestFamily,
+  ManifestMode,
   ManifestTier,
   ModelRuntime,
   HardwareProfile,
@@ -108,6 +109,7 @@ async function walk(url: string, visited: Set<string>): Promise<Manifest> {
 
   const raw = await fetchOne(url);
   const mergedFamilies: Record<string, ManifestFamily> = {};
+  const mergedSharedModes: Record<string, ManifestMode> = {};
 
   for (const importUrl of raw.imports ?? []) {
     let imported: Manifest;
@@ -119,10 +121,16 @@ async function walk(url: string, visited: Set<string>): Promise<Manifest> {
     for (const [key, family] of Object.entries(imported.families ?? {})) {
       mergedFamilies[key] = family;
     }
+    for (const [key, m] of Object.entries(imported.shared_modes ?? {})) {
+      mergedSharedModes[key] = m;
+    }
   }
-  // Importing file wins on family-key collision.
+  // Importing file wins on key collision (closer publisher overrides).
   for (const [key, family] of Object.entries(raw.families ?? {})) {
     mergedFamilies[key] = family;
+  }
+  for (const [key, m] of Object.entries(raw.shared_modes ?? {})) {
+    mergedSharedModes[key] = m;
   }
 
   return {
@@ -130,6 +138,7 @@ async function walk(url: string, visited: Set<string>): Promise<Manifest> {
     version: raw.version,
     ttl_minutes: raw.ttl_minutes,
     default_family: raw.default_family,
+    shared_modes: mergedSharedModes,
     families: mergedFamilies,
   };
 }
@@ -182,6 +191,20 @@ export function defaultRuntimeFor(mode: Mode): ModelRuntime {
   return mode === "transcribe" ? "whisper" : "ollama";
 }
 
+/** Look up a mode block, preferring the family's own declaration but
+ *  falling back to `manifest.shared_modes`. The shared-modes pattern
+ *  lets the manifest publish a canonical `transcribe` block once and
+ *  every family inherit it without redeclaring six tiers each. Family-
+ *  level overrides win — a family can publish its own `transcribe` to
+ *  customise the whisper picks. */
+export function modeFor(
+  manifest: Manifest,
+  family: ManifestFamily,
+  mode: Mode,
+): ManifestMode | undefined {
+  return family.modes[mode] ?? manifest.shared_modes?.[mode];
+}
+
 export function resolveModelEx(
   hardware: HardwareProfile,
   manifest: Manifest,
@@ -191,11 +214,12 @@ export function resolveModelEx(
 ): ResolvedModel {
   const picked = pickFamily(manifest, familyName);
   const family = picked?.family;
-  // Read `runtime` strictly from the requested mode's spec — never from
-  // the fallback mode, since text/code/vision live on Ollama and would
-  // otherwise mask transcribe's whisper runtime when the cached manifest
-  // doesn't declare it.
-  const exactSpec = family?.modes[mode];
+  // Look up the mode in the family first, then fall back to
+  // manifest.shared_modes (the canonical whisper transcribe ladder
+  // lives there). Never inherit from the family's `default_mode` —
+  // that mode runs on a different runtime and its tier ladder is
+  // incompatible.
+  const exactSpec = family ? modeFor(manifest, family, mode) : undefined;
   const runtime: ModelRuntime =
     exactSpec?.runtime ?? defaultRuntimeFor(mode);
 
@@ -204,20 +228,16 @@ export function resolveModelEx(
     return { model: override, runtime, tier: null, override: true };
   }
 
-  // No explicit block AND we're on a non-Ollama runtime — fall back to a
-  // safe well-known whisper model rather than crossing tier ladders with
-  // the text-mode model picker (which would surface nonsense like
+  // No exact OR shared block AND we're on a non-Ollama runtime — fall
+  // back to a safe well-known whisper model rather than crossing tier
+  // ladders with text mode (which would surface nonsense like
   // `whisper:gemma4:e2b` and trip whisper-rs).
   if (!exactSpec && runtime === "whisper") {
     return { model: "tiny.en", runtime, tier: null, override: false };
   }
 
-  // Walk tiers from the requested mode if it exists, otherwise from the
-  // family's default_mode. Only safe to do this for ollama-runtime modes
-  // because the tier ladder for text/code/vision is interchangeable in
-  // shape — same isn't true for whisper, handled above.
-  const tierSpec =
-    exactSpec ?? (family ? family.modes[family.default_mode] : null);
+  const tierSpec = exactSpec
+    ?? (family ? family.modes[family.default_mode] : null);
 
   if (!tierSpec) {
     return { model: "tinyllama", runtime, tier: null, override: false };
@@ -283,25 +303,31 @@ export function allRecommendedModels(manifest: Manifest): Set<string> {
   return models;
 }
 
-/** Modes a specific family in a manifest defines tiers for. Transcribe
- *  is always advertised because whisper-rs ships with the binary —
- *  exposing it even when a cached manifest predates the `transcribe`
- *  block keeps the mode bar usable across schema upgrades. */
-export function familyModes(family: ManifestFamily): Set<Mode> {
+/** Modes a family advertises. Reads both the family's own declared
+ *  `modes` and the manifest's `shared_modes` so a family that just
+ *  inherits the canonical transcribe block still surfaces it on the
+ *  mode bar. Transcribe is always advertised because whisper-rs ships
+ *  with the binary — exposing it even when a cached manifest predates
+ *  the `transcribe` block keeps the mode bar usable across upgrades. */
+export function familyModes(manifest: Manifest, family: ManifestFamily): Set<Mode> {
   const out = new Set<Mode>();
-  for (const m of ["text", "vision", "code"] as Mode[]) {
-    if (family.modes[m]) out.add(m);
+  for (const m of ["text", "vision", "code", "transcribe"] as Mode[]) {
+    if (modeFor(manifest, family, m)) out.add(m);
   }
   out.add("transcribe");
   return out;
 }
 
 /** True if a mode resolves to whisper-rs (rather than Ollama) under the
- *  active family. Falls back to `defaultRuntimeFor(mode)` when the
- *  manifest doesn't declare a runtime — so a stale pre-`runtime`-field
- *  cached manifest still flags transcribe as whisper instead of
- *  inheriting the family's text-mode runtime. */
-export function isWhisperMode(family: ManifestFamily, mode: Mode): boolean {
-  const declared = family.modes[mode]?.runtime;
+ *  active family. Reads the family's spec first, then `shared_modes`,
+ *  then falls back to `defaultRuntimeFor(mode)` so a stale
+ *  pre-`runtime`-field cached manifest still flags transcribe as
+ *  whisper. */
+export function isWhisperMode(
+  manifest: Manifest,
+  family: ManifestFamily,
+  mode: Mode,
+): boolean {
+  const declared = modeFor(manifest, family, mode)?.runtime;
   return (declared ?? defaultRuntimeFor(mode)) === "whisper";
 }

@@ -65,6 +65,14 @@
   let activeModel = $state("");
   let activeMode = $state<Mode>("text");
   let activeFamilyName = $state("");
+  /** What the family/tier resolver picks for transcribe with the
+   *  current hardware. Stored separately from `activeModel` so we can
+   *  pre-pull / re-pull whisper independently of the active mode. */
+  let pendingWhisperModel = $state("");
+  /** Tag handed to FirstRun when something needs pulling. Set during
+   *  onMount based on what's actually missing on disk. */
+  let firstRunTextModel = $state("");
+  let firstRunWhisperModel = $state("");
   let supportedModes = $state<Set<Mode>>(new Set(["text", "vision", "code", "transcribe"]));
   let error = $state("");
 
@@ -99,7 +107,7 @@
     if (!manifest) return new Set(["text", "vision", "code", "transcribe"]);
     const picked = pickFamily(manifest, familyName);
     if (!picked) return new Set();
-    return familyModes(picked.family);
+    return familyModes(manifest, picked.family);
   }
 
   /** What to display in the status bar / pass downstream as the "active
@@ -152,32 +160,68 @@
           ? `whisper:${activeResolved.model}`
           : activeResolved.model;
 
-      // The pull guard only applies to Ollama-runtime modes. Whisper
-      // models live under `~/.anyai/whisper/` and are managed by
-      // Settings → Transcription; TranscribeView's pre-flight surfaces
-      // a deep-link if the picked model isn't installed yet.
-      if (activeResolved.runtime !== "ollama") {
-        invoke<boolean>("ollama_installed")
-          .then((installed) => {
-            if (installed) invoke("ollama_ensure_running").catch(() => {});
-          })
-          .catch(() => {});
-        view = "chat";
-      } else {
-        const ollamaInstalled = await invoke<boolean>("ollama_installed");
-        if (!ollamaInstalled) {
-          view = "first-run";
-        } else {
-          // Check if the model needs pulling
-          const pulled = await invoke<Array<{ name: string }>>("ollama_list_models");
-          const hasCurrent = pulled.some((m) => m.name === activeResolved.model);
-          if (!hasCurrent) {
-            view = "first-run";
-          } else {
-            await invoke("ollama_ensure_running");
-            view = "chat";
-          }
+      // Always resolve transcribe alongside whatever the user's active
+      // mode is — we want the whisper model present too so a switch
+      // into transcribe mode "just works" without a separate download
+      // flow. Resolved here so FirstRun can pull both in parallel.
+      const transcribeResolved = resolveModelEx(
+        hw,
+        manifest,
+        "transcribe",
+        config.mode_overrides,
+        activeFamilyName,
+      );
+      pendingWhisperModel =
+        transcribeResolved.runtime === "whisper" ? transcribeResolved.model : "";
+
+      // We need both the active text model (Ollama) AND the picked
+      // whisper transcribe model on disk. FirstRun pulls whichever is
+      // missing in parallel; if everything is already present we skip
+      // straight to chat.
+      const ollamaInstalled = await invoke<boolean>("ollama_installed");
+      const textModelToCheck =
+        activeResolved.runtime === "ollama" ? activeResolved.model : "";
+      let textPresent = textModelToCheck === ""; // non-Ollama modes don't need it
+      if (textModelToCheck && ollamaInstalled) {
+        const pulled = await invoke<Array<{ name: string }>>("ollama_list_models");
+        textPresent = pulled.some((m) => m.name === textModelToCheck);
+      }
+      let whisperPresent = pendingWhisperModel === "";
+      if (pendingWhisperModel) {
+        try {
+          const list = await invoke<Array<{ name: string; installed: boolean }>>(
+            "whisper_models_list",
+          );
+          whisperPresent = list.some(
+            (m) => m.name === pendingWhisperModel && m.installed,
+          );
+        } catch {
+          whisperPresent = false;
         }
+      }
+
+      if (!ollamaInstalled || !textPresent || !whisperPresent) {
+        // Pass an Ollama tag through `activeModel` so FirstRun has
+        // something to pull on the text-mode side even when the user
+        // happens to be in transcribe mode at first launch (the
+        // text-mode resolution still picks a real Ollama tag).
+        if (!textModelToCheck) {
+          const textResolved = resolveModelEx(
+            hw,
+            manifest,
+            "text",
+            config.mode_overrides,
+            activeFamilyName,
+          );
+          firstRunTextModel = textResolved.model;
+        } else {
+          firstRunTextModel = textModelToCheck;
+        }
+        firstRunWhisperModel = whisperPresent ? "" : pendingWhisperModel;
+        view = "first-run";
+      } else {
+        await invoke("ollama_ensure_running");
+        view = "chat";
       }
 
       // Seed the sidebar early so it's ready when the chat view paints.
@@ -367,7 +411,12 @@
       <p>Detecting hardware…</p>
     </div>
   {:else if view === "first-run"}
-    <FirstRun {hardware} {activeModel} onComplete={onFirstRunComplete} />
+    <FirstRun
+      {hardware}
+      activeModel={firstRunTextModel}
+      whisperModel={firstRunWhisperModel}
+      onComplete={onFirstRunComplete}
+    />
   {:else}
     {#if error}
       <div class="error-banner">⚠ Startup failed: {error}</div>
