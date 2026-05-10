@@ -20,12 +20,14 @@ irm https://raw.githubusercontent.com/mrjeeves/AnyAI/main/scripts/install.ps1 | 
 
 Or grab a binary from [Releases](https://github.com/mrjeeves/AnyAI/releases).
 
+Runs on a Raspberry Pi 5 too — the default manifest ships Gemma 4's edge variants (`e2b` / `e4b`), which are agentic, multimodal, Apache-2.0, and built for offline edge inference. See [DOCS.md › Small systems](DOCS.md#small-systems-raspberry-pi-4--pi-5).
+
 ## Quick start
 
 ```
 $ anyai serve
 Listening on http://127.0.0.1:1473
-Tracking: text → qwen3.6:27b
+Tracking: text → gemma4:e4b
 ```
 
 In another shell, hit it:
