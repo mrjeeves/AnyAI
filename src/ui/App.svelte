@@ -410,6 +410,31 @@
     height: 100vh;
     overflow: hidden;
   }
+  /* Always-on dark scrollbars. macOS overlay scrollbars hide by default,
+     which made the Settings → Hardware list look like it ended at the
+     viewport. Forcing a thin, visible track is the cheapest fix. */
+  :global(*) {
+    scrollbar-width: thin;
+    scrollbar-color: #2a2a2a #0d0d0d;
+  }
+  :global(*::-webkit-scrollbar) {
+    width: 10px;
+    height: 10px;
+  }
+  :global(*::-webkit-scrollbar-track) {
+    background: #0d0d0d;
+  }
+  :global(*::-webkit-scrollbar-thumb) {
+    background: #2a2a2a;
+    border-radius: 5px;
+    border: 2px solid #0d0d0d;
+  }
+  :global(*::-webkit-scrollbar-thumb:hover) {
+    background: #3a3a55;
+  }
+  :global(*::-webkit-scrollbar-corner) {
+    background: #0d0d0d;
+  }
   .app {
     height: 100vh;
     display: flex;
