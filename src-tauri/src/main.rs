@@ -11,6 +11,7 @@ mod preload;
 mod remote_ui;
 mod resolver;
 mod self_update;
+mod transcribe;
 mod watcher;
 
 #[cfg(target_os = "windows")]
@@ -266,6 +267,49 @@ async fn remote_ui_kick(disable: bool) -> Result<RemoteUiStatus, String> {
     remote_ui_status()
 }
 
+// ---------------------------------------------------------------------------
+// Local-only transcription pipeline. Audio capture + whisper-rs both run
+// in-process; nothing is sent over the network at runtime. Models live
+// under `~/.anyai/whisper/` and are downloaded on demand.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn transcribe_start(
+    stream_id: String,
+    model: String,
+    device: Option<String>,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
+    transcribe::start(stream_id, model, device, window).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn transcribe_stop(stream_id: String) -> Result<(), String> {
+    transcribe::stop(&stream_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn whisper_models_list() -> Result<Vec<transcribe::WhisperModelInfo>, String> {
+    transcribe::list_models().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn whisper_model_pull(name: String, window: tauri::WebviewWindow) -> Result<(), String> {
+    transcribe::pull_model(name, window)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn whisper_model_remove(name: String) -> Result<(), String> {
+    transcribe::remove_model(&name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn audio_input_devices() -> Result<Vec<transcribe::AudioInputDevice>, String> {
+    transcribe::list_input_devices().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn update_status() -> Result<self_update::UpdateStatus, String> {
     self_update::status().map_err(|e| e.to_string())
@@ -385,6 +429,12 @@ fn main() {
             remote_ui_qr,
             remote_ui_local_heartbeat,
             remote_ui_kick,
+            transcribe_start,
+            transcribe_stop,
+            whisper_models_list,
+            whisper_model_pull,
+            whisper_model_remove,
+            audio_input_devices,
         ])
         .setup(|app| {
             // If the configured 800x600 window can't fit on this monitor —

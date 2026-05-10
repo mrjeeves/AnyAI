@@ -36,6 +36,10 @@
       "allow": [{ "path": "$HOME/.anyai" }, { "path": "$HOME/.anyai/**" }]
     },
     {
+      "identifier": "fs:allow-rename",
+      "allow": [{ "path": "$HOME/.anyai" }, { "path": "$HOME/.anyai/**" }]
+    },
+    {
       "identifier": "http:default",
       "allow": [
         { "url": "http://127.0.0.1:*/*" },

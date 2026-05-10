@@ -15,9 +15,14 @@
     listConversations,
     deleteConversation,
     renameConversation,
+    moveConversation,
+    createFolder,
+    renameFolder,
+    deleteFolder,
     getActiveConversationId,
     setActiveConversationId,
     type ConversationMeta,
+    type FolderMeta,
   } from "../conversations";
   import type { HardwareProfile, Mode } from "../types";
 
@@ -67,6 +72,7 @@
   // conversation created by Chat shows up across remounts.
   let sidebarOpen = $state(true);
   let conversations = $state<ConversationMeta[]>([]);
+  let folders = $state<FolderMeta[]>([]);
   let activeConversationId = $state<string | null>(null);
   /** Bumped to ask Chat to create a fresh conversation. Plain counter so
    *  re-clicks of "New chat" still trigger a reset even when the chat is
@@ -97,7 +103,9 @@
   }
 
   async function refreshConversations() {
-    conversations = await listConversations();
+    const list = await listConversations();
+    conversations = list.conversations;
+    folders = list.folders;
   }
 
   onMount(async () => {
@@ -296,6 +304,26 @@
     await refreshConversations();
   }
 
+  async function onMoveConversation(id: string, folder: string) {
+    await moveConversation(id, folder);
+    await refreshConversations();
+  }
+
+  async function onCreateFolder(path: string) {
+    await createFolder(path);
+    await refreshConversations();
+  }
+
+  async function onRenameFolder(oldPath: string, newPath: string) {
+    await renameFolder(oldPath, newPath);
+    await refreshConversations();
+  }
+
+  async function onDeleteFolder(path: string) {
+    await deleteFolder(path);
+    await refreshConversations();
+  }
+
   function onConversationChanged(id: string) {
     if (activeConversationId !== id) {
       activeConversationId = id;
@@ -322,12 +350,17 @@
       <Sidebar
         open={sidebarOpen}
         items={conversations}
+        folders={folders}
         activeId={activeConversationId}
         mode={activeMode}
         onSelect={onSelectConversation}
         onNew={onNewConversation}
         onRename={onRenameConversation}
         onDelete={onDeleteConversation}
+        onMove={onMoveConversation}
+        onCreateFolder={onCreateFolder}
+        onRenameFolder={onRenameFolder}
+        onDeleteFolder={onDeleteFolder}
         onClose={() => (sidebarOpen = false)}
       />
       {#if activeMode === "transcribe"}

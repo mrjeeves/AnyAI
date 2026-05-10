@@ -36,11 +36,12 @@ const DEFAULT_REMOTE_UI: RemoteUiConfig = {
 };
 
 const DEFAULT_MIC: MicConfig = {
-  device_id: "",
+  device_name: "",
   sample_rate: 16000,
   echo_cancellation: true,
   noise_suppression: true,
   auto_gain_control: true,
+  whisper_model: "tiny.en",
 };
 
 const DEFAULT_CONFIG: Config = {
