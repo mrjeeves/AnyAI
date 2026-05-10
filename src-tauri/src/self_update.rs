@@ -1367,7 +1367,9 @@ abc123  myownllm-linux-x86_64.tar.gz
             InstallKind::PackageManager
         );
         assert_eq!(
-            detect_install_kind_from_path(r"C:\ProgramData\chocolatey\lib\myownllm\tools\myownllm.exe"),
+            detect_install_kind_from_path(
+                r"C:\ProgramData\chocolatey\lib\myownllm\tools\myownllm.exe"
+            ),
             InstallKind::PackageManager
         );
         assert_eq!(
@@ -1395,7 +1397,11 @@ abc123  myownllm-linux-x86_64.tar.gz
             eprintln!("skipping: `tar` not found on PATH");
             return;
         }
-        let bin_name = if cfg!(windows) { "myownllm.exe" } else { "myownllm" };
+        let bin_name = if cfg!(windows) {
+            "myownllm.exe"
+        } else {
+            "myownllm"
+        };
         let dir = tempdir_for_test("myownllm-extract-targz");
         let bin_inside = dir.join(bin_name);
         std::fs::write(&bin_inside, b"fake-binary").unwrap();

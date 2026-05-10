@@ -64,40 +64,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "myownllm"
-version = "0.1.20"
-dependencies = [
- "anyhow",
- "axum",
- "bytes",
- "cpal",
- "crossbeam-channel",
- "dashmap",
- "dirs 5.0.1",
- "futures-util",
- "hex",
- "hyper",
- "qrcode",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-fs",
- "tauri-plugin-http",
- "tauri-plugin-shell",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tower",
- "tower-http",
- "which 6.0.3",
- "whisper-rs",
-]
-
-[[package]]
 name = "anyhow"
 version = "1.0.102"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2305,6 +2271,40 @@ dependencies = [
  "serde",
  "thiserror 2.0.18",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "myownllm"
+version = "0.1.20"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bytes",
+ "cpal",
+ "crossbeam-channel",
+ "dashmap",
+ "dirs 5.0.1",
+ "futures-util",
+ "hex",
+ "hyper",
+ "qrcode",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-fs",
+ "tauri-plugin-http",
+ "tauri-plugin-shell",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tower",
+ "tower-http",
+ "which 6.0.3",
+ "whisper-rs",
 ]
 
 [[package]]
