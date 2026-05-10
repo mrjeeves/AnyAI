@@ -90,28 +90,6 @@ export async function loadConfig(): Promise<Config> {
   return _cached;
 }
 
-/** Pre-1.0 builds (when the project was named AnyAI) shipped this URL for the
- *  Default provider. The host no longer serves the manifest; rewrite it on
- *  load so users with an older config don't see a dead URL in the Providers
- *  tab. Cheap; runs once per load and persists via saveConfig. */
-const LEGACY_MYOWNLLM_RUN_HOST = "anyai.run";
-const CANONICAL_DEFAULT_URL =
-  "https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/manifests/default.json";
-
-function rewriteLegacyProviderUrls(providers: Config["providers"]): Config["providers"] {
-  return providers.map((p) => {
-    try {
-      const host = new URL(p.url).hostname;
-      if (host === LEGACY_MYOWNLLM_RUN_HOST) {
-        return { ...p, url: CANONICAL_DEFAULT_URL };
-      }
-    } catch {
-      // Malformed URL — leave it alone; the user can edit/remove via the UI.
-    }
-    return p;
-  });
-}
-
 function mergeDefaults(raw: Record<string, unknown>): Config {
   const merged: Config = {
     ...DEFAULT_CONFIG,
@@ -132,9 +110,7 @@ function mergeDefaults(raw: Record<string, unknown>): Config {
     mode_overrides: (raw as { mode_overrides?: Config["mode_overrides"] }).mode_overrides ?? {},
     kept_models: (raw as { kept_models?: string[] }).kept_models ?? [],
     tracked_modes: (raw as { tracked_modes?: Config["tracked_modes"] }).tracked_modes ?? [],
-    providers: rewriteLegacyProviderUrls(
-      (raw as { providers?: Config["providers"] }).providers ?? DEFAULT_CONFIG.providers,
-    ),
+    providers: (raw as { providers?: Config["providers"] }).providers ?? DEFAULT_CONFIG.providers,
   };
   // Strip removed legacy fields so they don't linger in the saved config.
   delete (merged as unknown as { sources?: unknown }).sources;
