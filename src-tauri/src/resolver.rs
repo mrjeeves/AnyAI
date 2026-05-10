@@ -80,26 +80,84 @@ pub fn resolve_in_manifest(
     mode: &str,
     active_family: &str,
 ) -> Result<String> {
+    Ok(resolve_full(manifest, hw, mode, active_family)?.0)
+}
+
+/// Default runtime for a mode when the manifest doesn't declare one.
+/// Mirror of `defaultRuntimeFor` on the TS side. Transcribe always uses
+/// whisper-rs in this app; everything else routes through Ollama. Used
+/// so a stale cached manifest from before the `runtime` field landed
+/// can't trick the resolver into handing whisper-shaped names to
+/// `ollama pull`.
+pub fn default_runtime_for(mode: &str) -> &'static str {
+    if mode == "transcribe" {
+        "whisper"
+    } else {
+        "ollama"
+    }
+}
+
+/// Resolve a `(model, runtime)` pair against the active family's tier
+/// table. Runtime is read **strictly from the requested mode's spec** —
+/// never inherited from a fallback default mode — so a transcribe
+/// request whose mode is missing from the manifest still routes through
+/// whisper-rs instead of inheriting `text`'s `ollama` runtime.
+pub fn resolve_full(
+    manifest: &Value,
+    hw: &HardwareProfile,
+    mode: &str,
+    active_family: &str,
+) -> Result<(String, String)> {
     let (_family_name, family) = pick_family(manifest, active_family)
         .ok_or_else(|| anyhow!("manifest exposes no families"))?;
+
+    // Look up the mode in the family first, then the manifest's
+    // shared_modes block (the canonical whisper transcribe ladder
+    // lives there). The family's own declaration always wins so a
+    // family can override a shared mode without forking the schema.
+    let exact_spec = family
+        .get("modes")
+        .and_then(|m| m.get(mode))
+        .and_then(|v| v.as_object())
+        .or_else(|| {
+            manifest
+                .get("shared_modes")
+                .and_then(|m| m.get(mode))
+                .and_then(|v| v.as_object())
+        });
+
+    // Runtime is bound to the requested mode, not the fallback. If the
+    // requested mode isn't declared we use the well-known default for
+    // that mode (transcribe → whisper, everything else → ollama).
+    let runtime = exact_spec
+        .and_then(|s| s.get("runtime"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| default_runtime_for(mode))
+        .to_string();
+
+    // No explicit block AND we're on a non-ollama runtime — return a
+    // safe whisper default rather than crossing tier ladders with text
+    // mode (which would surface nonsense like the text model + whisper
+    // runtime, then trip whisper-rs at load time).
+    if exact_spec.is_none() && runtime == "whisper" {
+        return Ok(("tiny.en".to_string(), runtime));
+    }
 
     let default_mode = family
         .get("default_mode")
         .and_then(|v| v.as_str())
         .unwrap_or("text");
-    let mode_spec = family
-        .get("modes")
-        .and_then(|m| m.get(mode))
-        .and_then(|v| v.as_object())
-        .or_else(|| {
-            family
-                .get("modes")
-                .and_then(|m| m.get(default_mode))
-                .and_then(|v| v.as_object())
-        })
-        .ok_or_else(|| anyhow!("mode '{mode}' not found in active family"))?;
+    let tier_spec = exact_spec.or_else(|| {
+        family
+            .get("modes")
+            .and_then(|m| m.get(default_mode))
+            .and_then(|v| v.as_object())
+    });
+    let Some(tier_spec) = tier_spec else {
+        return Err(anyhow!("mode '{mode}' not found in active family"));
+    };
 
-    let tiers = mode_spec
+    let tiers = tier_spec
         .get("tiers")
         .and_then(|t| t.as_array())
         .ok_or_else(|| anyhow!("no tiers in active family"))?;
@@ -112,16 +170,43 @@ pub fn resolve_in_manifest(
         let min_ram = tier["min_ram_gb"].as_f64().unwrap_or(0.0);
         if vram >= min_vram || ram >= min_ram {
             if let Some(model) = tier["model"].as_str() {
-                return Ok(model.to_string());
+                return Ok((model.to_string(), runtime));
             }
         }
     }
 
-    tiers
+    let last = tiers
         .last()
         .and_then(|t| t["model"].as_str())
         .map(str::to_string)
-        .ok_or_else(|| anyhow!("no model found in active family tiers"))
+        .ok_or_else(|| anyhow!("no model found in active family tiers"))?;
+    Ok((last, runtime))
+}
+
+/// Look up the effective runtime for `mode` under the active family.
+/// Reads the manifest's declared runtime when present, otherwise falls
+/// back to `default_runtime_for(mode)` so the preload loop skips
+/// `ollama pull` for whisper modes even when the cached manifest
+/// predates the `runtime` field.
+pub fn mode_runtime(manifest: &Value, mode: &str, active_family: &str) -> Option<String> {
+    let (_, family) = pick_family(manifest, active_family)?;
+    let declared = family
+        .get("modes")
+        .and_then(|m| m.get(mode))
+        .and_then(|v| v.get("runtime"))
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            manifest
+                .get("shared_modes")
+                .and_then(|m| m.get(mode))
+                .and_then(|v| v.get("runtime"))
+                .and_then(|v| v.as_str())
+        });
+    Some(
+        declared
+            .unwrap_or_else(|| default_runtime_for(mode))
+            .to_string(),
+    )
 }
 
 /// VRAM the resolver should credit toward `min_vram_gb` checks. Mirrors
@@ -141,22 +226,40 @@ fn effective_vram_gb(hw: &HardwareProfile) -> f64 {
 /// All model tags recommended by a manifest across every family/mode/tier.
 pub fn tags_in_manifest(manifest: &Value) -> Vec<String> {
     let mut out = Vec::new();
+    let mut push_mode = |mode_spec: &Value| {
+        // Cleanup is Ollama-only: skip non-Ollama runtimes (whisper
+        // models live under ~/.anyai/whisper/ and aren't reachable
+        // from `ollama list` anyway).
+        let runtime = mode_spec
+            .get("runtime")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ollama");
+        if runtime != "ollama" {
+            return;
+        }
+        if let Some(tiers) = mode_spec["tiers"].as_array() {
+            for tier in tiers {
+                if let Some(t) = tier["model"].as_str() {
+                    out.push(t.to_string());
+                }
+                if let Some(t) = tier["fallback"].as_str() {
+                    out.push(t.to_string());
+                }
+            }
+        }
+    };
     if let Some(families) = manifest["families"].as_object() {
         for (_name, family) in families {
             if let Some(modes) = family["modes"].as_object() {
                 for (_, mode_spec) in modes {
-                    if let Some(tiers) = mode_spec["tiers"].as_array() {
-                        for tier in tiers {
-                            if let Some(t) = tier["model"].as_str() {
-                                out.push(t.to_string());
-                            }
-                            if let Some(t) = tier["fallback"].as_str() {
-                                out.push(t.to_string());
-                            }
-                        }
-                    }
+                    push_mode(mode_spec);
                 }
             }
+        }
+    }
+    if let Some(shared) = manifest["shared_modes"].as_object() {
+        for (_, mode_spec) in shared {
+            push_mode(mode_spec);
         }
     }
     out.sort();
@@ -214,6 +317,7 @@ fn walk_manifest<'a>(
 
         let raw = fetch_one_manifest(url).await?;
         let mut merged_families: Map<String, Value> = Map::new();
+        let mut merged_shared: Map<String, Value> = Map::new();
 
         if let Some(imports) = raw["imports"].as_array() {
             for imp in imports {
@@ -229,13 +333,23 @@ fn walk_manifest<'a>(
                         merged_families.insert(k.clone(), v.clone());
                     }
                 }
+                if let Some(shared) = imported["shared_modes"].as_object() {
+                    for (k, v) in shared {
+                        merged_shared.insert(k.clone(), v.clone());
+                    }
+                }
             }
         }
 
-        // Importing file wins on family-key collision (closer publisher).
+        // Importing file wins on key collision (closer publisher).
         if let Some(families) = raw["families"].as_object() {
             for (k, v) in families {
                 merged_families.insert(k.clone(), v.clone());
+            }
+        }
+        if let Some(shared) = raw["shared_modes"].as_object() {
+            for (k, v) in shared {
+                merged_shared.insert(k.clone(), v.clone());
             }
         }
 
@@ -244,6 +358,7 @@ fn walk_manifest<'a>(
             "version": raw["version"].clone(),
             "ttl_minutes": raw["ttl_minutes"].clone(),
             "default_family": raw["default_family"].clone(),
+            "shared_modes": Value::Object(merged_shared),
             "families": Value::Object(merged_families),
         }))
     })
@@ -258,6 +373,30 @@ fn empty_manifest() -> Value {
     })
 }
 
+/// Bundled manifest source, included at compile time. We keep a
+/// const_cell-like helper to parse-once-and-share since several call
+/// sites compare the bundled version to whatever's cached.
+fn bundled_manifest() -> Result<Value> {
+    let bundled = include_str!("../../manifests/default.json");
+    Ok(serde_json::from_str(bundled)?)
+}
+
+/// True when the binary's bundled manifest declares a newer schema
+/// version than what the cache has. Lets `just dev` rebuilds drop a
+/// stale cached manifest instead of letting it linger up to the
+/// configured TTL.
+fn bundled_is_newer(cached_manifest: &Value) -> bool {
+    let bundled = match bundled_manifest() {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let parse = |v: &Value| v["version"].as_str().and_then(|s| s.parse::<u64>().ok());
+    match (parse(&bundled), parse(cached_manifest)) {
+        (Some(b), Some(c)) => b > c,
+        _ => false,
+    }
+}
+
 /// Fetch a single manifest URL, honouring its own ttl_minutes. No import recursion.
 async fn fetch_one_manifest(url: &str) -> Result<Value> {
     if let Some(cached) = read_manifest_cache(url) {
@@ -265,7 +404,11 @@ async fn fetch_one_manifest(url: &str) -> Result<Value> {
             .as_f64()
             .unwrap_or(DEFAULT_TTL_MIN);
         let fetched_at = cached["fetched_at"].as_str().unwrap_or("");
-        if !is_stale(fetched_at, ttl_min) {
+        // Cache is OK if fresh AND the bundled binary doesn't already
+        // know about a newer schema. The version-bump escape hatch
+        // keeps `just dev` rebuilds from reading a stale cached
+        // manifest until TTL.
+        if !is_stale(fetched_at, ttl_min) && !bundled_is_newer(&cached["manifest"]) {
             return Ok(cached["manifest"].clone());
         }
     }
@@ -276,12 +419,15 @@ async fn fetch_one_manifest(url: &str) -> Result<Value> {
             Ok(m)
         }
         Err(_) => {
+            // Network failed — prefer the cache, but only if our bundled
+            // isn't ahead of it; otherwise the bundled is the authoritative
+            // source for the schema this binary understands.
             if let Some(cached) = read_manifest_cache(url) {
-                return Ok(cached["manifest"].clone());
+                if !bundled_is_newer(&cached["manifest"]) {
+                    return Ok(cached["manifest"].clone());
+                }
             }
-            // Bundled fallback shipped at compile time.
-            let bundled = include_str!("../../manifests/default.json");
-            Ok(serde_json::from_str(bundled)?)
+            bundled_manifest()
         }
     }
 }

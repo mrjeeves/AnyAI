@@ -8,7 +8,7 @@
   import Sidebar from "./Sidebar.svelte";
   import { loadConfig, updateConfig } from "../config";
   import { getActiveManifest } from "../providers";
-  import { resolveModel, pickFamily, familyModes } from "../manifest";
+  import { resolveModelEx, pickFamily, familyModes } from "../manifest";
   import { runCleanup } from "../model-lifecycle";
   import { onModeSwap } from "../watcher";
   import {
@@ -66,6 +66,14 @@
   let activeModel = $state("");
   let activeMode = $state<Mode>("text");
   let activeFamilyName = $state("");
+  /** What the family/tier resolver picks for transcribe with the
+   *  current hardware. Stored separately from `activeModel` so we can
+   *  pre-pull / re-pull whisper independently of the active mode. */
+  let pendingWhisperModel = $state("");
+  /** Tag handed to FirstRun when something needs pulling. Set during
+   *  onMount based on what's actually missing on disk. */
+  let firstRunTextModel = $state("");
+  let firstRunWhisperModel = $state("");
   let supportedModes = $state<Set<Mode>>(new Set(["text", "vision", "code", "transcribe"]));
   let error = $state("");
 
@@ -105,7 +113,22 @@
     if (!manifest) return new Set(["text", "vision", "code", "transcribe"]);
     const picked = pickFamily(manifest, familyName);
     if (!picked) return new Set();
-    return familyModes(picked.family);
+    return familyModes(manifest, picked.family);
+  }
+
+  /** What to display in the status bar / pass downstream as the "active
+   *  model". The manifest now declares the runtime per mode, so
+   *  transcribe and text both flow through the same resolver — we just
+   *  prefix whisper picks so the UI can't confuse `tiny.en` (a whisper
+   *  filename) with an Ollama tag. */
+  function displayModelFor(
+    mode: Mode,
+    hw: HardwareProfile,
+    manifest: Awaited<ReturnType<typeof getActiveManifest>>,
+    config: Awaited<ReturnType<typeof loadConfig>>,
+  ): string {
+    const r = resolveModelEx(hw, manifest, mode, config.mode_overrides, config.active_family);
+    return r.runtime === "whisper" ? `whisper:${r.model}` : r.model;
   }
 
   async function refreshConversations() {
@@ -131,22 +154,81 @@
       const picked = pickFamily(manifest, config.active_family);
       activeFamilyName = picked?.name ?? manifest.default_family ?? "";
       supportedModes = modesForActiveFamily(manifest, activeFamilyName);
-      activeModel = resolveModel(hw, manifest, activeMode, config.mode_overrides, activeFamilyName);
+      const activeResolved = resolveModelEx(
+        hw,
+        manifest,
+        activeMode,
+        config.mode_overrides,
+        activeFamilyName,
+      );
+      activeModel =
+        activeResolved.runtime === "whisper"
+          ? `whisper:${activeResolved.model}`
+          : activeResolved.model;
 
+      // Always resolve transcribe alongside whatever the user's active
+      // mode is — we want the whisper model present too so a switch
+      // into transcribe mode "just works" without a separate download
+      // flow. Resolved here so FirstRun can pull both in parallel.
+      const transcribeResolved = resolveModelEx(
+        hw,
+        manifest,
+        "transcribe",
+        config.mode_overrides,
+        activeFamilyName,
+      );
+      pendingWhisperModel =
+        transcribeResolved.runtime === "whisper" ? transcribeResolved.model : "";
+
+      // We need both the active text model (Ollama) AND the picked
+      // whisper transcribe model on disk. FirstRun pulls whichever is
+      // missing in parallel; if everything is already present we skip
+      // straight to chat.
       const ollamaInstalled = await invoke<boolean>("ollama_installed");
-      if (!ollamaInstalled) {
-        view = "first-run";
-      } else {
-        // Check if the model needs pulling
+      const textModelToCheck =
+        activeResolved.runtime === "ollama" ? activeResolved.model : "";
+      let textPresent = textModelToCheck === ""; // non-Ollama modes don't need it
+      if (textModelToCheck && ollamaInstalled) {
         const pulled = await invoke<Array<{ name: string }>>("ollama_list_models");
-        const hasCurrent = pulled.some((m) => m.name === activeModel);
-        if (!hasCurrent) {
-          view = "first-run";
-        } else {
-          await invoke("ollama_ensure_running");
-          view = "chat";
-          kickUpdateCheck();
+        textPresent = pulled.some((m) => m.name === textModelToCheck);
+      }
+      let whisperPresent = pendingWhisperModel === "";
+      if (pendingWhisperModel) {
+        try {
+          const list = await invoke<Array<{ name: string; installed: boolean }>>(
+            "whisper_models_list",
+          );
+          whisperPresent = list.some(
+            (m) => m.name === pendingWhisperModel && m.installed,
+          );
+        } catch {
+          whisperPresent = false;
         }
+      }
+
+      if (!ollamaInstalled || !textPresent || !whisperPresent) {
+        // Only ask FirstRun to pull what's actually missing. Passing
+        // empty strings tells FirstRun to skip that side — important
+        // because we don't want a "Downloading text" row to flash on
+        // screen for a model the user already has on disk.
+        firstRunTextModel = textPresent ? "" : (textModelToCheck || resolveModelEx(
+          hw,
+          manifest,
+          "text",
+          config.mode_overrides,
+          activeFamilyName,
+        ).model);
+        firstRunWhisperModel = whisperPresent ? "" : pendingWhisperModel;
+        view = "first-run";
+        console.info(
+          "[anyai] first-run: text=%s whisper=%s",
+          firstRunTextModel || "(present)",
+          firstRunWhisperModel || "(present)",
+        );
+      } else {
+        await invoke("ollama_ensure_running");
+        view = "chat";
+        kickUpdateCheck();
       }
 
       // Seed the sidebar early so it's ready when the chat view paints.
@@ -225,13 +307,7 @@
         const [config, manifest] = await Promise.all([loadConfig(), getActiveManifest()]);
         activeFamilyName = config.active_family;
         supportedModes = modesForActiveFamily(manifest, activeFamilyName);
-        activeModel = resolveModel(
-          hardware,
-          manifest,
-          activeMode,
-          config.mode_overrides,
-          activeFamilyName,
-        );
+        activeModel = displayModelFor(activeMode, hardware, manifest, config);
       });
     } catch (e) {
       // Surface the silenced startup error. Without this it's invisible:
@@ -330,9 +406,10 @@
     const [config, manifest] = await Promise.all([loadConfig(), getActiveManifest()]);
     activeFamilyName = config.active_family;
     supportedModes = modesForActiveFamily(manifest, activeFamilyName);
-    activeModel = resolveModel(hardware, manifest, mode, config.mode_overrides, activeFamilyName);
+    activeModel = displayModelFor(mode, hardware, manifest, config);
 
     await updateConfig({ active_mode: mode });
+    ensureWhisperPresent(hardware, manifest, config);
   }
 
   async function onProviderChange() {
@@ -340,13 +417,31 @@
     const [config, manifest] = await Promise.all([loadConfig(), getActiveManifest()]);
     activeFamilyName = config.active_family;
     supportedModes = modesForActiveFamily(manifest, activeFamilyName);
-    activeModel = resolveModel(
-      hardware,
-      manifest,
-      activeMode,
-      config.mode_overrides,
-      activeFamilyName,
-    );
+    activeModel = displayModelFor(activeMode, hardware, manifest, config);
+    ensureWhisperPresent(hardware, manifest, config);
+  }
+
+  /** Background-pull the family-resolved whisper model if it isn't on
+   *  disk yet. Fire-and-forget so the user can keep using text mode
+   *  while the whisper download runs; the next switch into transcribe
+   *  mode lands on a ready model instead of erroring out. */
+  function ensureWhisperPresent(
+    hw: HardwareProfile,
+    manifest: Awaited<ReturnType<typeof getActiveManifest>>,
+    config: Awaited<ReturnType<typeof loadConfig>>,
+  ) {
+    const r = resolveModelEx(hw, manifest, "transcribe", config.mode_overrides, activeFamilyName);
+    if (r.runtime !== "whisper" || !r.model) return;
+    invoke<Array<{ name: string; installed: boolean }>>("whisper_models_list")
+      .then((list) => {
+        const installed = list.some((m) => m.name === r.model && m.installed);
+        if (installed) return;
+        console.info("[anyai] background whisper pull: %s", r.model);
+        invoke("whisper_model_pull", { name: r.model }).catch((e) => {
+          console.warn("[anyai] background whisper pull failed:", e);
+        });
+      })
+      .catch(() => {});
   }
 
   function onSelectConversation(id: string) {
@@ -416,7 +511,12 @@
       <p>Detecting hardware…</p>
     </div>
   {:else if view === "first-run"}
-    <FirstRun {hardware} {activeModel} onComplete={onFirstRunComplete} />
+    <FirstRun
+      {hardware}
+      activeModel={firstRunTextModel}
+      whisperModel={firstRunWhisperModel}
+      onComplete={onFirstRunComplete}
+    />
   {:else}
     {#if error}
       <div class="error-banner">⚠ Startup failed: {error}</div>

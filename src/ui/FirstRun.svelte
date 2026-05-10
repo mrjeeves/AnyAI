@@ -1,13 +1,25 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { listen } from "@tauri-apps/api/event";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { open as openExternal } from "@tauri-apps/plugin-shell";
   import { onMount, onDestroy } from "svelte";
   import type { HardwareProfile } from "../types";
 
-  let { hardware, activeModel, onComplete } = $props<{
+  let {
+    hardware,
+    activeModel,
+    whisperModel,
+    onComplete,
+  } = $props<{
     hardware: HardwareProfile | null;
+    /** Ollama text-mode tag to pull (always present). */
     activeModel: string;
+    /** Optional whisper-rs ggml name (e.g. "tiny.en") to pull alongside
+     *  the text model. When the active family resolves transcribe to a
+     *  whisper model and that model isn't on disk, App.svelte passes
+     *  it in here so first-run can grab both. Empty / missing skips
+     *  the whisper pull. */
+    whisperModel?: string;
     onComplete: () => void;
   }>();
 
@@ -17,7 +29,7 @@
   // `completed` are byte counts for the layer currently transferring;
   // status-only frames (e.g. "pulling manifest", "verifying sha256 digest",
   // "writing manifest", "success") arrive with both at 0.
-  interface PullEvent {
+  interface OllamaPullEvent {
     status: string;
     digest?: string;
     total?: number;
@@ -26,67 +38,206 @@
     done?: boolean;
   }
 
-  let phase = $state<Phase>("check");
-  let progress = $state("");
-  let progressPercent = $state<number | null>(null); // 0–1, null = indeterminate
-  let progressBytes = $state<{ done: number; total: number } | null>(null);
-  let errorMsg = $state("");
-  let unlisten: (() => void) | null = null;
+  /** Mirrors `WhisperPullProgress` in src-tauri/src/transcribe.rs. */
+  interface WhisperPullEvent {
+    name: string;
+    bytes: number;
+    total: number;
+    done: boolean;
+    error: string | null;
+  }
 
-  // Smoothed transfer-rate display, computed from the delta between successive
-  // PullEvent frames. Useful as direct feedback that the download is or isn't
-  // making real progress.
-  let lastSampleAt = 0;
-  let lastSampleBytes = 0;
-  let bytesPerSec = $state<number | null>(null);
+  /** Per-model UI state for the parallel-pull layout. */
+  interface ModelProgress {
+    label: string;
+    tag: string;
+    status: string;
+    percent: number | null;
+    bytes: { done: number; total: number } | null;
+    rate: number | null;
+    done: boolean;
+    error: string | null;
+  }
+
+  let phase = $state<Phase>("check");
+  // Initialised in onMount with the freshly-read prop values. We keep
+  // `$state` declarations cheap so svelte-check doesn't flag the
+  // prop-ref warning ("only captures initial value").
+  let textProgress = $state<ModelProgress | null>(null);
+  let whisperProgress = $state<ModelProgress | null>(null);
+  let errorMsg = $state("");
+  let unlisteners: UnlistenFn[] = [];
+
+  // Per-model rate tracking. Smoothing via the delta-between-frames
+  // approach the original FirstRun used.
+  let textLastSampleAt = 0;
+  let textLastSampleBytes = 0;
+  let whisperLastSampleAt = 0;
+  let whisperLastSampleBytes = 0;
+
+  function emptyProgress(tag: string, label: string): ModelProgress {
+    return {
+      label,
+      tag,
+      status: "",
+      percent: null,
+      bytes: null,
+      rate: null,
+      done: false,
+      error: null,
+    };
+  }
 
   onMount(async () => {
-    unlisten = await listen<PullEvent>("ollama-pull-progress", (e) => {
-      const evt = e.payload;
-      progress = formatStatus(evt);
-      if (evt.total && evt.total > 0) {
-        progressPercent = evt.percent ?? (evt.completed ?? 0) / evt.total;
-        progressBytes = { done: evt.completed ?? 0, total: evt.total };
-        const now = Date.now();
-        if (lastSampleAt && evt.completed != null && evt.completed >= lastSampleBytes) {
-          const dt = (now - lastSampleAt) / 1000;
-          if (dt >= 0.5) {
-            bytesPerSec = (evt.completed - lastSampleBytes) / dt;
-            lastSampleAt = now;
-            lastSampleBytes = evt.completed;
+    // Seed the per-model progress rows from the props. Either side may
+    // be empty / missing — App.svelte only sets the model name when
+    // that side is genuinely missing on disk, and we should NOT show
+    // a "Downloading" row for something the user already has.
+    if (activeModel) {
+      textProgress = emptyProgress(activeModel, "Text model");
+    }
+    if (whisperModel) {
+      whisperProgress = emptyProgress(whisperModel, "Transcribe model");
+    }
+    // Subscribe to both event streams up front so neither pull can fire
+    // a frame faster than its listener attaches.
+    if (activeModel) {
+      unlisteners.push(
+        await listen<OllamaPullEvent>("ollama-pull-progress", (e) => {
+          if (!textProgress) return;
+          const evt = e.payload;
+          const status = formatOllamaStatus(evt);
+          if (evt.total && evt.total > 0) {
+            const completed = evt.completed ?? 0;
+            const percent = evt.percent ?? completed / evt.total;
+            const now = Date.now();
+            let rate = textProgress.rate;
+            if (textLastSampleAt && completed >= textLastSampleBytes) {
+              const dt = (now - textLastSampleAt) / 1000;
+              if (dt >= 0.5) {
+                rate = (completed - textLastSampleBytes) / dt;
+                textLastSampleAt = now;
+                textLastSampleBytes = completed;
+              }
+            } else {
+              textLastSampleAt = now;
+              textLastSampleBytes = completed;
+            }
+            textProgress = {
+              ...textProgress,
+              status,
+              percent,
+              bytes: { done: completed, total: evt.total },
+              rate,
+            };
+          } else {
+            textProgress = {
+              ...textProgress,
+              status,
+              percent: null,
+              bytes: null,
+              rate: null,
+            };
           }
-        } else {
-          lastSampleAt = now;
-          lastSampleBytes = evt.completed ?? 0;
-        }
-      } else {
-        // Indeterminate phase (manifest fetch, verify, write).
-        progressPercent = null;
-        progressBytes = null;
-        bytesPerSec = null;
-      }
-    });
+        }),
+      );
+    }
+
+    if (whisperModel) {
+      const event = `anyai://whisper-pull/${whisperModel}`;
+      unlisteners.push(
+        await listen<WhisperPullEvent>(event, (e) => {
+          if (!whisperProgress) return;
+          const f = e.payload;
+          const now = Date.now();
+          let rate = whisperProgress.rate;
+          if (
+            whisperLastSampleAt &&
+            f.bytes >= whisperLastSampleBytes
+          ) {
+            const dt = (now - whisperLastSampleAt) / 1000;
+            if (dt >= 0.5) {
+              rate = (f.bytes - whisperLastSampleBytes) / dt;
+              whisperLastSampleAt = now;
+              whisperLastSampleBytes = f.bytes;
+            }
+          } else {
+            whisperLastSampleAt = now;
+            whisperLastSampleBytes = f.bytes;
+          }
+          whisperProgress = {
+            ...whisperProgress,
+            status: f.error ? `Failed: ${f.error}` : f.done ? "Done" : "Downloading",
+            percent: f.total > 0 ? f.bytes / f.total : null,
+            bytes: f.total > 0 ? { done: f.bytes, total: f.total } : null,
+            rate,
+            done: f.done && !f.error,
+            error: f.error,
+          };
+        }),
+      );
+    }
+
     await run();
   });
 
-  onDestroy(() => unlisten?.());
+  onDestroy(() => {
+    for (const u of unlisteners) u();
+  });
 
   async function run() {
     try {
-      // Install Ollama if missing
-      const installed = await invoke<boolean>("ollama_installed");
-      if (!installed) {
-        phase = "install-ollama";
-        progress = "Installing Ollama…";
-        await invoke("ollama_install");
+      // Install Ollama if either we need to pull a text model OR the
+      // user chose Ollama-runtime mode at startup. Skipping the
+      // install when there's literally nothing for Ollama to do means
+      // a transcribe-only first launch isn't gated on a multi-MB
+      // ollama install.
+      if (activeModel) {
+        const installed = await invoke<boolean>("ollama_installed");
+        if (!installed) {
+          phase = "install-ollama";
+          if (textProgress) textProgress = { ...textProgress, status: "Installing Ollama…" };
+          await invoke("ollama_install");
+        }
       }
 
-      // Pull model
       phase = "pull";
-      progress = "Starting download…";
-      progressPercent = null;
-      progressBytes = null;
-      await invoke("ollama_pull", { model: activeModel });
+      if (textProgress) textProgress = { ...textProgress, status: "Starting download…" };
+      if (whisperProgress) {
+        whisperProgress = { ...whisperProgress, status: "Starting download…" };
+      }
+
+      // Pull each side in parallel only if we have a model name for it.
+      // Promise.all rejects on first failure; we wrap each side so a
+      // whisper failure surfaces but doesn't abort the text pull, and
+      // text failure is fatal (you can't really "skip" the LLM).
+      const textPull: Promise<void> = activeModel
+        ? invoke("ollama_pull", { model: activeModel })
+            .then(() => {
+              if (textProgress) textProgress = { ...textProgress, done: true, status: "Done" };
+            })
+            .catch((e) => {
+              if (textProgress) textProgress = { ...textProgress, error: String(e) };
+              throw e; // text is required — abort first-run on failure.
+            })
+        : Promise.resolve();
+
+      const whisperPull: Promise<void> = whisperModel
+        ? invoke("whisper_model_pull", { name: whisperModel })
+            .then(() => {
+              if (whisperProgress) {
+                whisperProgress = { ...whisperProgress, done: true, status: "Done" };
+              }
+            })
+            .catch((e) => {
+              if (whisperProgress) {
+                whisperProgress = { ...whisperProgress, error: String(e) };
+              }
+              // Whisper failure is non-fatal — text mode still works.
+            })
+        : Promise.resolve();
+
+      await Promise.all([textPull, whisperPull]);
 
       phase = "done";
       onComplete();
@@ -96,11 +247,9 @@
     }
   }
 
-  function formatStatus(evt: PullEvent): string {
-    // Tidy up Ollama's raw status strings — the digest-prefixed
-    // "pulling 8a000b0d4e5a" form is more noise than signal in a one-line UI.
+  function formatOllamaStatus(evt: OllamaPullEvent): string {
     const s = evt.status || "";
-    if (/^pulling [0-9a-f]{6,}/i.test(s)) return "Downloading model";
+    if (/^pulling [0-9a-f]{6,}/i.test(s)) return "Downloading";
     if (/^pulling manifest$/i.test(s)) return "Fetching manifest";
     if (/^verifying/i.test(s)) return "Verifying";
     if (/^writing manifest$/i.test(s)) return "Finalizing";
@@ -125,10 +274,6 @@
     return name.split(":")[0].replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
   }
 
-  // Split an error message into text + URL pieces so the URL can render as a
-  // clickable link. The Windows "install Ollama manually" path has the
-  // download URL embedded in the error string and the user otherwise has no
-  // way to follow it from inside the app.
   function splitOnUrl(s: string): Array<{ kind: "text" | "url"; value: string }> {
     const parts: Array<{ kind: "text" | "url"; value: string }> = [];
     const re = /https?:\/\/\S+/g;
@@ -136,7 +281,6 @@
     let m: RegExpExecArray | null;
     while ((m = re.exec(s))) {
       if (m.index > last) parts.push({ kind: "text", value: s.slice(last, m.index) });
-      // Strip trailing punctuation that's almost never part of the URL.
       let url = m[0].replace(/[.,;:!?)\]]+$/, "");
       parts.push({ kind: "url", value: url });
       last = m.index + url.length;
@@ -160,40 +304,55 @@
 
     {#if phase !== "error"}
       <div class="status-block">
-        <div class="model-name">{formatModel(activeModel)}</div>
-        <div class="model-tag">{activeModel}</div>
-
         <div class="step">
           <span class="dot" class:active={phase === "install-ollama"}></span>
           Ollama
         </div>
-        <div class="step">
-          <span class="dot" class:active={phase === "pull"}></span>
-          Downloading model
-        </div>
 
-        {#if phase === "pull"}
-          <div class="bar" class:indeterminate={progressPercent === null}>
-            {#if progressPercent !== null}
-              <div class="bar-fill" style="width: {(progressPercent * 100).toFixed(1)}%"></div>
-            {/if}
+        {#snippet modelRow(p: ModelProgress, primary: boolean)}
+          <div class="model-row">
+            <div class="model-row-head">
+              <span class="model-label">{p.label}</span>
+              <code class="model-tag">{p.tag}</code>
+              {#if p.done}
+                <span class="model-badge">✓ ready</span>
+              {/if}
+            </div>
+            <div class="bar" class:indeterminate={!p.done && p.percent === null}>
+              {#if p.percent !== null}
+                <div class="bar-fill" style="width: {(p.percent * 100).toFixed(1)}%"></div>
+              {:else if p.done}
+                <div class="bar-fill" style="width: 100%"></div>
+              {/if}
+            </div>
+            <div class="progress-meta">
+              <span class="progress-status">{p.status || "…"}</span>
+              {#if p.bytes}
+                <span class="progress-bytes">
+                  {formatBytes(p.bytes.done)} / {formatBytes(p.bytes.total)}
+                  {#if p.percent !== null}
+                    ({(p.percent * 100).toFixed(1)}%)
+                  {/if}
+                  {#if p.rate}
+                    · {formatRate(p.rate)}
+                  {/if}
+                </span>
+              {/if}
+              {#if p.error}
+                <span class="progress-error">{p.error}</span>
+              {/if}
+            </div>
           </div>
-          <div class="progress-meta">
-            <span class="progress-status">{progress || "…"}</span>
-            {#if progressBytes}
-              <span class="progress-bytes">
-                {formatBytes(progressBytes.done)} / {formatBytes(progressBytes.total)}
-                {#if progressPercent !== null}
-                  ({(progressPercent * 100).toFixed(1)}%)
-                {/if}
-                {#if bytesPerSec}
-                  · {formatRate(bytesPerSec)}
-                {/if}
-              </span>
-            {/if}
-          </div>
-        {:else if progress}
-          <p class="progress">{progress}</p>
+        {/snippet}
+
+        {#if textProgress}
+          {@render modelRow(textProgress, true)}
+        {/if}
+        {#if whisperProgress}
+          {@render modelRow(whisperProgress, false)}
+        {/if}
+        {#if !textProgress && !whisperProgress}
+          <p class="empty">Nothing to download — finishing up…</p>
         {/if}
       </div>
     {:else}
@@ -223,20 +382,40 @@
     flex-direction: column;
     align-items: center;
     gap: 1rem;
-    max-width: 340px;
+    max-width: 380px;
   }
   h1 { font-size: 2rem; font-weight: 700; letter-spacing: -.03em; }
   .hw { color: #666; font-size: .85rem; }
-  .status-block { width: 100%; background: #1a1a1a; border-radius: 10px; padding: 1.25rem; display: flex; flex-direction: column; gap: .6rem; }
-  .model-name { font-size: 1.15rem; font-weight: 600; }
-  .model-tag { font-size: .75rem; color: #555; font-family: monospace; }
-  .step { display: flex; align-items: center; gap: .5rem; font-size: .875rem; color: #888; }
+  .status-block {
+    width: 100%;
+    background: #1a1a1a;
+    border-radius: 10px;
+    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: .85rem;
+  }
+  .model-row {
+    display: flex;
+    flex-direction: column;
+    gap: .35rem;
+    text-align: left;
+  }
+  .model-row-head {
+    display: flex;
+    align-items: center;
+    gap: .55rem;
+    flex-wrap: wrap;
+  }
+  .model-label { font-size: .82rem; font-weight: 600; color: #ccc; }
+  .model-tag { font-size: .72rem; color: #888; font-family: monospace; }
+  .model-badge { font-size: .68rem; color: #6c6; margin-left: auto; }
+  .step { display: flex; align-items: center; gap: .5rem; font-size: .82rem; color: #888; }
   .dot {
     width: 8px; height: 8px; border-radius: 50%; background: #333;
     transition: background .3s;
   }
   .dot.active { background: #6e6ef7; box-shadow: 0 0 6px #6e6ef7; }
-  .progress { font-size: .78rem; color: #555; font-family: monospace; word-break: break-all; }
   .bar {
     width: 100%;
     height: 6px;
@@ -269,10 +448,11 @@
     font-size: .72rem;
     color: #777;
     font-family: monospace;
-    text-align: left;
   }
   .progress-status { color: #aaa; }
   .progress-bytes { color: #666; }
+  .progress-error { color: #d66; }
+  .empty { color: #777; font-size: .82rem; text-align: center; padding: .5rem 0; }
   .error-block { display: flex; flex-direction: column; gap: .75rem; align-items: center; }
   .error-block code { font-size: .8rem; color: #f66; background: #1a1a1a; padding: .5rem; border-radius: 6px; word-break: break-all; }
   .error-block code a { color: #6e6ef7; text-decoration: underline; cursor: pointer; }

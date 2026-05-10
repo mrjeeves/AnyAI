@@ -51,6 +51,13 @@
     delta: string;
     elapsed_ms: number;
     final: boolean;
+    /** 5-second chunks still queued on disk waiting for whisper. The
+     *  Rust side spills audio to `~/.anyai/transcribe-buffer/{stream}/`
+     *  when the model can't keep up with realtime, so this stays > 0
+     *  on slow hardware until the backlog drains. UI doesn't render it
+     *  yet, but having the field on the wire means we can light up a
+     *  "X s behind" chip later without changing the event plumbing. */
+    pending_chunks?: number;
   }
   interface WhisperModelInfo {
     name: string;
@@ -185,12 +192,17 @@
     transcribeError = "";
     const cfg = await loadConfig();
     const mic = cfg.mic;
-    const model = mic.whisper_model || "tiny.en";
+    // `activeModel` is the family/tier-resolved pick from App.svelte,
+    // prefixed `whisper:` so the status bar can't confuse it with an
+    // Ollama tag. Strip the prefix for the bare ggml filename.
+    const model = activeModel.startsWith("whisper:")
+      ? activeModel.slice("whisper:".length)
+      : activeModel || "tiny.en";
 
     if (!(await modelInstalled(model))) {
       transcribeError =
-        `The whisper '${model}' model isn't installed yet. Open Settings → ` +
-        `Transcription to download it.`;
+        `The whisper '${model}' model isn't downloaded yet. Switch family ` +
+        `or relaunch to trigger the auto-pull, or check Settings → Models.`;
       return;
     }
 

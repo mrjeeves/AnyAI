@@ -2,14 +2,27 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { getActiveManifest, getActiveProvider, setActiveFamily } from "../../providers";
-  import { resolveModel } from "../../manifest";
+  import { resolveModel, modeFor, defaultRuntimeFor } from "../../manifest";
   import { loadConfig, invalidateConfigCache } from "../../config";
-  import type { HardwareProfile, Manifest, ManifestFamily, Mode, OllamaModel } from "../../types";
+  import type {
+    HardwareProfile,
+    Manifest,
+    ManifestFamily,
+    ManifestMode,
+    Mode,
+    OllamaModel,
+  } from "../../types";
 
   let { onChanged, onClose } = $props<{
     onChanged: () => void;
     onClose: () => void;
   }>();
+
+  interface WhisperInfo {
+    name: string;
+    installed: boolean;
+    installed_size_bytes: number | null;
+  }
 
   let manifest = $state<Manifest | null>(null);
   let providerName = $state("");
@@ -17,10 +30,11 @@
   let activeMode = $state<Mode>("text");
   let modeOverrides = $state<Partial<Record<Mode, string | null>>>({});
   let hardware = $state<HardwareProfile | null>(null);
-  /** Pulled-tag → size in bytes. Lets us show per-tier disk requirements
-   *  when a model is already on disk; unpulled tiers fall back to "—" so the
-   *  user can't be surprised by a quietly-downloaded gigabyte. */
+  /** Pulled-tag → size in bytes (Ollama models). Whisper models live in a
+   *  separate location and are tracked via `whisperSizes` below. */
   let pulledSizes = $state<Record<string, number>>({});
+  /** Whisper model name (e.g. `tiny.en`) → installed size in bytes. */
+  let whisperSizes = $state<Record<string, number>>({});
   let loading = $state(true);
 
   /** When non-null, render the detail page for this family instead of the
@@ -33,12 +47,13 @@
   async function load() {
     loading = true;
     try {
-      const [m, provider, config, hw, pulled] = await Promise.all([
+      const [m, provider, config, hw, pulled, whisper] = await Promise.all([
         getActiveManifest(),
         getActiveProvider(),
         loadConfig(),
         invoke<HardwareProfile>("detect_hardware"),
         invoke<OllamaModel[]>("ollama_list_models").catch(() => [] as OllamaModel[]),
+        invoke<WhisperInfo[]>("whisper_models_list").catch(() => [] as WhisperInfo[]),
       ]);
       manifest = m;
       providerName = provider?.name ?? "(none)";
@@ -49,9 +64,36 @@
       const sizes: Record<string, number> = {};
       for (const p of pulled) sizes[p.name] = p.size;
       pulledSizes = sizes;
+      const wsizes: Record<string, number> = {};
+      for (const w of whisper) {
+        if (w.installed && w.installed_size_bytes != null) {
+          wsizes[w.name] = w.installed_size_bytes;
+        }
+      }
+      whisperSizes = wsizes;
     } finally {
       loading = false;
     }
+  }
+
+  /** Resolve actual on-disk size for a (mode, model) pair, returning bytes
+   *  if the file is installed, the manifest's declared `disk_mb` * 1MB if
+   *  not, or 0 if neither is known. Lets the tier table show real size
+   *  when present and the manifest estimate otherwise. */
+  function tierSize(modeSpec: ManifestMode, modelName: string, tierDiskMb?: number): {
+    bytes: number;
+    installed: boolean;
+  } {
+    const runtime = modeSpec.runtime ?? "ollama";
+    const installedBytes =
+      runtime === "whisper" ? whisperSizes[modelName] : pulledSizes[modelName];
+    if (installedBytes && installedBytes > 0) {
+      return { bytes: installedBytes, installed: true };
+    }
+    if (tierDiskMb && tierDiskMb > 0) {
+      return { bytes: tierDiskMb * 1024 * 1024, installed: false };
+    }
+    return { bytes: 0, installed: false };
   }
 
   async function activate(name: string) {
@@ -83,13 +125,25 @@
 
   function gbLabel(bytes: number): string {
     if (bytes <= 0) return "—";
-    return (bytes / 1024 / 1024 / 1024).toFixed(1) + " GB";
+    const mb = bytes / 1024 / 1024;
+    if (mb < 1024) return `${Math.round(mb)} MB`;
+    return (mb / 1024).toFixed(1) + " GB";
   }
 
-  /** Modes the family declares tiers for, in canonical order. */
-  function modesIn(family: ManifestFamily): Mode[] {
+  /** Modes the family advertises (its own + manifest.shared_modes), in
+   *  canonical order. The manifest's shared_modes block contributes
+   *  modes (e.g. transcribe) that the family inherits without
+   *  redeclaring. */
+  function modesIn(m: Manifest, family: ManifestFamily): Mode[] {
     const order: Mode[] = ["text", "vision", "code", "transcribe"];
-    return order.filter((m) => !!family.modes[m]);
+    return order.filter((mode) => !!modeFor(m, family, mode));
+  }
+
+  /** True when a mode block is the shared / inherited one (i.e. comes
+   *  from manifest.shared_modes rather than the family's own
+   *  declaration). Surfaces in the detail UI as a "shared" badge. */
+  function isShared(m: Manifest, family: ManifestFamily, mode: Mode): boolean {
+    return !family.modes[mode] && !!m.shared_modes?.[mode];
   }
 
   function familyOrFirst(name: string | null): { name: string; family: ManifestFamily } | null {
@@ -159,7 +213,7 @@
       <p class="empty">Family not found.</p>
     {:else}
       {@const isActive = picked.name === activeFamily}
-      {@const modes = modesIn(picked.family)}
+      {@const modes = modesIn(manifest, picked.family)}
       <div class="detail-head">
         <button class="back" onclick={() => (detailFamily = null)} aria-label="Back to families">
           ← Families
@@ -181,12 +235,20 @@
           <p class="empty-note">This family declares no modes.</p>
         {:else}
           {#each modes as modeName}
-            {@const modeSpec = picked.family.modes[modeName]!}
+            {@const modeSpec = modeFor(manifest, picked.family, modeName)!}
             {@const pickedModel = pickedTag(picked.name, modeName)}
             {@const isActiveCell = isActive && modeName === activeMode}
+            {@const runtime = modeSpec.runtime ?? defaultRuntimeFor(modeName)}
+            {@const shared = isShared(manifest, picked.family, modeName)}
             <div class="mode-block">
               <div class="mode-head">
                 <span class="mode-name">{modeSpec.label || modeName}</span>
+                <span class="runtime-tag" class:whisper={runtime === "whisper"}>
+                  {runtime === "whisper" ? "whisper.cpp" : "ollama"}
+                </span>
+                {#if shared}
+                  <span class="shared-tag" title="Inherited from the manifest's shared_modes block — same ladder for every family unless they override.">shared</span>
+                {/if}
                 {#if isActiveCell}
                   <span class="mode-tag active-mode">your active mode</span>
                 {/if}
@@ -194,13 +256,18 @@
               <div class="tier-list" aria-label="{picked.family.label} {modeName} tiers">
                 {#each modeSpec.tiers as tier}
                   {@const hit = tier.model === pickedModel}
+                  {@const sz = tierSize(modeSpec, tier.model, tier.disk_mb)}
                   <div class="tier" class:hit class:hit-active={hit && isActiveCell}>
                     <span class="tier-spec">
                       ≥ {tier.min_vram_gb} GB VRAM · ≥ {tier.min_ram_gb ?? 0} GB RAM
                     </span>
                     <span class="tier-model">{tier.model}</span>
-                    <span class="tier-size" class:dim={!pulledSizes[tier.model]}>
-                      {pulledSizes[tier.model] ? gbLabel(pulledSizes[tier.model]) : "not pulled"}
+                    <span class="tier-size" class:dim={!sz.installed}>
+                      {#if sz.bytes > 0}
+                        {gbLabel(sz.bytes)}{#if !sz.installed}<span class="dl-hint"> to download</span>{/if}
+                      {:else}
+                        —
+                      {/if}
                     </span>
                     {#if hit && isActiveCell}
                       <span class="tier-badge">picked for your hardware</span>
@@ -291,13 +358,30 @@
     flex: 1; overflow-y: auto; padding: .5rem .75rem 1rem;
     display: flex; flex-direction: column; gap: .6rem;
     min-height: 0;
+    /* Keep the scroll track always rendered so the user sees there's
+     * more below; the WebKit pseudo-elements style it to match the
+     * dark theme. */
+    scrollbar-width: thin;
+    scrollbar-color: #2a2a2a transparent;
   }
+  .detail-body::-webkit-scrollbar { width: 8px; }
+  .detail-body::-webkit-scrollbar-track { background: transparent; }
+  .detail-body::-webkit-scrollbar-thumb {
+    background: #2a2a2a;
+    border-radius: 4px;
+  }
+  .detail-body::-webkit-scrollbar-thumb:hover { background: #3a3a3a; }
 
   .mode-block {
     border: 1px solid #1e1e1e;
     background: #0f0f14;
     border-radius: 7px;
     overflow: hidden;
+    /* Don't let flex layout in `.detail-body` shrink these blocks — the
+     * outer scroll on `.detail-body` should be the only scroll, and
+     * `overflow: hidden` here (used for the rounded corners) would
+     * otherwise let the flex item shrink to 0 and clip the tier list. */
+    flex-shrink: 0;
   }
   .mode-head {
     display: flex; align-items: center; gap: .55rem;
@@ -318,6 +402,34 @@
     letter-spacing: 0;
   }
   .mode-tag.active-mode { color: #b3b3ff; }
+  .runtime-tag {
+    font-size: .62rem;
+    color: #888;
+    background: #1a1a22;
+    padding: 0 .35rem;
+    border-radius: 4px;
+    text-transform: lowercase;
+    letter-spacing: 0;
+    border: 1px solid #25252f;
+    font-family: monospace;
+  }
+  .runtime-tag.whisper {
+    color: #d4a64a;
+    border-color: #4a3a1a;
+    background: #1f1812;
+  }
+  .shared-tag {
+    font-size: .62rem;
+    color: #8a8af0;
+    background: #14182a;
+    padding: 0 .35rem;
+    border-radius: 4px;
+    text-transform: lowercase;
+    letter-spacing: 0;
+    border: 1px solid #1e2545;
+    cursor: help;
+  }
+  .dl-hint { color: #555; font-size: .68rem; margin-left: .15rem; }
 
   .tier-list { display: flex; flex-direction: column; }
   .tier {
