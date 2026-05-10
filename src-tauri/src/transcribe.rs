@@ -65,16 +65,24 @@ pub fn model_path(name: &str) -> Result<PathBuf> {
     Ok(whisper_dir()?.join(format!("ggml-{name}.bin")))
 }
 
-/// Catalogue of models AnyAI knows how to download. Sizes are approximate
-/// (the actual download size is whatever HF returns); they're shown in the
-/// settings UI so users can pick before committing to a multi-GB pull.
-pub const KNOWN_MODELS: &[(&str, u64)] = &[
-    ("tiny.en", 75_000_000),
-    ("base.en", 142_000_000),
-    ("small.en", 466_000_000),
-    ("medium.en", 1_500_000_000),
-    ("large-v3", 3_100_000_000),
+/// Catalogue of models AnyAI knows how to download. Sizes verified
+/// against the HuggingFace API on 2026-05-10 (`approx`), with `min_bytes`
+/// set to about 60% of the real size so a successful download has to
+/// transfer most of the payload — anything smaller is almost certainly
+/// an HTML error page or a truncated stream and gets rejected post-hoc.
+pub const KNOWN_MODELS: &[(&str, u64, u64)] = &[
+    // (name, approx_size_bytes, min_acceptable_bytes)
+    ("tiny.en", 77_704_715, 50_000_000),
+    ("base.en", 147_964_211, 100_000_000),
+    ("small.en", 487_614_201, 400_000_000),
+    ("medium.en", 1_533_774_781, 1_300_000_000),
+    ("large-v3-turbo", 1_624_555_275, 1_400_000_000),
+    ("large-v3", 3_095_033_483, 2_700_000_000),
 ];
+
+fn known(name: &str) -> Option<&'static (&'static str, u64, u64)> {
+    KNOWN_MODELS.iter().find(|(n, _, _)| *n == name)
+}
 
 fn hf_url(name: &str) -> String {
     format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{name}.bin")
@@ -91,14 +99,17 @@ pub struct WhisperModelInfo {
 pub fn list_models() -> Result<Vec<WhisperModelInfo>> {
     let dir = whisper_dir()?;
     let mut out = Vec::new();
-    for (name, approx) in KNOWN_MODELS {
+    for (name, approx, min_bytes) in KNOWN_MODELS {
         let path = dir.join(format!("ggml-{name}.bin"));
-        let installed = path.exists();
-        let installed_size_bytes = if installed {
-            std::fs::metadata(&path).ok().map(|m| m.len())
-        } else {
-            None
-        };
+        let size = std::fs::metadata(&path).ok().map(|m| m.len()).unwrap_or(0);
+        // A file that's there but smaller than `min_bytes` is almost
+        // always a leftover from a UA-less HF response that returned
+        // HTML where we expected ggml weights. Treat it as not installed
+        // so the UI re-prompts a real download instead of letting
+        // `transcribe::start` fail later with a confusing
+        // "model header invalid" inside whisper.cpp.
+        let installed = size >= *min_bytes;
+        let installed_size_bytes = if installed { Some(size) } else { None };
         out.push(WhisperModelInfo {
             name: (*name).to_string(),
             approx_size_bytes: *approx,
@@ -119,29 +130,68 @@ pub struct WhisperPullProgress {
 }
 
 /// Download `ggml-{name}.bin` from HuggingFace into `~/.anyai/whisper/`.
-/// Streams to a temp file then renames into place so a partial download
-/// can't masquerade as a complete one.
+/// Streams to a temp file then renames into place. Defends against the
+/// three failure modes that previously surfaced as "pull finished but
+/// model isn't installed":
+///   1. HF LFS occasionally returns HTML (login wall / license page) to
+///      User-Agent-less requests with a 200 status.
+///   2. A leftover too-small final file from a previous broken pull
+///      blocking re-download via the early-exists short-circuit.
+///   3. The early-exists path swallowing the `done: true` event so the
+///      UI hangs in "downloading" state forever.
 pub async fn pull_model(name: String, window: WebviewWindow) -> Result<()> {
-    let valid = KNOWN_MODELS.iter().any(|(n, _)| *n == name);
-    if !valid {
-        return Err(anyhow!("unknown whisper model: {name}"));
-    }
+    let (_, approx, min_bytes) = match known(&name) {
+        Some(m) => *m,
+        None => return Err(anyhow!("unknown whisper model: {name}")),
+    };
+
     let dir = whisper_dir()?;
     let final_path = dir.join(format!("ggml-{name}.bin"));
-    if final_path.exists() {
-        return Ok(());
-    }
-    let tmp = dir.join(format!("ggml-{name}.bin.partial"));
-    let url = hf_url(&name);
-
     let event = format!("anyai://whisper-pull/{name}");
     let emit = |frame: WhisperPullProgress| {
         let _ = window.emit(&event, frame);
     };
 
-    let resp = reqwest::Client::builder().build()?.get(&url).send().await?;
+    // If the file is already there AND looks complete, reaffirm the done
+    // state to the UI (so any lingering progress row clears) and return.
+    if let Ok(meta) = std::fs::metadata(&final_path) {
+        if meta.len() >= min_bytes {
+            emit(WhisperPullProgress {
+                name: name.clone(),
+                bytes: meta.len(),
+                total: meta.len(),
+                done: true,
+                error: None,
+            });
+            return Ok(());
+        }
+        // Too small to be the real model — almost certainly an HTML
+        // error page or a truncated previous run. Drop it and fetch
+        // again instead of pretending we're done.
+        let _ = std::fs::remove_file(&final_path);
+    }
+
+    // Clean up any stale `.partial` from a previous interrupted pull
+    // before opening a fresh temp file.
+    let tmp = dir.join(format!("ggml-{name}.bin.partial"));
+    let _ = std::fs::remove_file(&tmp);
+
+    let url = hf_url(&name);
+
+    // HuggingFace's LFS storage can serve different responses to
+    // requests without a User-Agent — sometimes a redirect to a login
+    // page rendered as HTML, sometimes a 403. Always identify
+    // ourselves so we get the binary.
+    let client = reqwest::Client::builder()
+        .user_agent(concat!(
+            "AnyAI/",
+            env!("CARGO_PKG_VERSION"),
+            " (whisper-pull; +https://github.com/mrjeeves/AnyAI)"
+        ))
+        .build()?;
+    let resp = client.get(&url).send().await?;
     if !resp.status().is_success() {
-        let err = format!("HTTP {}", resp.status());
+        let err = format!("HTTP {} fetching {url}", resp.status());
         emit(WhisperPullProgress {
             name: name.clone(),
             bytes: 0,
@@ -151,7 +201,10 @@ pub async fn pull_model(name: String, window: WebviewWindow) -> Result<()> {
         });
         return Err(anyhow!(err));
     }
-    let total = resp.content_length().unwrap_or(0);
+    // Some LFS redirects strip Content-Length; fall back to the verified
+    // catalogue size so the progress bar shows real-looking numbers
+    // instead of 0 / unknown.
+    let total = resp.content_length().unwrap_or(approx);
     let mut file = tokio::fs::File::create(&tmp).await?;
     let mut stream = resp.bytes_stream();
     use futures_util::StreamExt;
@@ -177,6 +230,26 @@ pub async fn pull_model(name: String, window: WebviewWindow) -> Result<()> {
     }
     file.flush().await?;
     drop(file);
+
+    // Sanity-check the size before renaming. A 200 can still carry a
+    // license / HTML response that we'd otherwise rename in as a
+    // "valid" model file.
+    if downloaded < min_bytes {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        let err = format!(
+            "downloaded {downloaded} bytes for {name}, expected ≥{min_bytes}. \
+             The server may have returned an error page; try again."
+        );
+        emit(WhisperPullProgress {
+            name: name.clone(),
+            bytes: downloaded,
+            total,
+            done: true,
+            error: Some(err.clone()),
+        });
+        return Err(anyhow!(err));
+    }
+
     tokio::fs::rename(&tmp, &final_path).await?;
     emit(WhisperPullProgress {
         name: name.clone(),
@@ -213,6 +286,21 @@ pub fn start(
         return Err(anyhow!(
             "whisper model '{model_name}' isn't installed yet — pull it first from Settings → Transcription."
         ));
+    }
+    // Catch the truncated-file case before whisper-rs trips over a
+    // malformed ggml header. A model under its known floor was almost
+    // certainly an aborted pull or a sneaky HTML error page.
+    if let Some((_, _, min_bytes)) = known(&model_name) {
+        if let Ok(meta) = std::fs::metadata(&model_path) {
+            if meta.len() < *min_bytes {
+                return Err(anyhow!(
+                    "whisper model '{model_name}' looks truncated ({} bytes; expected ≥{} bytes). \
+                     Re-download from Settings → Transcription.",
+                    meta.len(),
+                    min_bytes
+                ));
+            }
+        }
     }
     let cancel = Arc::new(AtomicBool::new(false));
     sessions().insert(
