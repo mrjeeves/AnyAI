@@ -63,7 +63,7 @@
   // Initialised in onMount with the freshly-read prop values. We keep
   // `$state` declarations cheap so svelte-check doesn't flag the
   // prop-ref warning ("only captures initial value").
-  let textProgress = $state<ModelProgress>(emptyProgress("", "Text model"));
+  let textProgress = $state<ModelProgress | null>(null);
   let whisperProgress = $state<ModelProgress | null>(null);
   let errorMsg = $state("");
   let unlisteners: UnlistenFn[] = [];
@@ -89,54 +89,59 @@
   }
 
   onMount(async () => {
-    // Seed the per-model progress rows from the (stable) props.
-    textProgress = emptyProgress(activeModel, "Text model");
+    // Seed the per-model progress rows from the props. Either side may
+    // be empty / missing — App.svelte only sets the model name when
+    // that side is genuinely missing on disk, and we should NOT show
+    // a "Downloading" row for something the user already has.
+    if (activeModel) {
+      textProgress = emptyProgress(activeModel, "Text model");
+    }
     if (whisperModel) {
       whisperProgress = emptyProgress(whisperModel, "Transcribe model");
     }
     // Subscribe to both event streams up front so neither pull can fire
     // a frame faster than its listener attaches.
-    unlisteners.push(
-      await listen<OllamaPullEvent>("ollama-pull-progress", (e) => {
-        const evt = e.payload;
-        const status = formatOllamaStatus(evt);
-        if (evt.total && evt.total > 0) {
-          const completed = evt.completed ?? 0;
-          const percent = evt.percent ?? completed / evt.total;
-          const now = Date.now();
-          let rate = textProgress.rate;
-          if (
-            textLastSampleAt &&
-            completed >= textLastSampleBytes
-          ) {
-            const dt = (now - textLastSampleAt) / 1000;
-            if (dt >= 0.5) {
-              rate = (completed - textLastSampleBytes) / dt;
+    if (activeModel) {
+      unlisteners.push(
+        await listen<OllamaPullEvent>("ollama-pull-progress", (e) => {
+          if (!textProgress) return;
+          const evt = e.payload;
+          const status = formatOllamaStatus(evt);
+          if (evt.total && evt.total > 0) {
+            const completed = evt.completed ?? 0;
+            const percent = evt.percent ?? completed / evt.total;
+            const now = Date.now();
+            let rate = textProgress.rate;
+            if (textLastSampleAt && completed >= textLastSampleBytes) {
+              const dt = (now - textLastSampleAt) / 1000;
+              if (dt >= 0.5) {
+                rate = (completed - textLastSampleBytes) / dt;
+                textLastSampleAt = now;
+                textLastSampleBytes = completed;
+              }
+            } else {
               textLastSampleAt = now;
               textLastSampleBytes = completed;
             }
+            textProgress = {
+              ...textProgress,
+              status,
+              percent,
+              bytes: { done: completed, total: evt.total },
+              rate,
+            };
           } else {
-            textLastSampleAt = now;
-            textLastSampleBytes = completed;
+            textProgress = {
+              ...textProgress,
+              status,
+              percent: null,
+              bytes: null,
+              rate: null,
+            };
           }
-          textProgress = {
-            ...textProgress,
-            status,
-            percent,
-            bytes: { done: completed, total: evt.total },
-            rate,
-          };
-        } else {
-          textProgress = {
-            ...textProgress,
-            status,
-            percent: null,
-            bytes: null,
-            rate: null,
-          };
-        }
-      }),
-    );
+        }),
+      );
+    }
 
     if (whisperModel) {
       const event = `anyai://whisper-pull/${whisperModel}`;
@@ -182,33 +187,40 @@
 
   async function run() {
     try {
-      // Install Ollama if missing (only matters for the text-mode pull).
-      const installed = await invoke<boolean>("ollama_installed");
-      if (!installed) {
-        phase = "install-ollama";
-        textProgress = { ...textProgress, status: "Installing Ollama…" };
-        await invoke("ollama_install");
+      // Install Ollama if either we need to pull a text model OR the
+      // user chose Ollama-runtime mode at startup. Skipping the
+      // install when there's literally nothing for Ollama to do means
+      // a transcribe-only first launch isn't gated on a multi-MB
+      // ollama install.
+      if (activeModel) {
+        const installed = await invoke<boolean>("ollama_installed");
+        if (!installed) {
+          phase = "install-ollama";
+          if (textProgress) textProgress = { ...textProgress, status: "Installing Ollama…" };
+          await invoke("ollama_install");
+        }
       }
 
       phase = "pull";
-      textProgress = { ...textProgress, status: "Starting download…" };
+      if (textProgress) textProgress = { ...textProgress, status: "Starting download…" };
       if (whisperProgress) {
         whisperProgress = { ...whisperProgress, status: "Starting download…" };
       }
 
-      // Pull both in parallel. Promise.all rejects on first failure;
-      // wrap each side so a whisper failure surfaces but doesn't abort
-      // the text pull (and vice versa). The user can still proceed if
-      // text completed and only whisper failed — they'll see the
-      // error inline and retry from Settings → Transcription.
-      const textPull = invoke("ollama_pull", { model: activeModel })
-        .then(() => {
-          textProgress = { ...textProgress, done: true, status: "Done" };
-        })
-        .catch((e) => {
-          textProgress = { ...textProgress, error: String(e) };
-          throw e; // text is required — abort first-run on failure.
-        });
+      // Pull each side in parallel only if we have a model name for it.
+      // Promise.all rejects on first failure; we wrap each side so a
+      // whisper failure surfaces but doesn't abort the text pull, and
+      // text failure is fatal (you can't really "skip" the LLM).
+      const textPull: Promise<void> = activeModel
+        ? invoke("ollama_pull", { model: activeModel })
+            .then(() => {
+              if (textProgress) textProgress = { ...textProgress, done: true, status: "Done" };
+            })
+            .catch((e) => {
+              if (textProgress) textProgress = { ...textProgress, error: String(e) };
+              throw e; // text is required — abort first-run on failure.
+            })
+        : Promise.resolve();
 
       const whisperPull: Promise<void> = whisperModel
         ? invoke("whisper_model_pull", { name: whisperModel })
@@ -333,9 +345,14 @@
           </div>
         {/snippet}
 
-        {@render modelRow(textProgress, true)}
+        {#if textProgress}
+          {@render modelRow(textProgress, true)}
+        {/if}
         {#if whisperProgress}
           {@render modelRow(whisperProgress, false)}
+        {/if}
+        {#if !textProgress && !whisperProgress}
+          <p class="empty">Nothing to download — finishing up…</p>
         {/if}
       </div>
     {:else}
@@ -435,6 +452,7 @@
   .progress-status { color: #aaa; }
   .progress-bytes { color: #666; }
   .progress-error { color: #d66; }
+  .empty { color: #777; font-size: .82rem; text-align: center; padding: .5rem 0; }
   .error-block { display: flex; flex-direction: column; gap: .75rem; align-items: center; }
   .error-block code { font-size: .8rem; color: #f66; background: #1a1a1a; padding: .5rem; border-radius: 6px; word-break: break-all; }
   .error-block code a { color: #6e6ef7; text-decoration: underline; cursor: pointer; }

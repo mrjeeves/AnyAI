@@ -201,24 +201,24 @@
       }
 
       if (!ollamaInstalled || !textPresent || !whisperPresent) {
-        // Pass an Ollama tag through `activeModel` so FirstRun has
-        // something to pull on the text-mode side even when the user
-        // happens to be in transcribe mode at first launch (the
-        // text-mode resolution still picks a real Ollama tag).
-        if (!textModelToCheck) {
-          const textResolved = resolveModelEx(
-            hw,
-            manifest,
-            "text",
-            config.mode_overrides,
-            activeFamilyName,
-          );
-          firstRunTextModel = textResolved.model;
-        } else {
-          firstRunTextModel = textModelToCheck;
-        }
+        // Only ask FirstRun to pull what's actually missing. Passing
+        // empty strings tells FirstRun to skip that side — important
+        // because we don't want a "Downloading text" row to flash on
+        // screen for a model the user already has on disk.
+        firstRunTextModel = textPresent ? "" : (textModelToCheck || resolveModelEx(
+          hw,
+          manifest,
+          "text",
+          config.mode_overrides,
+          activeFamilyName,
+        ).model);
         firstRunWhisperModel = whisperPresent ? "" : pendingWhisperModel;
         view = "first-run";
+        console.info(
+          "[anyai] first-run: text=%s whisper=%s",
+          firstRunTextModel || "(present)",
+          firstRunWhisperModel || "(present)",
+        );
       } else {
         await invoke("ollama_ensure_running");
         view = "chat";
@@ -334,6 +334,7 @@
     activeModel = displayModelFor(mode, hardware, manifest, config);
 
     await updateConfig({ active_mode: mode });
+    ensureWhisperPresent(hardware, manifest, config);
   }
 
   async function onProviderChange() {
@@ -342,6 +343,30 @@
     activeFamilyName = config.active_family;
     supportedModes = modesForActiveFamily(manifest, activeFamilyName);
     activeModel = displayModelFor(activeMode, hardware, manifest, config);
+    ensureWhisperPresent(hardware, manifest, config);
+  }
+
+  /** Background-pull the family-resolved whisper model if it isn't on
+   *  disk yet. Fire-and-forget so the user can keep using text mode
+   *  while the whisper download runs; the next switch into transcribe
+   *  mode lands on a ready model instead of erroring out. */
+  function ensureWhisperPresent(
+    hw: HardwareProfile,
+    manifest: Awaited<ReturnType<typeof getActiveManifest>>,
+    config: Awaited<ReturnType<typeof loadConfig>>,
+  ) {
+    const r = resolveModelEx(hw, manifest, "transcribe", config.mode_overrides, activeFamilyName);
+    if (r.runtime !== "whisper" || !r.model) return;
+    invoke<Array<{ name: string; installed: boolean }>>("whisper_models_list")
+      .then((list) => {
+        const installed = list.some((m) => m.name === r.model && m.installed);
+        if (installed) return;
+        console.info("[anyai] background whisper pull: %s", r.model);
+        invoke("whisper_model_pull", { name: r.model }).catch((e) => {
+          console.warn("[anyai] background whisper pull failed:", e);
+        });
+      })
+      .catch(() => {});
   }
 
   function onSelectConversation(id: string) {
