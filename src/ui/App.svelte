@@ -488,6 +488,14 @@
     await refreshConversations();
   }
 
+  /** Move a folder under a new parent. Same on-disk primitive as rename
+   *  (the OS treats the directory move as a rename), but kept distinct in
+   *  the API so the sidebar can stay declarative. */
+  async function onMoveFolder(oldPath: string, newPath: string) {
+    await renameFolder(oldPath, newPath);
+    await refreshConversations();
+  }
+
   async function onDeleteFolder(path: string) {
     await deleteFolder(path);
     await refreshConversations();
@@ -629,6 +637,7 @@
         onRename={onRenameConversation}
         onDelete={onDeleteConversation}
         onMove={onMoveConversation}
+        onMoveFolder={onMoveFolder}
         onCreateFolder={onCreateFolder}
         onRenameFolder={onRenameFolder}
         onDeleteFolder={onDeleteFolder}
