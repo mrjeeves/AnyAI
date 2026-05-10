@@ -41,6 +41,21 @@ const CHUNK_SECONDS: f32 = 5.0;
 /// flushes when the session is cancelled. Whisper produces garbage on
 /// sub-second inputs so we just drop tails shorter than this.
 const TAIL_FLUSH_MIN_SECONDS: f32 = 1.0;
+/// Linear-amplitude RMS below which we treat a chunk as silence and skip
+/// whisper inference. Whisper hallucinates aggressively on silence (the
+/// canonical "Thanks for watching." phantom), so we'd rather emit nothing
+/// than emit the same imagined sentence every 5 s. ~ -45 dBFS is well
+/// above ambient mic noise on a quiet desktop and well below conversational
+/// speech (which sits around 0.05 - 0.3 RMS).
+const SILENCE_RMS_THRESHOLD: f32 = 0.005;
+
+fn chunk_rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sumsq: f64 = samples.iter().map(|s| (*s as f64) * (*s as f64)).sum();
+    (sumsq / samples.len() as f64).sqrt() as f32
+}
 
 /// Frame shape emitted on `myownllm://transcribe-stream/{stream_id}`. `delta`
 /// is the new text since the last frame; the frontend appends. `final`
@@ -786,6 +801,12 @@ fn run_session(
             }
         };
 
+        if chunk_rms(&samples) < SILENCE_RMS_THRESHOLD {
+            let _ = std::fs::remove_file(&next_path);
+            next_seq += 1;
+            continue;
+        }
+
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_translate(false);
         params.set_print_progress(false);
@@ -891,6 +912,12 @@ fn run_drain(
                 continue;
             }
         };
+
+        if chunk_rms(&samples) < SILENCE_RMS_THRESHOLD {
+            let _ = std::fs::remove_file(&next_path);
+            next_seq += 1;
+            continue;
+        }
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_translate(false);

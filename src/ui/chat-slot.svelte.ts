@@ -105,19 +105,32 @@ function resetSlot() {
 // conversation's `talking_points`. Holds the chat slot for its lifetime.
 // ---------------------------------------------------------------------
 
-/** Re-summarise this often. Whisper emits chunks ~every 5s, so a 15s
- *  cadence gets us a fresh summary roughly every couple of chunks while
- *  staying well clear of the model's wall-clock. */
-const TP_INTERVAL_MS = 15_000;
-/** Minimum new chars needed to bother re-summarising. Skips the case
- *  where the user paused mic and nothing's changed. */
-const TP_MIN_NEW_CHARS = 80;
+/** Tick cadence. We poll the transcript every few seconds and decide on
+ *  each tick whether the words- or silence-based trigger has fired. Set
+ *  small enough that the silence window feels responsive without spamming
+ *  whisper with re-reads of the conversation file. */
+const TP_TICK_MS = 3_000;
+/** Words-based trigger: re-summarise as soon as this many new chars have
+ *  accrued since the last cycle. Catches the "user is still talking"
+ *  case so a long monologue still gets summarised mid-stream. */
+const TP_MIN_NEW_CHARS = 120;
+/** Silence-based trigger: if there's *any* new content since the last
+ *  cycle and the transcript hasn't grown for this long, run a cycle. The
+ *  ingest loop now drops silent chunks (no whisper hallucinations), so a
+ *  flat transcript here genuinely means the speaker paused — a natural
+ *  sentence/turn boundary worth summarising at. */
+const TP_SILENCE_MS = 6_000;
 
 let tpModel = "";
 let tpInterval: ReturnType<typeof setInterval> | null = null;
 let tpInFlightStreamId: string | null = null;
 let tpInFlightUnlisten: UnlistenFn | null = null;
 let tpLastTranscriptLen = 0;
+/** Wall-clock ms when we last observed the transcript grow. Drives the
+ *  silence trigger — `now - tpLastGrowthAt > TP_SILENCE_MS` means "the
+ *  speaker has stopped, summarise what we have". */
+let tpLastGrowthAt = 0;
+let tpObservedLen = 0;
 
 interface ChatStreamFrame {
   delta?: string;
@@ -137,6 +150,8 @@ export function startTalkingPoints(args: { model: string }): void {
   chatSlot.status = "running";
   tpModel = args.model;
   tpLastTranscriptLen = 0;
+  tpObservedLen = 0;
+  tpLastGrowthAt = Date.now();
   startTimer();
   // Kick one immediate cycle so the user sees points show up without
   // waiting a full interval, then settle into the periodic cadence.
@@ -144,8 +159,8 @@ export function startTalkingPoints(args: { model: string }): void {
   tpInterval = setInterval(() => {
     if (chatSlot.kind !== "tp") return;
     if (chatSlot.status !== "running") return;
-    void runTpCycle();
-  }, TP_INTERVAL_MS);
+    void maybeRunTpCycle();
+  }, TP_TICK_MS);
 }
 
 export function pauseTalkingPoints(): void {
@@ -178,6 +193,37 @@ export async function stopTalkingPoints(): Promise<void> {
   resetSlot();
 }
 
+/** Tick handler: read the on-disk transcript, update growth bookkeeping,
+ *  and decide whether the words- or silence-based trigger has fired.
+ *  Kept separate from `runTpCycle` so cycles don't double-fire while a
+ *  previous one is still in flight. */
+async function maybeRunTpCycle(): Promise<void> {
+  if (chatSlot.kind !== "tp") return;
+  if (tpInFlightStreamId) return;
+  const convId = chatSlot.conversationId;
+  if (!convId) return;
+  let conv;
+  try {
+    conv = await loadConversation(convId);
+  } catch {
+    return;
+  }
+  if (!conv) return;
+  const transcript = (conv.transcript ?? "").trim();
+  const len = transcript.length;
+  if (len > tpObservedLen) {
+    tpObservedLen = len;
+    tpLastGrowthAt = Date.now();
+  }
+  if (!transcript) return;
+  const newChars = len - tpLastTranscriptLen;
+  if (newChars <= 0) return;
+  const wordsTrigger = newChars >= TP_MIN_NEW_CHARS;
+  const silenceTrigger = Date.now() - tpLastGrowthAt >= TP_SILENCE_MS;
+  if (!wordsTrigger && !silenceTrigger) return;
+  await runTpCycle();
+}
+
 async function runTpCycle(): Promise<void> {
   if (chatSlot.kind !== "tp") return;
   if (tpInFlightStreamId) return; // previous cycle still running
@@ -192,9 +238,6 @@ async function runTpCycle(): Promise<void> {
   if (!conv) return;
   const transcript = (conv.transcript ?? "").trim();
   if (!transcript) return;
-  if (transcript.length - tpLastTranscriptLen < TP_MIN_NEW_CHARS && tpLastTranscriptLen > 0) {
-    return;
-  }
 
   const streamId = crypto.randomUUID();
   tpInFlightStreamId = streamId;

@@ -79,6 +79,19 @@
   let settingsTab = $state<SettingsTab | null>(null);
   let transcribeError = $state("");
 
+  /** Debounced live-transcript flush. Without this, the on-disk transcript
+   *  only updates on start/stop/title-edit, so anything reading the
+   *  conversation file during a session (notably the Talking Points loop in
+   *  chat-slot.svelte.ts) sees a stale snapshot and never re-summarises. */
+  let liveSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  function scheduleLiveSave() {
+    if (liveSaveTimer) return;
+    liveSaveTimer = setTimeout(() => {
+      liveSaveTimer = null;
+      persist().catch((e) => console.warn("live transcript save failed:", e));
+    }, 1500);
+  }
+
   // Load (or clear) a session whenever the active id changes.
   $effect(() => {
     const id = conversationId;
@@ -140,6 +153,7 @@
     if (myConv && myConv !== conversationId) return; // belongs to another conv
     transcript = transcript + transcribeUi.liveDelta;
     clearLiveDelta();
+    scheduleLiveSave();
   }
 
   onDestroy(() => {
@@ -147,6 +161,10 @@
     // the whole point of lifting state into the store. Just flush any
     // text we haven't rendered yet so it lives on the conversation
     // instead of staying buffered in the store.
+    if (liveSaveTimer) {
+      clearTimeout(liveSaveTimer);
+      liveSaveTimer = null;
+    }
     flushLiveDelta();
     if (transcribeUi.active && transcribeUi.conversationId === conversationId) {
       // Best-effort save of the current transcript so a crash later
