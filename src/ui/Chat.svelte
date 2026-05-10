@@ -366,11 +366,11 @@
   }
 
   async function handleModeChange(mode: Mode) {
-    // Mode is part of the conversation record; switching modes implicitly
-    // starts a new chat so model behaviour and the saved transcript stay
-    // coherent (transcribe vs. text history have different shapes).
-    activeConversation = null;
-    messages = [];
+    // Defensive: App also gates this while a chat is streaming so the slot's
+    // conversation stays mounted. The previous version pre-cleared
+    // `messages`, which raced with the in-flight stream and caused the
+    // chat history + streaming output to vanish on mode swap.
+    if (streaming) return;
     await onModeChange(mode);
   }
 

@@ -296,6 +296,10 @@
               return;
             }
             const next = (evt.payload as string | null) ?? null;
+            // While a chat is mid-stream the slot owns `activeConversationId`;
+            // ignore remote-driven swaps so the live conversation stays
+            // mounted. The sidebar will catch up once the stream releases.
+            if (chatStreamLock && next !== chatSlot.conversationId) return;
             if (next !== activeConversationId) {
               activeConversationId = next;
               if (next === null) newChatCounter += 1;
@@ -407,6 +411,7 @@
   }
 
   async function onModeChange(mode: Mode) {
+    if (chatStreamLock && mode !== "text") return;
     activeMode = mode;
     if (!hardware) return;
     const [config, manifest] = await Promise.all([loadConfig(), getActiveManifest()]);
@@ -450,14 +455,25 @@
       .catch(() => {});
   }
 
+  /** While a text chat is mid-stream the chat slot pins `activeConversationId`
+   *  to the conversation it's writing into. Letting the sidebar swap to a
+   *  different conversation here would unmount Chat.svelte and orphan the
+   *  in-flight stream — the deltas keep arriving but land on a torn-down
+   *  `messages` array, so the user sees their reply vanish. The user can
+   *  still pick the running conversation itself; only off-target clicks are
+   *  no-ops until the stream releases the slot. */
+  const chatStreamLock = $derived(chatSlot.kind === "chat");
+
   function onSelectConversation(id: string) {
     if (activeConversationId === id) return;
+    if (chatStreamLock && id !== chatSlot.conversationId) return;
     activeConversationId = id;
     suppressNextActiveEvent = true;
     setActiveConversationId(id);
   }
 
   function onNewConversation() {
+    if (chatStreamLock) return;
     activeConversationId = null;
     newChatCounter += 1;
     suppressNextActiveEvent = true;
