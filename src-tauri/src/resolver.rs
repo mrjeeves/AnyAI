@@ -373,6 +373,30 @@ fn empty_manifest() -> Value {
     })
 }
 
+/// Bundled manifest source, included at compile time. We keep a
+/// const_cell-like helper to parse-once-and-share since several call
+/// sites compare the bundled version to whatever's cached.
+fn bundled_manifest() -> Result<Value> {
+    let bundled = include_str!("../../manifests/default.json");
+    Ok(serde_json::from_str(bundled)?)
+}
+
+/// True when the binary's bundled manifest declares a newer schema
+/// version than what the cache has. Lets `just dev` rebuilds drop a
+/// stale cached manifest instead of letting it linger up to the
+/// configured TTL.
+fn bundled_is_newer(cached_manifest: &Value) -> bool {
+    let bundled = match bundled_manifest() {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let parse = |v: &Value| v["version"].as_str().and_then(|s| s.parse::<u64>().ok());
+    match (parse(&bundled), parse(cached_manifest)) {
+        (Some(b), Some(c)) => b > c,
+        _ => false,
+    }
+}
+
 /// Fetch a single manifest URL, honouring its own ttl_minutes. No import recursion.
 async fn fetch_one_manifest(url: &str) -> Result<Value> {
     if let Some(cached) = read_manifest_cache(url) {
@@ -380,7 +404,11 @@ async fn fetch_one_manifest(url: &str) -> Result<Value> {
             .as_f64()
             .unwrap_or(DEFAULT_TTL_MIN);
         let fetched_at = cached["fetched_at"].as_str().unwrap_or("");
-        if !is_stale(fetched_at, ttl_min) {
+        // Cache is OK if fresh AND the bundled binary doesn't already
+        // know about a newer schema. The version-bump escape hatch
+        // keeps `just dev` rebuilds from reading a stale cached
+        // manifest until TTL.
+        if !is_stale(fetched_at, ttl_min) && !bundled_is_newer(&cached["manifest"]) {
             return Ok(cached["manifest"].clone());
         }
     }
@@ -391,12 +419,15 @@ async fn fetch_one_manifest(url: &str) -> Result<Value> {
             Ok(m)
         }
         Err(_) => {
+            // Network failed — prefer the cache, but only if our bundled
+            // isn't ahead of it; otherwise the bundled is the authoritative
+            // source for the schema this binary understands.
             if let Some(cached) = read_manifest_cache(url) {
-                return Ok(cached["manifest"].clone());
+                if !bundled_is_newer(&cached["manifest"]) {
+                    return Ok(cached["manifest"].clone());
+                }
             }
-            // Bundled fallback shipped at compile time.
-            let bundled = include_str!("../../manifests/default.json");
-            Ok(serde_json::from_str(bundled)?)
+            bundled_manifest()
         }
     }
 }

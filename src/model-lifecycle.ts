@@ -219,18 +219,30 @@ export async function lookupModelUsage(
   return { isActiveTag, activeTag, uses };
 }
 
-export async function getModelStatusWithMeta(): Promise<
-  Array<{
-    name: string;
-    size: number;
-    recommended_by: string[];
-    last_recommended: string;
-    kept: boolean;
-    override_for: Mode[];
-  }>
-> {
-  const [pulled, status, config] = await Promise.all([
-    invoke<OllamaModel[]>("ollama_list_models"),
+export interface ModelMeta {
+  name: string;
+  size: number;
+  recommended_by: string[];
+  last_recommended: string;
+  kept: boolean;
+  override_for: Mode[];
+  /** Which engine runs this model. Drives the runtime badge in the
+   *  models list and decides whether `pin` / `delete` route through
+   *  Ollama or the whisper helpers. */
+  runtime: "ollama" | "whisper";
+}
+
+interface WhisperModelInfo {
+  name: string;
+  approx_size_bytes: number;
+  installed: boolean;
+  installed_size_bytes: number | null;
+}
+
+export async function getModelStatusWithMeta(): Promise<ModelMeta[]> {
+  const [pulled, whisperList, status, config] = await Promise.all([
+    invoke<OllamaModel[]>("ollama_list_models").catch(() => [] as OllamaModel[]),
+    invoke<WhisperModelInfo[]>("whisper_models_list").catch(() => [] as WhisperModelInfo[]),
     readStatusCache(),
     loadConfig(),
   ]);
@@ -245,12 +257,31 @@ export async function getModelStatusWithMeta(): Promise<
     }
   }
 
-  return pulled.map((m) => ({
+  const ollama: ModelMeta[] = pulled.map((m) => ({
     name: m.name,
     size: m.size,
     recommended_by: status[m.name]?.recommended_by ?? [],
     last_recommended: status[m.name]?.last_recommended ?? new Date().toISOString(),
     kept: keepSet.has(m.name),
     override_for: overrideMap.get(m.name) ?? [],
+    runtime: "ollama",
   }));
+
+  // Whisper models live under ~/.anyai/whisper/. They're treated like
+  // any other model in the unified Models list — the dual-download
+  // behaviour means they're already part of the active family's pick
+  // set, and users shouldn't need a separate page to see them.
+  const whisper: ModelMeta[] = whisperList
+    .filter((w) => w.installed)
+    .map((w) => ({
+      name: w.name,
+      size: w.installed_size_bytes ?? 0,
+      recommended_by: status[w.name]?.recommended_by ?? [],
+      last_recommended: status[w.name]?.last_recommended ?? new Date().toISOString(),
+      kept: keepSet.has(w.name),
+      override_for: overrideMap.get(w.name) ?? [],
+      runtime: "whisper",
+    }));
+
+  return [...ollama, ...whisper];
 }

@@ -41,7 +41,12 @@
 
   let overridePicker = $state<{ mode: Mode; open: boolean } | null>(null);
   let availableModels = $state<string[]>([]);
-  let deleteTarget = $state<{ name: string; size: number; kept: boolean } | null>(null);
+  let deleteTarget = $state<{
+    name: string;
+    size: number;
+    kept: boolean;
+    runtime: "ollama" | "whisper";
+  } | null>(null);
   let deleteUsage = $state<ModelUsage | null>(null);
   let deleteUsageLoading = $state(false);
   let deleting = $state(false);
@@ -151,7 +156,12 @@
 
   async function startDelete(model: ModelMeta) {
     if (!hardware) return;
-    deleteTarget = { name: model.name, size: model.size, kept: model.kept };
+    deleteTarget = {
+      name: model.name,
+      size: model.size,
+      kept: model.kept,
+      runtime: model.runtime,
+    };
     deleteUsage = null;
     deleteError = "";
     deleteUsageLoading = true;
@@ -177,7 +187,13 @@
       if (deleteTarget.kept) {
         try { await unkeepModel(deleteTarget.name); } catch {}
       }
-      await invoke("ollama_delete_model", { name: deleteTarget.name });
+      // Route the delete to the right backend — whisper models live
+      // under `~/.anyai/whisper/`, not in Ollama's library.
+      if (deleteTarget.runtime === "whisper") {
+        await invoke("whisper_model_remove", { name: deleteTarget.name });
+      } else {
+        await invoke("ollama_delete_model", { name: deleteTarget.name });
+      }
       deleteTarget = null;
       deleteUsage = null;
       await reload();
@@ -274,7 +290,12 @@
           {@const otherFams = fams.filter((f) => !(inActive && f.familyLabel === activeFamilyLabel))}
           <div class="model-row" class:unrecommended={!inActive && fams.length === 0}>
             <div class="model-info">
-              <span class="name">{m.name}</span>
+              <div class="name-row">
+                <span class="name">{m.name}</span>
+                <span class="runtime-tag" class:whisper={m.runtime === "whisper"}>
+                  {m.runtime === "whisper" ? "whisper.cpp" : "ollama"}
+                </span>
+              </div>
               <span class="size">{sizeLabel(m.size)}</span>
             </div>
             <div class="model-meta">
@@ -455,7 +476,24 @@
   }
   .model-row.unrecommended { border-left: 3px solid #444; }
   .model-info { flex: 1; display: flex; flex-direction: column; gap: .15rem; min-width: 0; }
-  .name { font-size: .83rem; font-family: monospace; color: #ccc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .name-row { display: flex; align-items: center; gap: .4rem; min-width: 0; }
+  .name { font-size: .83rem; font-family: monospace; color: #ccc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .runtime-tag {
+    font-size: .62rem;
+    color: #888;
+    background: #1a1a22;
+    padding: 0 .35rem;
+    border-radius: 4px;
+    text-transform: lowercase;
+    border: 1px solid #25252f;
+    font-family: monospace;
+    flex-shrink: 0;
+  }
+  .runtime-tag.whisper {
+    color: #d4a64a;
+    border-color: #4a3a1a;
+    background: #1f1812;
+  }
   .size { font-size: .72rem; color: #555; }
   .model-meta { display: flex; flex-direction: column; gap: .15rem; align-items: flex-end; }
   .rec-badge { font-size: .7rem; color: #4a4; }

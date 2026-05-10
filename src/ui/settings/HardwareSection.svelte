@@ -4,7 +4,7 @@
   import { loadConfig, updateConfig } from "../../config";
   import type { HardwareProfile, GpuType, MicConfig } from "../../types";
 
-  type Tab = "providers" | "families" | "models" | "storage" | "updates" | "hardware" | "transcription";
+  type Tab = "providers" | "families" | "models" | "storage" | "updates" | "hardware";
 
   let { setActive } = $props<{ setActive: (tab: Tab) => void }>();
 
@@ -313,7 +313,7 @@
               <dt>Transcribe model</dt>
               <dd class="dim">
                 Picked automatically by the active family's tier ladder.
-                <button class="link-btn small" onclick={() => setActive("transcription")} title="Manage whisper models">
+                <button class="link-btn small" onclick={() => setActive("models")} title="Manage models">
                   Manage →
                 </button>
               </dd>

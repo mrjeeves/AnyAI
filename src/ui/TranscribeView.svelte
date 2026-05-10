@@ -66,7 +66,7 @@
    *  under whatever the user typed. */
   let sessionName = $state("");
   let settingsTab = $state<
-    "providers" | "families" | "models" | "storage" | "transcription" | null
+    "providers" | "families" | "models" | "storage" | null
   >(null);
 
   // Recording state. Capture + ASR run on the Rust side via cpal +
@@ -183,8 +183,8 @@
 
     if (!(await modelInstalled(model))) {
       transcribeError =
-        `The whisper '${model}' model isn't installed yet. Open Settings → ` +
-        `Transcription to download it.`;
+        `The whisper '${model}' model isn't downloaded yet. Switch family ` +
+        `or relaunch to trigger the auto-pull, or check Settings → Models.`;
       return;
     }
 

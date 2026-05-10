@@ -6,7 +6,6 @@
   import HardwareSection from "./settings/HardwareSection.svelte";
   import UpdatesSection from "./settings/UpdatesSection.svelte";
   import RemoteSection from "./settings/RemoteSection.svelte";
-  import TranscriptionSection from "./settings/TranscriptionSection.svelte";
 
   type Tab =
     | "providers"
@@ -15,8 +14,11 @@
     | "storage"
     | "hardware"
     | "remote"
-    | "transcription"
-    | "updates";
+    | "updates"
+    // Legacy values that still appear in old `initialTab` deep-links
+    // from earlier code paths. We map them to `models` on entry so a
+    // stale callsite doesn't render an empty tab.
+    | "transcription";
 
   let {
     initialTab = "families",
@@ -29,15 +31,14 @@
   }>();
 
   // svelte-ignore state_referenced_locally
-  let active = $state<Tab>(initialTab);
+  let active = $state<Tab>(initialTab === "transcription" ? "models" : initialTab);
 
-  const tabs: Array<{ id: Tab; label: string }> = [
+  const tabs: Array<{ id: Exclude<Tab, "transcription">; label: string }> = [
     { id: "families", label: "Family" },
     { id: "providers", label: "Providers" },
     { id: "models", label: "Models" },
     { id: "storage", label: "Storage" },
     { id: "hardware", label: "Hardware" },
-    { id: "transcription", label: "Transcription" },
     { id: "remote", label: "Remote" },
     { id: "updates", label: "Updates" },
   ];
@@ -70,8 +71,6 @@
         <StorageSection setActive={(t) => (active = t)} />
       {:else if active === "hardware"}
         <HardwareSection setActive={(t) => (active = t)} />
-      {:else if active === "transcription"}
-        <TranscriptionSection />
       {:else if active === "remote"}
         <RemoteSection />
       {:else if active === "updates"}
