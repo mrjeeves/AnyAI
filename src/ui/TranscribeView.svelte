@@ -12,6 +12,7 @@
     clearLiveDelta,
     clearAfterPersist,
   } from "./transcribe-state.svelte";
+  import { chatSlot } from "./chat-slot.svelte";
   import { loadConfig } from "../config";
   import {
     loadConversation,
@@ -35,6 +36,9 @@
     onConversationChanged,
     onNewSession,
     onRequestStopTranscribe,
+    onRequestStopChat,
+    onRequestStartRecording,
+    onRequestActivateTalkingPoints,
   } = $props<{
     activeModel: string;
     activeMode: Mode;
@@ -50,6 +54,15 @@
     onConversationChanged: (id: string) => void;
     onNewSession: () => void;
     onRequestStopTranscribe: () => void;
+    /** Stop the chat-slot occupant (chat or Talking Points). Routed to App
+     *  so the conflict-modal flow lives in one place. */
+    onRequestStopChat: () => void;
+    /** Ask App to start a recording — App handles the singleton check
+     *  against any other in-flight session and shows a conflict modal. */
+    onRequestStartRecording: (start: () => Promise<void>) => void;
+    /** Ask App to activate Talking Points — App owns the singleton check
+     *  against the chat slot and forwards to the chat-slot store. */
+    onRequestActivateTalkingPoints: () => void;
   }>();
 
   interface WhisperModelInfo {
@@ -188,8 +201,12 @@
   }
 
   async function startRec() {
-    if (transcribeUi.active) return;
     transcribeError = "";
+    onRequestStartRecording(doStartRec);
+  }
+
+  async function doStartRec(): Promise<void> {
+    if (transcribeUi.active) return;
     const cfg = await loadConfig();
     const mic = cfg.mic;
     const model = activeModel.startsWith("whisper:")
@@ -243,11 +260,37 @@
   }
 
   // True iff this view is the one tied to the active recording — used
-  // to draw the rec dot in the local pane chrome (the StatusBar always
-  // shows it for any active session).
+  // to draw the rec dot in the local pane chrome.
   let isMyRecording = $derived(
     transcribeUi.active && transcribeUi.conversationId === conversationId,
   );
+
+  // True iff Talking Points is the chat-slot occupant for this very
+  // conversation — controls the "Activate" button vs. the running
+  // panel content in the right pane.
+  let isMyTalkingPoints = $derived(
+    chatSlot.kind === "tp" && chatSlot.conversationId === conversationId,
+  );
+
+  /** Read the talking_points file off disk when our TP loop persists.
+   *  Watching `chatSlot` for cycles isn't enough — the loop writes
+   *  through `saveConversation` and we want to reflect that here. */
+  $effect(() => {
+    if (!isMyTalkingPoints) return;
+    void chatSlot.elapsed; // tick on each elapsed update so we re-read
+    const id = conversationId;
+    if (!id) return;
+    let cancelled = false;
+    loadConversation(id)
+      .then((c) => {
+        if (cancelled || !c) return;
+        talkingPoints = c.talking_points ?? [];
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  });
 </script>
 
 <div class="transcribe-shell">
@@ -258,7 +301,6 @@
     {sidebarOpen}
     {onToggleSidebar}
     onOpenSettings={(tab) => (settingsTab = tab)}
-    onRequestStopTranscribe={() => onRequestStopTranscribe()}
   />
 
   <div class="split">
@@ -292,17 +334,61 @@
     <section class="pane right" aria-label="Talking points">
       <header class="pane-head">
         <span class="pane-title">Talking points</span>
+        {#if isMyTalkingPoints}
+          <span class="tp-running">
+            <span class="tp-dot" aria-hidden="true"></span>
+            {chatSlot.status === "paused" ? "paused" : "live"}
+          </span>
+        {/if}
       </header>
       <div class="pane-body">
-        {#if talkingPoints.length > 0}
-          <ul class="bullets">
+        {#if isMyTalkingPoints}
+          {#if talkingPoints.length > 0}
+            <ul class="bullets">
+              {#each talkingPoints as point, i (i)}
+                <li>{point}</li>
+              {/each}
+            </ul>
+          {:else}
+            <div class="placeholder">
+              Listening… the first summary will arrive once whisper has a
+              chunk or two of transcript to work with.
+            </div>
+          {/if}
+        {:else if talkingPoints.length > 0}
+          <ul class="bullets dim">
             {#each talkingPoints as point, i (i)}
               <li>{point}</li>
             {/each}
           </ul>
+          {#if isMyRecording && chatSlot.kind === null}
+            <div class="tp-activate-row">
+              <button class="tp-activate" onclick={onRequestActivateTalkingPoints}>
+                Resume Talking Points
+              </button>
+            </div>
+          {/if}
+        {:else if isMyRecording && chatSlot.kind === null}
+          <div class="tp-activate-shell">
+            <button class="tp-activate big" onclick={onRequestActivateTalkingPoints}>
+              <span class="tp-spark" aria-hidden="true">✦</span>
+              Activate Talking Points
+            </button>
+            <p class="tp-help">
+              Continuously summarises the transcript into a live bullet
+              list. Uses the chat model — the Text slot will be held until
+              you stop it.
+            </p>
+          </div>
+        {:else if isMyRecording && chatSlot.kind && chatSlot.conversationId !== conversationId}
+          <div class="placeholder">
+            The chat slot is busy with another conversation. Stop it from
+            the Text mode button to free up Talking Points here.
+          </div>
         {:else}
           <div class="placeholder">
-            Talking points will be summarised here once a session is running.
+            Talking points will be summarised here once a session is
+            running and you activate the feature.
           </div>
         {/if}
       </div>
@@ -315,6 +401,8 @@
     tokensUsed={0}
     contextSize={0}
     onChange={handleModeChange}
+    onRequestStopTranscribe={() => onRequestStopTranscribe()}
+    onRequestStopChat={() => onRequestStopChat()}
   />
 
   {#if transcribeError}
@@ -342,7 +430,11 @@
         Stop
       </button>
     {:else}
-      <button class="record-btn" onclick={startRec} disabled={transcribeUi.active} title={transcribeUi.active ? "Another recording is in progress" : "Start recording"}>
+      <button
+        class="record-btn"
+        onclick={startRec}
+        title={transcribeUi.active ? "Another recording is in progress — confirm to stop it first" : "Start recording"}
+      >
         <span class="rec-circle" aria-hidden="true"></span>
         Record
       </button>
@@ -443,6 +535,61 @@
     font-size: .88rem;
     color: #ddd;
     line-height: 1.5;
+  }
+  .bullets.dim li { color: #888; }
+  .tp-running {
+    display: inline-flex;
+    align-items: center;
+    gap: .35rem;
+    font-size: .7rem;
+    color: #b899f7;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .tp-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: #b899f7;
+    box-shadow: 0 0 6px #b899f7;
+    animation: rec-pulse 1.4s ease-in-out infinite;
+  }
+  .tp-activate-shell {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: .85rem;
+    text-align: center;
+    padding: 2rem .5rem;
+  }
+  .tp-activate-row {
+    margin-top: 1rem;
+    display: flex;
+    justify-content: center;
+  }
+  .tp-activate {
+    background: #2a2147;
+    color: #ddd2ff;
+    border: 1px solid #4a3a7a;
+    border-radius: 8px;
+    padding: .55rem 1rem;
+    font-size: .85rem;
+    font-weight: 500;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: .45rem;
+    transition: background .15s, border-color .15s;
+  }
+  .tp-activate:hover { background: #352856; border-color: #6e6ef7; }
+  .tp-activate.big { padding: .75rem 1.25rem; font-size: .92rem; }
+  .tp-spark { color: #b899f7; font-size: 1rem; line-height: 1; }
+  .tp-help {
+    color: #777;
+    font-size: .78rem;
+    line-height: 1.55;
+    max-width: 36ch;
+    margin: 0;
   }
   .placeholder {
     color: #666;

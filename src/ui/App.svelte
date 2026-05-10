@@ -33,6 +33,13 @@
     clearAfterPersist,
     type PendingStream,
   } from "./transcribe-state.svelte";
+  import {
+    chatSlot,
+    startTalkingPoints,
+    stopTalkingPoints,
+    forceStopChat,
+  } from "./chat-slot.svelte";
+  import ConflictModal from "./ConflictModal.svelte";
   import { newConversation, saveConversation } from "../conversations";
   import type { HardwareProfile, Mode } from "../types";
 
@@ -550,6 +557,12 @@
 
   async function confirmStopTranscribe(): Promise<void> {
     stopConfirm = null;
+    // Stopping the transcription pulls the rug out from under TP — the
+    // loop has nothing to summarise once the transcript stops growing,
+    // so release the chat slot at the same time.
+    if (chatSlot.kind === "tp") {
+      void stopTalkingPoints();
+    }
     await stopRecording();
     // Best-effort: clear the live delta so the next session starts
     // from a clean slate. The view that owns the conversation has
@@ -560,6 +573,138 @@
 
   function cancelStopTranscribe() {
     stopConfirm = null;
+  }
+
+  // ---------------------------------------------------------------------
+  // Singleton enforcement: chat + transcribe slot conflict modals.
+  // The mode buttons display slot occupancy; these orchestrators run when
+  // a user tries to start a *second* thing in an already-occupied slot.
+  // ---------------------------------------------------------------------
+
+  /** Conflict modal config + the action to run on confirm. `kind` selects
+   *  the body copy; `confirm` is what we'll do once the user agrees to
+   *  stop the current occupant. */
+  let conflict = $state<{
+    title: string;
+    message: string;
+    hint?: string;
+    confirmLabel: string;
+    confirm: () => void | Promise<void>;
+  } | null>(null);
+
+  /** Wrapper used by Chat.send. Routes through the conflict modal when
+   *  another conversation owns the chat slot, otherwise runs immediately. */
+  async function requestSendChat(send: () => Promise<void>): Promise<void> {
+    if (!chatSlot.kind) {
+      await send();
+      return;
+    }
+    const occupantTitle = chatSlot.conversationTitle || "another conversation";
+    const isTp = chatSlot.kind === "tp";
+    conflict = {
+      title: isTp ? "Talking Points is using the chat model" : "The chat model is busy",
+      message: isTp
+        ? `Talking Points is summarising ${occupantTitle}. Stop it to send a chat here.`
+        : `${occupantTitle} is mid-stream. Stop it to send a chat here.`,
+      hint: "In-progress generation will be allowed to finish.",
+      confirmLabel: "Stop & continue",
+      confirm: async () => {
+        if (isTp) {
+          await stopTalkingPoints();
+        } else {
+          await stopActiveChat();
+        }
+        await send();
+      },
+    };
+  }
+
+  /** Wrapper used by TranscribeView's record button. */
+  async function requestStartRecording(start: () => Promise<void>): Promise<void> {
+    if (!transcribeUi.active) {
+      await start();
+      return;
+    }
+    // Same-conversation re-start shouldn't get here (the view shows Stop
+    // instead of Record in that case), but be defensive.
+    if (transcribeUi.conversationId === activeConversationId) return;
+    conflict = {
+      title: "A recording is already in progress",
+      message:
+        "Another conversation is currently being transcribed. Stop it to start a new recording here.",
+      hint: "Pending audio chunks will be discarded when you confirm.",
+      confirmLabel: "Stop & start here",
+      confirm: async () => {
+        await stopRecording();
+        clearLiveDelta();
+        clearAfterPersist();
+        // TP, if it was running on the now-stopped session, has nothing
+        // left to summarise.
+        if (chatSlot.kind === "tp") {
+          void stopTalkingPoints();
+        }
+        await start();
+      },
+    };
+  }
+
+  /** Activate Talking Points against the active transcribe session.
+   *  Surfaces a conflict modal if the chat slot is already occupied. */
+  async function requestActivateTalkingPoints(): Promise<void> {
+    if (!transcribeUi.active) return;
+    const tpModel = activeModel; // chat model — TP runs on whichever ollama model is active
+    const startTp = () => startTalkingPoints({ model: tpModel });
+    if (!chatSlot.kind) {
+      startTp();
+      return;
+    }
+    const occupantTitle = chatSlot.conversationTitle || "another conversation";
+    conflict = {
+      title: "The chat model is busy",
+      message: `${occupantTitle} is using the chat model. Stop it to activate Talking Points here.`,
+      hint: "In-progress generation will be allowed to finish.",
+      confirmLabel: "Stop & activate",
+      confirm: async () => {
+        if (chatSlot.kind === "tp") {
+          await stopTalkingPoints();
+        } else {
+          await stopActiveChat();
+        }
+        startTp();
+      },
+    };
+  }
+
+  /** Stop whichever chat is currently using the chat slot. */
+  async function stopActiveChat(): Promise<void> {
+    if (chatSlot.kind === "tp") {
+      await stopTalkingPoints();
+      return;
+    }
+    if (chatSlot.kind !== "chat") return;
+    await forceStopChat();
+  }
+
+  /** Stop the chat-slot occupant — wired into ModeBar's stop button.
+   *  No conflict modal needed; the user clicked stop and that's an
+   *  explicit "release the slot" action. */
+  function requestStopChat(): void {
+    void stopActiveChat();
+  }
+
+  function dismissConflict() {
+    conflict = null;
+  }
+
+  async function confirmConflict() {
+    const c = conflict;
+    if (!c) return;
+    conflict = null;
+    try {
+      await c.confirm();
+    } catch (e) {
+      console.warn("conflict resolution failed:", e);
+    }
   }
 
   /** Scan `~/.myownllm/transcribe-buffer/` for chunks left over by a
@@ -659,6 +804,9 @@
           onConversationChanged={onConversationChanged}
           onNewSession={onNewConversation}
           onRequestStopTranscribe={requestStopTranscribe}
+          onRequestStopChat={requestStopChat}
+          onRequestStartRecording={requestStartRecording}
+          onRequestActivateTalkingPoints={requestActivateTalkingPoints}
         />
       {:else}
         <Chat
@@ -675,10 +823,23 @@
           onProviderChange={onProviderChange}
           onConversationChanged={onConversationChanged}
           onRequestStopTranscribe={requestStopTranscribe}
+          onRequestStopChat={requestStopChat}
+          onRequestSendChat={requestSendChat}
           onJumpToTranscribe={jumpToTranscribe}
         />
       {/if}
     </div>
+  {/if}
+
+  {#if conflict}
+    <ConflictModal
+      title={conflict.title}
+      message={conflict.message}
+      hint={conflict.hint}
+      confirmLabel={conflict.confirmLabel}
+      onConfirm={confirmConflict}
+      onCancel={dismissConflict}
+    />
   {/if}
 
   {#if stopConfirm}

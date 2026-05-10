@@ -14,6 +14,12 @@
   } from "../conversations";
   import type { SettingsTab } from "../update-state.svelte";
   import type { HardwareProfile, Mode } from "../types";
+  import {
+    chatSlot,
+    claimChat,
+    releaseChat,
+  } from "./chat-slot.svelte";
+  import { transcribeUi } from "./transcribe-state.svelte";
 
   let {
     activeModel,
@@ -29,6 +35,8 @@
     onProviderChange,
     onConversationChanged,
     onRequestStopTranscribe,
+    onRequestStopChat,
+    onRequestSendChat,
     onJumpToTranscribe,
   } = $props<{
     activeModel: string;
@@ -46,11 +54,14 @@
     onModeChange: (mode: Mode) => void;
     onProviderChange: () => void;
     onConversationChanged: (id: string) => void;
-    /** Forwarded into StatusBar so the in-bar Stop button on a recording
-     *  chip pops the App-level confirm dialog (which warns when pending
-     *  chunks would be lost). Mounted at App scope so the dialog
-     *  survives mode switches. */
+    /** Stop the active transcription. Wired by App so the
+     *  pending-chunks confirm modal lives in one place. */
     onRequestStopTranscribe: () => void;
+    /** Stop the chat-slot occupant — used by ModeBar. */
+    onRequestStopChat: () => void;
+    /** Singleton-checked send. App handles the conflict modal when
+     *  another conversation already owns the chat slot. */
+    onRequestSendChat: (send: () => Promise<void>) => void;
     onJumpToTranscribe: () => void;
   }>();
 
@@ -217,9 +228,26 @@
     return conv;
   }
 
-  async function send() {
+  function send() {
     const text = input.trim();
     if (!text || streaming) return;
+    // Singleton: if the chat slot belongs to another conversation, route
+    // through App so the conflict modal can prompt the user before we
+    // mutate any local state.
+    const ourId = activeConversation?.id ?? null;
+    if (
+      chatSlot.kind &&
+      chatSlot.conversationId &&
+      chatSlot.conversationId !== ourId
+    ) {
+      onRequestSendChat(() => doSend(text));
+      return;
+    }
+    void doSend(text);
+  }
+
+  async function doSend(text: string) {
+    if (streaming) return;
     input = "";
     const wasFreshChat = messages.length === 0;
     const history = [...messages, { role: "user" as const, content: text }];
@@ -238,6 +266,12 @@
     // crosstalk. crypto.randomUUID is available in the Tauri WebView.
     const streamId = crypto.randomUUID();
     activeStreamId = streamId;
+
+    // Claim the chat slot for the duration of this stream so the ModeBar
+    // shows a running indicator and any other conversation's send routes
+    // through the conflict modal. The streamId lets the ModeBar's force-
+    // stop control cancel an in-flight generation.
+    if (conv) claimChat({ conversationId: conv.id, conversationTitle: conv.title || "Chat", streamId });
     let unlisten: UnlistenFn | null = null;
     let assistantIdx = -1;
     try {
@@ -290,6 +324,7 @@
       } catch (e) {
         console.warn("save after stream failed:", e);
       }
+      if (conv) releaseChat(conv.id);
       // Auto-title: only on the very first user turn of a fresh
       // conversation, and only if the title is still the placeholder.
       // Runs out-of-band so it can't block the chat from feeling responsive.
@@ -345,6 +380,43 @@
     settingsTab = null;
     await onProviderChange();
   }
+
+  // Talking Points has commandeered the Text slot. While this is true we
+  // hide the chat compose entirely and render the live points list — the
+  // user said "stop TP to switch back to chat".
+  let tpHoldsSlot = $derived(chatSlot.kind === "tp");
+
+  /** Live talking points read from disk for the conversation TP is
+   *  summarising. Refreshed on each `chatSlot.elapsed` tick so we pick up
+   *  the loop's writes. */
+  let tpPoints = $state<string[]>([]);
+  let tpSessionTitle = $state<string>("");
+  $effect(() => {
+    if (!tpHoldsSlot) {
+      tpPoints = [];
+      tpSessionTitle = "";
+      return;
+    }
+    void chatSlot.elapsed;
+    const id = chatSlot.conversationId;
+    if (!id) return;
+    let cancelled = false;
+    loadConversation(id)
+      .then((c) => {
+        if (cancelled || !c) return;
+        tpPoints = c.talking_points ?? [];
+        tpSessionTitle = c.title || "session";
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  function jumpToTpSession() {
+    if (!chatSlot.conversationId) return;
+    onJumpToTranscribe();
+  }
 </script>
 
 <div class="chat-shell">
@@ -355,10 +427,37 @@
     {sidebarOpen}
     {onToggleSidebar}
     onOpenSettings={(tab) => (settingsTab = tab)}
-    onRequestStopTranscribe={() => onRequestStopTranscribe()}
-    onJumpToTranscribe={() => onJumpToTranscribe()}
   />
 
+  {#if tpHoldsSlot}
+    <div class="tp-takeover">
+      <header class="tp-head">
+        <span class="tp-dot" aria-hidden="true"></span>
+        <span class="tp-title">Talking Points · {tpSessionTitle}</span>
+        <button class="tp-jump" onclick={jumpToTpSession} title="Open transcribe session">
+          Open session →
+        </button>
+      </header>
+      <div class="tp-body">
+        {#if tpPoints.length > 0}
+          <ul class="tp-bullets">
+            {#each tpPoints as point, i (i)}
+              <li>{point}</li>
+            {/each}
+          </ul>
+        {:else}
+          <div class="tp-placeholder">
+            Listening… the first summary will arrive once the transcript
+            has a chunk or two of text.
+          </div>
+        {/if}
+        <p class="tp-foot">
+          The chat model is held by Talking Points. Stop it from the
+          mode controls below to send chat messages here.
+        </p>
+      </div>
+    </div>
+  {:else}
   <div class="messages" bind:this={messagesEl}>
     {#if messages.length === 0}
       <div class="empty">
@@ -389,6 +488,7 @@
       </div>
     {/if}
   </div>
+  {/if}
 
   <ModeBar
     current={activeMode}
@@ -396,21 +496,25 @@
     {tokensUsed}
     {contextSize}
     onChange={handleModeChange}
+    onRequestStopTranscribe={() => onRequestStopTranscribe()}
+    onRequestStopChat={() => onRequestStopChat()}
   />
 
-  <div class="input-row">
-    <textarea
-      bind:value={input}
-      onkeydown={onKeydown}
-      placeholder="Message…"
-      rows="1"
-    ></textarea>
-    {#if streaming}
-      <button class="stop" onclick={stop} title="Stop generating">Stop</button>
-    {:else}
-      <button onclick={send} disabled={!input.trim()}>Send</button>
-    {/if}
-  </div>
+  {#if !tpHoldsSlot}
+    <div class="input-row">
+      <textarea
+        bind:value={input}
+        onkeydown={onKeydown}
+        placeholder="Message…"
+        rows="1"
+      ></textarea>
+      {#if streaming}
+        <button class="stop" onclick={stop} title="Stop generating">Stop</button>
+      {:else}
+        <button onclick={send} disabled={!input.trim()}>Send</button>
+      {/if}
+    </div>
+  {/if}
 
   {#if settingsTab}
     <SettingsPanel
@@ -538,4 +642,82 @@
   button:disabled { opacity: .4; cursor: default; }
   button.stop { background: #b04444; }
   button.stop:hover { background: #c25050; }
+
+  .tp-takeover {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: #100c1a;
+  }
+  .tp-head {
+    display: flex;
+    align-items: center;
+    gap: .55rem;
+    padding: .65rem 1rem;
+    border-bottom: 1px solid #221a3a;
+    background: #15102a;
+  }
+  .tp-dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: #b899f7;
+    box-shadow: 0 0 8px #b899f7;
+    animation: blink 1.4s ease-in-out infinite;
+  }
+  .tp-title {
+    font-size: .85rem;
+    font-weight: 600;
+    color: #ddd2ff;
+    letter-spacing: .02em;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tp-jump {
+    background: none;
+    color: #b899f7;
+    border: 1px solid #4a3a7a;
+    border-radius: 6px;
+    padding: .3rem .65rem;
+    font-size: .75rem;
+    cursor: pointer;
+  }
+  .tp-jump:hover { background: #2a2147; color: #fff; }
+  .tp-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 1.1rem 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+  .tp-bullets {
+    list-style: disc;
+    padding-left: 1.25rem;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: .55rem;
+  }
+  .tp-bullets li {
+    font-size: .92rem;
+    color: #e8e4ff;
+    line-height: 1.55;
+  }
+  .tp-placeholder {
+    color: #777;
+    font-size: .85rem;
+    line-height: 1.55;
+    max-width: 42ch;
+  }
+  .tp-foot {
+    margin-top: auto;
+    color: #6a6a85;
+    font-size: .76rem;
+    line-height: 1.55;
+    border-top: 1px solid #1e1730;
+    padding-top: .85rem;
+  }
 </style>
