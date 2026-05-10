@@ -88,7 +88,7 @@ function resetState() {
 
 async function attachListener(streamId: string) {
   unlistenStream = await listen<TranscribeFrame>(
-    `anyai://transcribe-stream/${streamId}`,
+    `myownllm://transcribe-stream/${streamId}`,
     (e) => {
       const f = e.payload;
       if (f.delta) {
@@ -194,7 +194,7 @@ export async function stopRecording(): Promise<void> {
 }
 
 /** Spin up an inference-only session against a stream id whose buffer
- *  dir already has chunks (from a previous AnyAI process that crashed
+ *  dir already has chunks (from a previous MyOwnLLM process that crashed
  *  or was force-quit). The mic is never touched. */
 export async function startDrain(args: {
   streamId: string;

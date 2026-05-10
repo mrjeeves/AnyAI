@@ -1,10 +1,10 @@
 //! Self-update.
 //!
-//! Goals: AnyAI is set-it-and-forget-it. Once installed as a raw binary, the
+//! Goals: MyOwnLLM is set-it-and-forget-it. Once installed as a raw binary, the
 //! background watcher periodically checks the GitHub releases endpoint, and
 //! according to the user's `auto_apply` policy:
-//!   - Stages a verified copy of the new binary at ~/.anyai/updates/<version>/.
-//!   - Writes ~/.anyai/updates/pending.json so the next process start applies it.
+//!   - Stages a verified copy of the new binary at ~/.myownllm/updates/<version>/.
+//!   - Writes ~/.myownllm/updates/pending.json so the next process start applies it.
 //!
 //! When a new process starts (`apply_pending_if_any`), it atomically renames
 //! the staged binary over the current binary and clears the pending marker.
@@ -22,9 +22,9 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const RELEASE_API_STABLE: &str = "https://api.github.com/repos/mrjeeves/AnyAI/releases/latest";
-const RELEASE_API_BETA: &str = "https://api.github.com/repos/mrjeeves/AnyAI/releases";
-const USER_AGENT: &str = concat!("anyai-self-update/", env!("CARGO_PKG_VERSION"));
+const RELEASE_API_STABLE: &str = "https://api.github.com/repos/mrjeeves/MyOwnLLM/releases/latest";
+const RELEASE_API_BETA: &str = "https://api.github.com/repos/mrjeeves/MyOwnLLM/releases";
+const USER_AGENT: &str = concat!("myownllm-self-update/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallKind {
@@ -63,7 +63,7 @@ pub fn apply_pending_if_any() {
 }
 
 fn apply_pending() -> Result<()> {
-    let dir = crate::anyai_dir()?.join("updates");
+    let dir = crate::myownllm_dir()?.join("updates");
     let pending = dir.join("pending.json");
     if !pending.exists() {
         return Ok(());
@@ -116,7 +116,7 @@ pub async fn tick() -> Result<()> {
 }
 
 /// Check + stage now, ignoring the cooldown and printing user-facing output.
-/// Used by `anyai update check`.
+/// Used by `myownllm update check`.
 pub async fn force_check() -> Result<()> {
     run_check(true).await
 }
@@ -130,18 +130,18 @@ async fn run_check(force: bool) -> Result<()> {
         }
         return Ok(());
     }
-    if std::env::var("ANYAI_AUTOUPDATE")
+    if std::env::var("MYOWNLLM_AUTOUPDATE")
         .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
         .unwrap_or(false)
     {
         if force {
-            println!("self-update is disabled via ANYAI_AUTOUPDATE=0.");
+            println!("self-update is disabled via MYOWNLLM_AUTOUPDATE=0.");
         }
         return Ok(());
     }
 
     if detect_install_kind() == InstallKind::PackageManager {
-        let marker = crate::anyai_dir()?.join("updates/pm-detected.flag");
+        let marker = crate::myownllm_dir()?.join("updates/pm-detected.flag");
         if !marker.exists() {
             let _ = std::fs::create_dir_all(marker.parent().unwrap());
             let _ = std::fs::write(&marker, "skip");
@@ -195,7 +195,7 @@ async fn run_check(force: bool) -> Result<()> {
         if force {
             println!(
                 "{latest_version} is available (current {current}), but auto_apply='{policy_str}' \
-                 does not permit this jump. Set auto_apply=\"all\" in ~/.anyai/config.json to allow it."
+                 does not permit this jump. Set auto_apply=\"all\" in ~/.myownllm/config.json to allow it."
             );
         } else {
             eprintln!(
@@ -215,7 +215,7 @@ async fn run_check(force: bool) -> Result<()> {
         eprintln!("self-update: stage failed: {e}");
     } else if force {
         println!(
-            "Run `anyai update apply` (or just relaunch anyai) to switch to {latest_version}."
+            "Run `myownllm update apply` (or just relaunch myownllm) to switch to {latest_version}."
         );
     }
     Ok(())
@@ -252,7 +252,7 @@ pub struct UpdateStatus {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CheckOutcome {
-    /// `auto_update.enabled = false` or `ANYAI_AUTOUPDATE=0`.
+    /// `auto_update.enabled = false` or `MYOWNLLM_AUTOUPDATE=0`.
     Disabled,
     /// Install lives under a package manager — defer to the OS.
     PackageManager,
@@ -292,7 +292,7 @@ pub fn status() -> Result<UpdateStatus> {
     })
 }
 
-/// Read `~/.anyai/updates/pending.json` and return it only if it actually
+/// Read `~/.myownllm/updates/pending.json` and return it only if it actually
 /// represents an upgrade over the running binary. A stale entry left behind
 /// after a manual install or a release rollback (e.g. user is now on 0.1.14
 /// but pending still references 0.1.5) is silently deleted — otherwise the
@@ -300,7 +300,7 @@ pub fn status() -> Result<UpdateStatus> {
 /// even though `check_now()` correctly reports up-to-date.
 fn read_pending_or_clean() -> Result<Option<PendingUpdate>> {
     read_pending_or_clean_at(
-        &crate::anyai_dir()?.join("updates/pending.json"),
+        &crate::myownllm_dir()?.join("updates/pending.json"),
         env!("CARGO_PKG_VERSION"),
     )
 }
@@ -353,7 +353,7 @@ pub async fn check_now() -> Result<CheckOutcome> {
     if !au["enabled"].as_bool().unwrap_or(true) {
         return Ok(CheckOutcome::Disabled);
     }
-    if std::env::var("ANYAI_AUTOUPDATE")
+    if std::env::var("MYOWNLLM_AUTOUPDATE")
         .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
         .unwrap_or(false)
     {
@@ -538,11 +538,11 @@ fn current_target_triple_hint() -> &'static str {
 
 fn pick_asset(assets: &[Value]) -> Option<&Value> {
     let needle = current_target_triple_hint();
-    // Both `anyai-macos-aarch64.tar.gz` and `anyai-macos-aarch64.tar.gz.sha256`
+    // Both `myownllm-macos-aarch64.tar.gz` and `myownllm-macos-aarch64.tar.gz.sha256`
     // contain the platform needle. GitHub's asset ordering is not guaranteed,
     // and if the sidecar comes back first a naive .contains() check picks the
     // 64-byte checksum file as "the binary" — which is exactly how 0.1.6 →
-    // 0.1.9 self-update wrote a hex string over `~/.local/bin/anyai` on macOS.
+    // 0.1.9 self-update wrote a hex string over `~/.local/bin/myownllm` on macOS.
     assets.iter().find(|a| {
         a["name"]
             .as_str()
@@ -589,7 +589,7 @@ async fn stage_release(release: &Value, version: &str) -> Result<()> {
 }
 
 /// Download the platform asset, verify its SHA256, and (if it's an archive)
-/// extract the embedded `anyai` / `anyai.exe` binary. Returns the path of
+/// extract the embedded `myownllm` / `myownllm.exe` binary. Returns the path of
 /// the verified executable on disk. Does NOT write `pending.json` —
 /// callers decide whether to apply now or stage for next launch.
 async fn download_verify_extract(release: &Value, version: &str, verbose: bool) -> Result<PathBuf> {
@@ -605,10 +605,10 @@ async fn download_verify_extract(release: &Value, version: &str, verbose: bool) 
     let dl_url = asset["browser_download_url"]
         .as_str()
         .ok_or_else(|| anyhow!("asset missing browser_download_url"))?;
-    let asset_name = asset["name"].as_str().unwrap_or("anyai");
+    let asset_name = asset["name"].as_str().unwrap_or("myownllm");
     let asset_size = asset["size"].as_u64();
 
-    let updates_dir = crate::anyai_dir()?.join("updates").join(version);
+    let updates_dir = crate::myownllm_dir()?.join("updates").join(version);
     std::fs::create_dir_all(&updates_dir)?;
     let archive_path = updates_dir.join(asset_name);
     let part_path = updates_dir.join(format!("{asset_name}.part"));
@@ -678,7 +678,7 @@ async fn download_verify_extract(release: &Value, version: &str, verbose: bool) 
 }
 
 fn write_pending_marker(staged: &Path, version: &str) -> Result<()> {
-    let pending_path = crate::anyai_dir()?.join("updates/pending.json");
+    let pending_path = crate::myownllm_dir()?.join("updates/pending.json");
     let pending_doc = serde_json::json!({
         "version": version,
         "path": staged.to_string_lossy(),
@@ -689,7 +689,7 @@ fn write_pending_marker(staged: &Path, version: &str) -> Result<()> {
 }
 
 /// If `archive` is a tar.gz / tgz / zip, run `tar -xf` and return the path
-/// to the embedded `anyai` (or `anyai.exe`). If it's already a raw binary,
+/// to the embedded `myownllm` (or `myownllm.exe`). If it's already a raw binary,
 /// return it unchanged.
 ///
 /// Uses the system `tar`. On every target we ship for (macOS, Linux,
@@ -702,7 +702,7 @@ fn extract_binary_if_archived(archive: &Path, dest_dir: &Path, verbose: bool) ->
     // catches that case before atomic_replace clobbers the live binary.
     if is_sidecar_asset(name) {
         return Err(anyhow!(
-            "refusing to install sidecar `{name}` as the anyai binary"
+            "refusing to install sidecar `{name}` as the myownllm binary"
         ));
     }
     let is_archive = name.ends_with(".tar.gz") || name.ends_with(".tgz") || name.ends_with(".zip");
@@ -711,9 +711,9 @@ fn extract_binary_if_archived(archive: &Path, dest_dir: &Path, verbose: bool) ->
     }
 
     #[cfg(windows)]
-    let bin_name = "anyai.exe";
+    let bin_name = "myownllm.exe";
     #[cfg(not(windows))]
-    let bin_name = "anyai";
+    let bin_name = "myownllm";
 
     let bin_path = dest_dir.join(bin_name);
     // A stale extract from a previous run could shadow a corrupted re-download;
@@ -798,13 +798,13 @@ fn basename(path: &str) -> &str {
 
 fn atomic_replace(staged: &Path, target: &Path) -> Result<()> {
     // On Unix, rename(2) is atomic when src and dst are on the same filesystem.
-    // ~/.anyai is in $HOME, target is wherever the binary lives — they are very
+    // ~/.myownllm is in $HOME, target is wherever the binary lives — they are very
     // likely on the same FS, but not guaranteed. We try rename first, then fall
     // back to copy + rename via a sibling temp of the target.
     let target_dir = target
         .parent()
         .ok_or_else(|| anyhow!("target has no parent"))?;
-    let tmp = target_dir.join(format!(".anyai-update-{}.tmp", std::process::id()));
+    let tmp = target_dir.join(format!(".myownllm-update-{}.tmp", std::process::id()));
     if std::fs::copy(staged, &tmp).is_err() {
         // If copy itself failed (read-only FS, permissions), bubble up.
         return Err(anyhow!(
@@ -881,7 +881,7 @@ fn schedule_replace_on_reboot_windows(src: &Path, dst: &Path) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn check_marker_path() -> Result<PathBuf> {
-    Ok(crate::anyai_dir()?.join("cache/last-update-check"))
+    Ok(crate::myownllm_dir()?.join("cache/last-update-check"))
 }
 
 fn is_due(interval_hours: f64) -> Result<bool> {
@@ -934,7 +934,7 @@ fn iso_now() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// CLI surface (`anyai update [check|status|apply]`).
+// CLI surface (`myownllm update [check|status|apply]`).
 // ---------------------------------------------------------------------------
 
 pub async fn cmd_update(args: &[String]) -> Result<()> {
@@ -956,7 +956,7 @@ pub async fn cmd_update(args: &[String]) -> Result<()> {
     }
 }
 
-/// `anyai update` (no args). The single source-of-truth command: prints
+/// `myownllm update` (no args). The single source-of-truth command: prints
 /// status, checks GitHub, downloads, verifies, extracts, and applies in
 /// one shot. Ignores `auto_apply` — a user invoking this is consenting
 /// to the upgrade right now.
@@ -965,7 +965,7 @@ async fn run_update_now() -> Result<()> {
     let kind = detect_install_kind();
 
     println!(
-        "Current : anyai {current} ({})",
+        "Current : myownllm {current} ({})",
         match kind {
             InstallKind::Raw => "raw install",
             InstallKind::PackageManager => "package-manager install",
@@ -974,7 +974,7 @@ async fn run_update_now() -> Result<()> {
 
     if kind == InstallKind::PackageManager {
         println!(
-            "Self-update is disabled here. Use your package manager (e.g. `brew upgrade anyai`)."
+            "Self-update is disabled here. Use your package manager (e.g. `brew upgrade myownllm`)."
         );
         return Ok(());
     }
@@ -982,20 +982,20 @@ async fn run_update_now() -> Result<()> {
     let cfg = crate::resolver::load_config_value()?;
     let au = &cfg["auto_update"];
     if !au["enabled"].as_bool().unwrap_or(true) {
-        println!("Self-update is disabled in ~/.anyai/config.json (auto_update.enabled=false).");
+        println!("Self-update is disabled in ~/.myownllm/config.json (auto_update.enabled=false).");
         return Ok(());
     }
-    if std::env::var("ANYAI_AUTOUPDATE")
+    if std::env::var("MYOWNLLM_AUTOUPDATE")
         .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
         .unwrap_or(false)
     {
-        println!("Self-update is disabled via ANYAI_AUTOUPDATE=0.");
+        println!("Self-update is disabled via MYOWNLLM_AUTOUPDATE=0.");
         return Ok(());
     }
 
     // Carry over any previously-staged update before we go look for a newer
     // one. This handles the watcher-staged-but-never-applied case.
-    let pending_path = crate::anyai_dir()?.join("updates/pending.json");
+    let pending_path = crate::myownllm_dir()?.join("updates/pending.json");
     if pending_path.exists() {
         match serde_json::from_str::<Value>(&std::fs::read_to_string(&pending_path)?) {
             Ok(v) => {
@@ -1044,7 +1044,7 @@ async fn run_update_now() -> Result<()> {
     let _ = std::fs::remove_file(&pending_path);
     stamp_check_now()?;
 
-    println!("Updated to {latest}. Relaunch anyai to use the new version.");
+    println!("Updated to {latest}. Relaunch myownllm to use the new version.");
     Ok(())
 }
 
@@ -1131,43 +1131,43 @@ mod tests {
     #[test]
     fn expected_sha_finds_entry_in_sums_file() {
         let sums = "\
-abc123  anyai-linux-x86_64.tar.gz
-def456 *anyai-macos-aarch64.tar.gz
+abc123  myownllm-linux-x86_64.tar.gz
+def456 *myownllm-macos-aarch64.tar.gz
 ";
         assert_eq!(
-            expected_sha_for(sums, "anyai-linux-x86_64.tar.gz"),
+            expected_sha_for(sums, "myownllm-linux-x86_64.tar.gz"),
             Some("abc123".into())
         );
         assert_eq!(
-            expected_sha_for(sums, "anyai-macos-aarch64.tar.gz"),
+            expected_sha_for(sums, "myownllm-macos-aarch64.tar.gz"),
             Some("def456".into())
         );
     }
 
     #[test]
     fn expected_sha_returns_none_for_missing_entry() {
-        let sums = "abc123  anyai-linux-x86_64.tar.gz\n";
+        let sums = "abc123  myownllm-linux-x86_64.tar.gz\n";
         assert_eq!(expected_sha_for(sums, "nope.tar.gz"), None);
     }
 
     /// Regression: Windows release builds up through 0.1.13 ran
-    /// `sha256sum dist-bin/anyai-windows-x86_64.zip` from the repo root,
+    /// `sha256sum dist-bin/myownllm-windows-x86_64.zip` from the repo root,
     /// so the published .sha256 sidecar reads
-    /// `<hash>  dist-bin/anyai-windows-x86_64.zip`. The GitHub asset is
+    /// `<hash>  dist-bin/myownllm-windows-x86_64.zip`. The GitHub asset is
     /// uploaded as the bare basename, so an exact match against the
     /// recorded filename failed and the GUI/CLI surfaced
-    /// "SHA256SUMS does not list an entry for anyai-windows-x86_64.zip".
+    /// "SHA256SUMS does not list an entry for myownllm-windows-x86_64.zip".
     /// Lookup must compare basenames.
     #[test]
     fn expected_sha_matches_when_sums_line_has_path_prefix() {
-        let sums = "abc123  dist-bin/anyai-windows-x86_64.zip\n";
+        let sums = "abc123  dist-bin/myownllm-windows-x86_64.zip\n";
         assert_eq!(
-            expected_sha_for(sums, "anyai-windows-x86_64.zip"),
+            expected_sha_for(sums, "myownllm-windows-x86_64.zip"),
             Some("abc123".into())
         );
-        let with_backslash = "abc123  dist-bin\\anyai-windows-x86_64.zip\n";
+        let with_backslash = "abc123  dist-bin\\myownllm-windows-x86_64.zip\n";
         assert_eq!(
-            expected_sha_for(with_backslash, "anyai-windows-x86_64.zip"),
+            expected_sha_for(with_backslash, "myownllm-windows-x86_64.zip"),
             Some("abc123".into())
         );
     }
@@ -1189,10 +1189,10 @@ def456 *anyai-macos-aarch64.tar.gz
     fn expected_sha_skips_malformed_lines() {
         let sums = "\
 malformed-line-with-only-one-token
-abc123  anyai-linux-x86_64.tar.gz
+abc123  myownllm-linux-x86_64.tar.gz
 ";
         assert_eq!(
-            expected_sha_for(sums, "anyai-linux-x86_64.tar.gz"),
+            expected_sha_for(sums, "myownllm-linux-x86_64.tar.gz"),
             Some("abc123".into())
         );
     }
@@ -1202,10 +1202,10 @@ abc123  anyai-linux-x86_64.tar.gz
         let sums = "\
 # header
 
-abc123  anyai-linux-x86_64.tar.gz
+abc123  myownllm-linux-x86_64.tar.gz
 ";
         assert_eq!(
-            expected_sha_for(sums, "anyai-linux-x86_64.tar.gz"),
+            expected_sha_for(sums, "myownllm-linux-x86_64.tar.gz"),
             Some("abc123".into())
         );
     }
@@ -1213,8 +1213,8 @@ abc123  anyai-linux-x86_64.tar.gz
     #[test]
     fn pick_asset_matches_current_platform() {
         let needle = current_target_triple_hint();
-        let other = format!("anyai-other-{}.tar.gz", "platform");
-        let matching = format!("anyai-{needle}.tar.gz");
+        let other = format!("myownllm-other-{}.tar.gz", "platform");
+        let matching = format!("myownllm-{needle}.tar.gz");
         let assets = vec![
             json!({ "name": other }),
             json!({ "name": matching.clone() }),
@@ -1225,19 +1225,19 @@ abc123  anyai-linux-x86_64.tar.gz
 
     #[test]
     fn pick_asset_returns_none_when_no_platform_match() {
-        let assets = vec![json!({"name": "anyai-mystery-platform.tar.gz"})];
+        let assets = vec![json!({"name": "myownllm-mystery-platform.tar.gz"})];
         assert!(pick_asset(&assets).is_none());
     }
 
     /// Regression: 0.1.6 → 0.1.9 self-update on macOS picked the `.sha256`
     /// sidecar as the binary because GitHub returned it before the archive
     /// and `pick_asset` used a naive `.contains(needle)` filter. The hex
-    /// checksum then got atomic_replaced over `~/.local/bin/anyai`, leaving
+    /// checksum then got atomic_replaced over `~/.local/bin/myownllm`, leaving
     /// users with `line 1: <hash>: command not found`.
     #[test]
     fn pick_asset_skips_sha256_sidecar_listed_before_archive() {
         let needle = current_target_triple_hint();
-        let archive = format!("anyai-{needle}.tar.gz");
+        let archive = format!("myownllm-{needle}.tar.gz");
         let sidecar = format!("{archive}.sha256");
         let assets = vec![
             json!({ "name": sidecar }),
@@ -1250,7 +1250,7 @@ abc123  anyai-linux-x86_64.tar.gz
     #[test]
     fn pick_asset_skips_signature_sidecars() {
         let needle = current_target_triple_hint();
-        let archive = format!("anyai-{needle}.tar.gz");
+        let archive = format!("myownllm-{needle}.tar.gz");
         for ext in [".sig", ".asc", ".minisig", ".sha512"] {
             let sidecar = format!("{archive}{ext}");
             let assets = vec![
@@ -1264,8 +1264,8 @@ abc123  anyai-linux-x86_64.tar.gz
 
     #[test]
     fn extract_binary_if_archived_refuses_sha256_sidecar() {
-        let dir = tempdir_for_test("anyai-extract-sidecar");
-        let sha = dir.join("anyai-macos-aarch64.tar.gz.sha256");
+        let dir = tempdir_for_test("myownllm-extract-sidecar");
+        let sha = dir.join("myownllm-macos-aarch64.tar.gz.sha256");
         std::fs::write(&sha, b"f737bc0e".repeat(8)).unwrap();
         let err = extract_binary_if_archived(&sha, &dir, false).expect_err("should refuse sidecar");
         assert!(
@@ -1278,54 +1278,54 @@ abc123  anyai-linux-x86_64.tar.gz
     #[test]
     fn pick_sha_asset_prefers_matching_sidecar_over_others() {
         let assets = vec![
-            json!({"name": "anyai-linux-x86_64.tar.gz"}),
-            json!({"name": "anyai-linux-x86_64.tar.gz.sha256"}),
-            json!({"name": "anyai-macos-aarch64.tar.gz"}),
-            json!({"name": "anyai-macos-aarch64.tar.gz.sha256"}),
+            json!({"name": "myownllm-linux-x86_64.tar.gz"}),
+            json!({"name": "myownllm-linux-x86_64.tar.gz.sha256"}),
+            json!({"name": "myownllm-macos-aarch64.tar.gz"}),
+            json!({"name": "myownllm-macos-aarch64.tar.gz.sha256"}),
         ];
         let picked =
-            pick_sha_asset(&assets, "anyai-linux-x86_64.tar.gz").expect("expected sidecar");
-        assert_eq!(picked["name"], "anyai-linux-x86_64.tar.gz.sha256");
+            pick_sha_asset(&assets, "myownllm-linux-x86_64.tar.gz").expect("expected sidecar");
+        assert_eq!(picked["name"], "myownllm-linux-x86_64.tar.gz.sha256");
     }
 
     #[test]
     fn pick_sha_asset_falls_back_to_sha256sums() {
         let assets = vec![
-            json!({"name": "anyai-linux-x86_64.tar.gz"}),
+            json!({"name": "myownllm-linux-x86_64.tar.gz"}),
             json!({"name": "SHA256SUMS"}),
         ];
         let picked =
-            pick_sha_asset(&assets, "anyai-linux-x86_64.tar.gz").expect("expected SHA256SUMS");
+            pick_sha_asset(&assets, "myownllm-linux-x86_64.tar.gz").expect("expected SHA256SUMS");
         assert_eq!(picked["name"], "SHA256SUMS");
     }
 
     #[test]
     fn pick_sha_asset_returns_none_when_no_match_and_no_sums_file() {
         let assets = vec![
-            json!({"name": "anyai-linux-x86_64.tar.gz"}),
-            json!({"name": "anyai-macos-aarch64.tar.gz.sha256"}),
+            json!({"name": "myownllm-linux-x86_64.tar.gz"}),
+            json!({"name": "myownllm-macos-aarch64.tar.gz.sha256"}),
         ];
-        assert!(pick_sha_asset(&assets, "anyai-linux-x86_64.tar.gz").is_none());
+        assert!(pick_sha_asset(&assets, "myownllm-linux-x86_64.tar.gz").is_none());
     }
 
     #[test]
     fn pick_sha_asset_returns_none_when_assets_empty() {
         let assets: Vec<Value> = vec![];
-        assert!(pick_sha_asset(&assets, "anyai-linux-x86_64.tar.gz").is_none());
+        assert!(pick_sha_asset(&assets, "myownllm-linux-x86_64.tar.gz").is_none());
     }
 
     #[test]
     fn detect_install_kind_flags_homebrew_paths() {
         assert_eq!(
-            detect_install_kind_from_path("/opt/homebrew/bin/anyai"),
+            detect_install_kind_from_path("/opt/homebrew/bin/myownllm"),
             InstallKind::PackageManager
         );
         assert_eq!(
-            detect_install_kind_from_path("/usr/local/Cellar/anyai/0.1.0/bin/anyai"),
+            detect_install_kind_from_path("/usr/local/Cellar/myownllm/0.1.0/bin/myownllm"),
             InstallKind::PackageManager
         );
         assert_eq!(
-            detect_install_kind_from_path("/home/linuxbrew/.linuxbrew/bin/anyai"),
+            detect_install_kind_from_path("/home/linuxbrew/.linuxbrew/bin/myownllm"),
             InstallKind::PackageManager
         );
     }
@@ -1333,11 +1333,11 @@ abc123  anyai-linux-x86_64.tar.gz
     #[test]
     fn detect_install_kind_flags_user_install_as_raw() {
         assert_eq!(
-            detect_install_kind_from_path("/home/alice/.local/bin/anyai"),
+            detect_install_kind_from_path("/home/alice/.local/bin/myownllm"),
             InstallKind::Raw
         );
         assert_eq!(
-            detect_install_kind_from_path("/usr/local/bin/anyai"),
+            detect_install_kind_from_path("/usr/local/bin/myownllm"),
             InstallKind::Raw
         );
     }
@@ -1346,11 +1346,11 @@ abc123  anyai-linux-x86_64.tar.gz
     #[test]
     fn detect_install_kind_flags_linux_system_paths() {
         assert_eq!(
-            detect_install_kind_from_path("/usr/bin/anyai"),
+            detect_install_kind_from_path("/usr/bin/myownllm"),
             InstallKind::PackageManager
         );
         assert_eq!(
-            detect_install_kind_from_path("/usr/sbin/anyai"),
+            detect_install_kind_from_path("/usr/sbin/myownllm"),
             InstallKind::PackageManager
         );
     }
@@ -1359,19 +1359,19 @@ abc123  anyai-linux-x86_64.tar.gz
     #[test]
     fn detect_install_kind_flags_windows_package_paths() {
         assert_eq!(
-            detect_install_kind_from_path(r"C:\Program Files\AnyAI\anyai.exe"),
+            detect_install_kind_from_path(r"C:\Program Files\MyOwnLLM\myownllm.exe"),
             InstallKind::PackageManager
         );
         assert_eq!(
-            detect_install_kind_from_path(r"C:\Program Files (x86)\AnyAI\anyai.exe"),
+            detect_install_kind_from_path(r"C:\Program Files (x86)\MyOwnLLM\myownllm.exe"),
             InstallKind::PackageManager
         );
         assert_eq!(
-            detect_install_kind_from_path(r"C:\ProgramData\chocolatey\lib\anyai\tools\anyai.exe"),
+            detect_install_kind_from_path(r"C:\ProgramData\chocolatey\lib\myownllm\tools\myownllm.exe"),
             InstallKind::PackageManager
         );
         assert_eq!(
-            detect_install_kind_from_path(r"C:\Users\me\scoop\apps\anyai\current\anyai.exe"),
+            detect_install_kind_from_path(r"C:\Users\me\scoop\apps\myownllm\current\myownllm.exe"),
             InstallKind::PackageManager
         );
     }
@@ -1385,21 +1385,21 @@ abc123  anyai-linux-x86_64.tar.gz
         assert_eq!(human_bytes(2u64 * 1024 * 1024 * 1024), "2.0 GB");
     }
 
-    /// Builds a tiny tar.gz containing a fake `anyai`/`anyai.exe`
+    /// Builds a tiny tar.gz containing a fake `myownllm`/`myownllm.exe`
     /// (whichever name the helper expects on this platform), runs the
     /// extraction helper, and confirms the binary lands at the expected
     /// path. Skipped if `tar` isn't on PATH.
     #[test]
-    fn extract_binary_if_archived_pulls_anyai_out_of_targz() {
+    fn extract_binary_if_archived_pulls_myownllm_out_of_targz() {
         if which::which("tar").is_err() {
             eprintln!("skipping: `tar` not found on PATH");
             return;
         }
-        let bin_name = if cfg!(windows) { "anyai.exe" } else { "anyai" };
-        let dir = tempdir_for_test("anyai-extract-targz");
+        let bin_name = if cfg!(windows) { "myownllm.exe" } else { "myownllm" };
+        let dir = tempdir_for_test("myownllm-extract-targz");
         let bin_inside = dir.join(bin_name);
         std::fs::write(&bin_inside, b"fake-binary").unwrap();
-        let archive = dir.join("anyai-test-x86_64.tar.gz");
+        let archive = dir.join("myownllm-test-x86_64.tar.gz");
         let status = std::process::Command::new("tar")
             .arg("-czf")
             .arg(&archive)
@@ -1419,8 +1419,8 @@ abc123  anyai-linux-x86_64.tar.gz
 
     #[test]
     fn extract_binary_if_archived_passes_raw_binary_through_unchanged() {
-        let dir = tempdir_for_test("anyai-extract-raw");
-        let raw = dir.join("anyai");
+        let dir = tempdir_for_test("myownllm-extract-raw");
+        let raw = dir.join("myownllm");
         std::fs::write(&raw, b"raw binary").unwrap();
         let out = extract_binary_if_archived(&raw, &dir, false).expect("passthrough");
         assert_eq!(out, raw);
@@ -1433,7 +1433,7 @@ abc123  anyai-linux-x86_64.tar.gz
             serde_json::json!({
                 "version": version,
                 "staged_at": "2026-01-01T00:00:00Z",
-                "path": "/tmp/anyai-staged",
+                "path": "/tmp/myownllm-staged",
             })
             .to_string(),
         )
@@ -1442,7 +1442,7 @@ abc123  anyai-linux-x86_64.tar.gz
 
     #[test]
     fn read_pending_returns_none_when_file_missing() {
-        let dir = tempdir_for_test("anyai-pending-missing");
+        let dir = tempdir_for_test("myownllm-pending-missing");
         let p = dir.join("pending.json");
         let got = read_pending_or_clean_at(&p, "0.1.5").expect("ok");
         assert!(got.is_none());
@@ -1451,7 +1451,7 @@ abc123  anyai-linux-x86_64.tar.gz
 
     #[test]
     fn read_pending_returns_entry_when_strictly_newer() {
-        let dir = tempdir_for_test("anyai-pending-newer");
+        let dir = tempdir_for_test("myownllm-pending-newer");
         let p = dir.join("pending.json");
         write_pending(&p, "0.2.0");
         let got = read_pending_or_clean_at(&p, "0.1.5")
@@ -1468,7 +1468,7 @@ abc123  anyai-linux-x86_64.tar.gz
     /// entry verbatim without comparing it to the running version.
     #[test]
     fn read_pending_clears_stale_entry_when_current_is_ahead() {
-        let dir = tempdir_for_test("anyai-pending-stale");
+        let dir = tempdir_for_test("myownllm-pending-stale");
         let p = dir.join("pending.json");
         write_pending(&p, "0.1.5");
         let got = read_pending_or_clean_at(&p, "0.1.14").expect("ok");
@@ -1479,7 +1479,7 @@ abc123  anyai-linux-x86_64.tar.gz
 
     #[test]
     fn read_pending_clears_entry_for_already_applied_version() {
-        let dir = tempdir_for_test("anyai-pending-equal");
+        let dir = tempdir_for_test("myownllm-pending-equal");
         let p = dir.join("pending.json");
         write_pending(&p, "0.1.14");
         let got = read_pending_or_clean_at(&p, "0.1.14").expect("ok");
@@ -1490,7 +1490,7 @@ abc123  anyai-linux-x86_64.tar.gz
 
     #[test]
     fn read_pending_clears_corrupt_json() {
-        let dir = tempdir_for_test("anyai-pending-corrupt");
+        let dir = tempdir_for_test("myownllm-pending-corrupt");
         let p = dir.join("pending.json");
         std::fs::write(&p, b"{not valid json").unwrap();
         let got = read_pending_or_clean_at(&p, "0.1.5").expect("ok");

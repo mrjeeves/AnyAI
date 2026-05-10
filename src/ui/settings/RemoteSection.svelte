@@ -126,7 +126,7 @@
         <div>
           <div class="title">Remote access</div>
           <div class="meta">
-            Open AnyAI from another device on your local network — phone, tablet, laptop.
+            Open MyOwnLLM from another device on your local network — phone, tablet, laptop.
             Single-user: while a remote session is active, this window will be curtained off.
           </div>
         </div>

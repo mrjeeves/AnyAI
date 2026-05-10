@@ -1,8 +1,8 @@
-# AnyAI Architecture
+# MyOwnLLM Architecture
 
-## What AnyAI is
+## What MyOwnLLM is
 
-**AnyAI is a local API surface for local AI.** A single binary exposes an OpenAI-compatible HTTP API on `127.0.0.1` that resolves "what model should I run on this machine?" against a JSON file you (or someone else) host. The GUI and CLI are two clients of that same surface; nothing in the design assumes a human is watching.
+**MyOwnLLM is a local API surface for local AI.** A single binary exposes an OpenAI-compatible HTTP API on `127.0.0.1` that resolves "what model should I run on this machine?" against a JSON file you (or someone else) host. The GUI and CLI are two clients of that same surface; nothing in the design assumes a human is watching.
 
 The "centralized" piece is decentralized by construction: the source of truth for which models a team uses is a static JSON file at a URL the team controls. Any host (GitHub Pages, S3, an internal HTTP server) is sufficient. Manifests can `import` other manifests to compose merged family lists across publishers.
 
@@ -10,7 +10,7 @@ The "centralized" piece is decentralized by construction: the source of truth fo
 
 ```
    HTTP clients ───────►  ┌──────────────────────────────────────────────────┐
-   (Cursor, Continue,     │   anyai (single binary)                          │
+   (Cursor, Continue,     │   myownllm (single binary)                          │
     Aider, agents,        │                                                  │
     your scripts)         │   axum API   (default :1473) ◄── primary surface │
                           │      │                                            │
@@ -20,7 +20,7 @@ The "centralized" piece is decentralized by construction: the source of truth fo
                           │     │   │ per-file TTL, recursive imports         │
                           │     │   │ (manifests with families)               │
                           │     ▼   │                                         │
-                          │   fetch & cache (~/.anyai/cache)                  │
+                          │   fetch & cache (~/.myownllm/cache)                  │
                           │      │                                            │
                           │      ▼                                            │
                           │   preload     (pull, warm, ensure_tracked_models)│
@@ -44,9 +44,9 @@ The same Rust binary handles three personas, picked at process-start by argv:
 
 | Invocation       | Persona                                                          |
 |------------------|------------------------------------------------------------------|
-| `anyai serve`    | Headless OpenAI-compat server (the primary use case)             |
-| `anyai <cmd>`    | CLI (status, models, providers, families, preload, import/export) |
-| `anyai`          | GUI (Tauri); also runs the API server alongside                  |
+| `myownllm serve`    | Headless OpenAI-compat server (the primary use case)             |
+| `myownllm <cmd>`    | CLI (status, models, providers, families, preload, import/export) |
+| `myownllm`          | GUI (Tauri); also runs the API server alongside                  |
 
 ## The provider/family ecosystem
 
@@ -68,7 +68,7 @@ That per-file TTL is also how publishers express rate-limit expectations: a mani
 | `api_models.rs` | OpenAI-compatible request/response types. |
 | `resolver.rs` | Manifest fetch + per-file TTL cache, recursive imports with cycle detection, family + hardware-tier walk, virtual-ID map. Mirrors `src/manifest.ts`. |
 | `preload.rs` | `preload(modes, …)` + `ensure_tracked_models()` reconcile loop. |
-| `watcher.rs` | Background ticker (every 5 min) that re-runs `ensure_tracked_models`, recomputes model-status, and triggers `self_update::tick`. Process lock at `~/.anyai/watcher.lock`. |
+| `watcher.rs` | Background ticker (every 5 min) that re-runs `ensure_tracked_models`, recomputes model-status, and triggers `self_update::tick`. Process lock at `~/.myownllm/watcher.lock`. |
 | `self_update.rs` | Periodic GitHub-releases check, channel-aware (stable/beta), patch auto-apply, atomic rename-on-restart, package-manager-install detection (no-op when installed via brew/apt/rpm/MSI). |
 | `hardware.rs` | nvidia-smi / rocm-smi / sysctl / /proc detection. |
 | `ollama.rs` | spawn/stop `ollama serve`, pull, list, delete, warm, has_model. |
@@ -79,11 +79,11 @@ The TS layer is the GUI's source of truth. The Rust layer reads the same on-disk
 
 | File | Role |
 |------|------|
-| `config.ts` | Read/write `~/.anyai/config.json` with default-merge for upgrades. |
+| `config.ts` | Read/write `~/.myownllm/config.json` with default-merge for upgrades. |
 | `manifest.ts` | `getManifest(url)` (per-file TTL cached, recursive imports), `resolveModel`, `pickFamily`, `familyModes`, `allRecommendedModels`. |
 | `providers.ts` | CRUD over saved providers, plus `getActiveFamily` / `setActiveFamily`. |
 | `model-lifecycle.ts` | `recomputeRecommendedSet`, `runCleanup`, `pruneNow`, `markEvictedNow`. |
-| `import-export.ts` | Bundle config to/from `anyai:import:…` URLs. |
+| `import-export.ts` | Bundle config to/from `myownllm:import:…` URLs. |
 | `preload.ts`, `watcher.ts` | Thin Tauri-invoke wrappers for the Rust counterparts. |
 | `ui/*.svelte` | Svelte 5 UI. |
 
@@ -104,12 +104,12 @@ The TS layer is the GUI's source of truth. The Rust layer reads the same on-disk
        │       │    each at its own TTL, merged in document order)
        │       │
        │       ├─ if tag not pulled  → ollama::pull_with(...)
-       │       └─ if tag changed     → emit anyai://mode-swap
+       │       └─ if tag changed     → emit myownllm://mode-swap
        │
        ▼
   watcher::recompute_status_from_disk()
        │
-       └─ writes ~/.anyai/cache/model-status.json
+       └─ writes ~/.myownllm/cache/model-status.json
               old tag's recommended_by becomes empty
               last_recommended timestamp = now (clock starts)
               model-lifecycle.runCleanup() will evict after model_cleanup_days
@@ -137,14 +137,14 @@ Hot-swap semantics: the OpenAI server reads `resolver::resolve(mode)` per reques
        │
        ├─ download asset for current platform
        ├─ verify SHA256 from release manifest
-       ├─ stage at  ~/.anyai/updates/<version>/anyai(.exe)
+       ├─ stage at  ~/.myownllm/updates/<version>/myownllm(.exe)
        │
        └─ on next launch (or on SIGTERM if running as daemon):
              atomically rename staged binary over the running one
              (Windows: scheduled rename via MoveFileEx + restart)
 ```
 
-Config (in `~/.anyai/config.json`):
+Config (in `~/.myownllm/config.json`):
 
 ```jsonc
 {
@@ -157,7 +157,7 @@ Config (in `~/.anyai/config.json`):
 }
 ```
 
-Disabling: `auto_update.enabled = false`, or `ANYAI_AUTOUPDATE=0`. When AnyAI detects a package-manager install, the updater logs a one-line note and stays out of the way regardless of config.
+Disabling: `auto_update.enabled = false`, or `MYOWNLLM_AUTOUPDATE=0`. When MyOwnLLM detects a package-manager install, the updater logs a one-line note and stays out of the way regardless of config.
 
 ## Why no extra HTTP framework?
 
@@ -168,7 +168,7 @@ Disabling: `auto_update.enabled = false`, or `ANYAI_AUTOUPDATE=0`. When AnyAI de
 ## Persistence
 
 ```
-~/.anyai/
+~/.myownllm/
 ├── config.json                       (user settings + tracked_modes + api + auto_update)
 ├── watcher.lock                      (PID; cooperative process lock)
 ├── updates/                          (staged self-update binaries)

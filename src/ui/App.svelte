@@ -98,7 +98,7 @@
   let newChatCounter = $state(0);
 
   /**
-   * Skip the next `anyai://active-conversation-changed` event because we
+   * Skip the next `myownllm://active-conversation-changed` event because we
    * just fired the underlying setActive ourselves. Without this every
    * local sidebar click would round-trip through the backend → event →
    * effect and we'd reload state we already just set.
@@ -225,7 +225,7 @@
         firstRunWhisperModel = whisperPresent ? "" : pendingWhisperModel;
         view = "first-run";
         console.info(
-          "[anyai] first-run: text=%s whisper=%s",
+          "[myownllm] first-run: text=%s whisper=%s",
           firstRunTextModel || "(present)",
           firstRunWhisperModel || "(present)",
         );
@@ -249,7 +249,7 @@
         invoke("remote_ui_local_heartbeat", { sessionId: localSessionId }).catch(() => {});
       }, 5000);
       try {
-        unsubRemote = await listen<boolean>("anyai://remote-active-changed", (evt) => {
+        unsubRemote = await listen<boolean>("myownllm://remote-active-changed", (evt) => {
           const next = !!evt.payload;
           const wasActive = remoteActive;
           remoteActive = next;
@@ -282,7 +282,7 @@
       // don't trigger a redundant reload.
       try {
         unsubActiveConv = await listen<string | null>(
-          "anyai://active-conversation-changed",
+          "myownllm://active-conversation-changed",
           (evt) => {
             if (suppressNextActiveEvent) {
               suppressNextActiveEvent = false;
@@ -314,7 +314,7 @@
         activeModel = displayModelFor(activeMode, hardware, manifest, config);
       });
 
-      // After everything else is wired, see if a previous AnyAI process
+      // After everything else is wired, see if a previous MyOwnLLM process
       // left a transcribe buffer behind. Fire-and-forget — failure
       // shouldn't block the app from coming up.
       probeAndResumeBacklog().catch(() => {});
@@ -323,7 +323,7 @@
       // the catch sets `error` and falls into the chat view with
       // `activeModel = ""`, so Ollama responds "model is required" and
       // there's no clue why. Log it AND show it in the UI banner.
-      console.error("AnyAI startup failed:", e);
+      console.error("MyOwnLLM startup failed:", e);
       error = String(e);
       view = "chat"; // Show chat anyway with whatever we have
     }
@@ -435,9 +435,9 @@
       .then((list) => {
         const installed = list.some((m) => m.name === r.model && m.installed);
         if (installed) return;
-        console.info("[anyai] background whisper pull: %s", r.model);
+        console.info("[myownllm] background whisper pull: %s", r.model);
         invoke("whisper_model_pull", { name: r.model }).catch((e) => {
-          console.warn("[anyai] background whisper pull failed:", e);
+          console.warn("[myownllm] background whisper pull failed:", e);
         });
       })
       .catch(() => {});
@@ -562,8 +562,8 @@
     stopConfirm = null;
   }
 
-  /** Scan `~/.anyai/transcribe-buffer/` for chunks left over by a
-   *  previous (crashed / force-quit) AnyAI process and offer to drain
+  /** Scan `~/.myownllm/transcribe-buffer/` for chunks left over by a
+   *  previous (crashed / force-quit) MyOwnLLM process and offer to drain
    *  them. We only auto-start the drain — we don't resurrect a mic
    *  stream — so the user always sees a chip in the status bar with a
    *  clear "Recovering…" label, never silent reactivation. */
@@ -592,7 +592,7 @@
       await refreshConversations();
 
       console.info(
-        "[anyai] resuming transcript backlog: stream=%s pending=%d model=%s",
+        "[myownllm] resuming transcript backlog: stream=%s pending=%d model=%s",
         target.stream_id,
         target.pending_chunks,
         target.model,
@@ -603,7 +603,7 @@
         conversationId: conv.id,
       });
     } catch (e) {
-      console.warn("[anyai] backlog probe failed:", e);
+      console.warn("[myownllm] backlog probe failed:", e);
     }
   }
 </script>
@@ -732,7 +732,7 @@
           <div>
             <div class="remote-title">In use remotely</div>
             <div class="remote-sub">
-              Another device on your network is using AnyAI. Single-user, so this window is paused
+              Another device on your network is using MyOwnLLM. Single-user, so this window is paused
               until they disconnect.
             </div>
           </div>

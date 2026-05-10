@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "AnyAI",
-  "identifier": "run.anyai.app",
+  "productName": "MyOwnLLM",
+  "identifier": "run.myownllm.app",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "AnyAI",
+        "title": "MyOwnLLM",
         "width": 800,
         "height": 600,
         "minWidth": 480,

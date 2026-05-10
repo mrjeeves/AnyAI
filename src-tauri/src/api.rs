@@ -1,7 +1,7 @@
 //! OpenAI-compatible HTTP server.
 //!
 //! Listens on a configurable host:port (default 127.0.0.1:1473), translates virtual
-//! model IDs (e.g. `anyai-text`) to the currently-resolved underlying tag, and proxies
+//! model IDs (e.g. `myownllm-text`) to the currently-resolved underlying tag, and proxies
 //! to Ollama at 127.0.0.1:11434. Streaming requests are forwarded byte-for-byte; the
 //! `model` field in each chunk is rewritten back to the requested virtual ID so clients
 //! see what they asked for.
@@ -72,8 +72,8 @@ pub async fn serve(
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(completions))
         .route("/v1/embeddings", post(embeddings))
-        .route("/v1/anyai/preload", post(api_preload))
-        .route("/v1/anyai/status", get(api_status))
+        .route("/v1/myownllm/preload", post(api_preload))
+        .route("/v1/myownllm/status", get(api_status))
         .with_state(state.clone());
 
     if cors_all {
@@ -89,11 +89,11 @@ pub async fn serve(
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
         anyhow!(
             "could not bind {addr}: {e}\n\
-             (if another anyai/ollama is running, choose a different --port)"
+             (if another myownllm/ollama is running, choose a different --port)"
         )
     })?;
 
-    eprintln!("anyai serve: listening on http://{addr}");
+    eprintln!("myownllm serve: listening on http://{addr}");
     if cors_all {
         eprintln!("  CORS: allow-all");
     }
@@ -110,7 +110,7 @@ pub async fn serve(
     Ok(())
 }
 
-/// CLI entry point for `anyai serve`.
+/// CLI entry point for `myownllm serve`.
 pub async fn cmd_serve(args: &[String]) -> Result<()> {
     let mut host: IpAddr = "127.0.0.1".parse().unwrap();
     let mut port: u16 = 1473;
@@ -222,7 +222,7 @@ async fn list_models(State(_state): State<AppState>) -> impl IntoResponse {
         data.push(ModelObject {
             id,
             object: "model",
-            owned_by: "anyai".to_string(),
+            owned_by: "myownllm".to_string(),
             created: None,
             metadata: Some(json!({
                 "mode": mode,
@@ -266,7 +266,7 @@ async fn chat_completions(
         Err(e) => return error_response(StatusCode::BAD_REQUEST, "bad_model", e.to_string()),
     };
 
-    let wait = q.wait || header_bool(&headers, "x-anyai-wait");
+    let wait = q.wait || header_bool(&headers, "x-myownllm-wait");
     if let Err(resp) = ensure_model_or_503(&state, &resolved, wait).await {
         return resp;
     }
@@ -298,7 +298,7 @@ async fn completions(
         Ok(t) => t,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, "bad_model", e.to_string()),
     };
-    let wait = q.wait || header_bool(&headers, "x-anyai-wait");
+    let wait = q.wait || header_bool(&headers, "x-myownllm-wait");
     if let Err(resp) = ensure_model_or_503(&state, &resolved, wait).await {
         return resp;
     }
@@ -434,7 +434,7 @@ async fn ensure_model_or_503(
                         Some(e) => format!("pull failed for {tag}: {e}"),
                         None => format!("model {tag} is being pulled"),
                     },
-                    "type": "anyai_error",
+                    "type": "myownllm_error",
                     "code": if snap.error.is_some() { "pull_failed" } else { "warming_up" },
                     "model": tag,
                     "progress": snap.last_line,
@@ -574,7 +574,7 @@ async fn proxy_with_model_rewrite(
         if !resolved_header.is_empty() {
             if let Ok(v) = HeaderValue::from_str(&resolved_header) {
                 resp.headers_mut()
-                    .insert(HeaderName::from_static("x-anyai-resolved-model"), v);
+                    .insert(HeaderName::from_static("x-myownllm-resolved-model"), v);
             }
         }
         return resp;
@@ -599,7 +599,7 @@ async fn proxy_with_model_rewrite(
     if !resolved_header.is_empty() {
         if let Ok(v) = HeaderValue::from_str(&resolved_header) {
             resp.headers_mut()
-                .insert(HeaderName::from_static("x-anyai-resolved-model"), v);
+                .insert(HeaderName::from_static("x-myownllm-resolved-model"), v);
         }
     }
     resp
@@ -719,7 +719,7 @@ fn error_response(status: StatusCode, code: &str, msg: impl Into<String>) -> Res
         Json(json!({
             "error": {
                 "message": msg.into(),
-                "type": "anyai_error",
+                "type": "myownllm_error",
                 "code": code,
             }
         })),

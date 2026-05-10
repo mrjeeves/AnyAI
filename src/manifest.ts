@@ -16,7 +16,7 @@ const DEFAULT_TTL_MINUTES = 360;
 
 async function cacheDir(): Promise<string> {
   const home = await homeDir();
-  return `${home}/.anyai/cache/manifests`;
+  return `${home}/.myownllm/cache/manifests`;
 }
 
 function cacheKey(url: string): string {

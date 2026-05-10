@@ -19,11 +19,11 @@ pub async fn run(args: Vec<String>) -> Result<()> {
             Ok(())
         }
         Some("--version") | Some("-V") | Some("version") => {
-            println!("anyai {}", env!("CARGO_PKG_VERSION"));
+            println!("myownllm {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         Some(unknown) => Err(anyhow!(
-            "unknown command: {unknown}\nRun `anyai help` for usage."
+            "unknown command: {unknown}\nRun `myownllm help` for usage."
         )),
         None => {
             print_help();
@@ -34,11 +34,11 @@ pub async fn run(args: Vec<String>) -> Result<()> {
 
 fn print_help() {
     println!(
-        r#"anyai — local AI, zero configuration
+        r#"myownllm — local AI, zero configuration
 
 USAGE:
-  anyai [command] [flags]
-  anyai --version
+  myownllm [command] [flags]
+  myownllm --version
 
 COMMANDS:
   run           Start chat (terminal)
@@ -143,7 +143,7 @@ async fn chat_loop(model: &str, _mode: &str) -> Result<()> {
     let stdin = io::stdin();
     let mut history: Vec<serde_json::Value> = Vec::new();
 
-    println!("AnyAI — {model}  (Ctrl+C or type 'exit' to quit)\n");
+    println!("MyOwnLLM — {model}  (Ctrl+C or type 'exit' to quit)\n");
 
     loop {
         print!("> ");
@@ -371,7 +371,7 @@ async fn cmd_models(args: &[String]) -> Result<()> {
         Some("keep") => {
             let name = args
                 .get(1)
-                .ok_or_else(|| anyhow!("usage: anyai models keep <model>"))?;
+                .ok_or_else(|| anyhow!("usage: myownllm models keep <model>"))?;
             let mut config = load_config()?;
             let kept = config["kept_models"].as_array_mut().map(|a| {
                 if !a.iter().any(|v| v.as_str() == Some(name)) {
@@ -387,7 +387,7 @@ async fn cmd_models(args: &[String]) -> Result<()> {
         Some("unkeep") => {
             let name = args
                 .get(1)
-                .ok_or_else(|| anyhow!("usage: anyai models unkeep <model>"))?;
+                .ok_or_else(|| anyhow!("usage: myownllm models unkeep <model>"))?;
             let mut config = load_config()?;
             if let Some(arr) = config["kept_models"].as_array_mut() {
                 arr.retain(|v| v.as_str() != Some(name));
@@ -398,10 +398,10 @@ async fn cmd_models(args: &[String]) -> Result<()> {
         Some("override") => {
             let mode = args
                 .get(1)
-                .ok_or_else(|| anyhow!("usage: anyai models override <mode> <model|--clear>"))?;
+                .ok_or_else(|| anyhow!("usage: myownllm models override <mode> <model|--clear>"))?;
             let model_or_clear = args
                 .get(2)
-                .ok_or_else(|| anyhow!("usage: anyai models override <mode> <model|--clear>"))?;
+                .ok_or_else(|| anyhow!("usage: myownllm models override <mode> <model|--clear>"))?;
             let mut config = load_config()?;
             if config["mode_overrides"].is_null() {
                 config["mode_overrides"] = serde_json::json!({});
@@ -426,7 +426,7 @@ async fn cmd_models(args: &[String]) -> Result<()> {
                 .map(|o| o.values().filter_map(|v| v.as_str()).collect())
                 .unwrap_or_default();
 
-            let status_path = crate::anyai_dir()?.join("cache/model-status.json");
+            let status_path = crate::myownllm_dir()?.join("cache/model-status.json");
             let unrecommended: Vec<String> = if status_path.exists() {
                 let v: serde_json::Value =
                     serde_json::from_str(&std::fs::read_to_string(&status_path)?)?;
@@ -459,7 +459,7 @@ async fn cmd_models(args: &[String]) -> Result<()> {
         Some("rm") => {
             let name = args
                 .get(1)
-                .ok_or_else(|| anyhow!("usage: anyai models rm <model>"))?;
+                .ok_or_else(|| anyhow!("usage: myownllm models rm <model>"))?;
             // Remove keep + override entries for this model too
             let mut config = load_config()?;
             if let Some(arr) = config["kept_models"].as_array_mut() {
@@ -496,7 +496,7 @@ async fn cmd_providers(args: &[String]) -> Result<()> {
         Some("add") => {
             let url = args
                 .get(1)
-                .ok_or_else(|| anyhow!("usage: anyai providers add <url> --name <name>"))?;
+                .ok_or_else(|| anyhow!("usage: myownllm providers add <url> --name <name>"))?;
             let name = flag_value(args, "--name").unwrap_or_else(|| url.clone());
             let mut config = load_config()?;
             let providers = config["providers"]
@@ -518,7 +518,7 @@ async fn cmd_providers(args: &[String]) -> Result<()> {
         Some("use") => {
             let name = args
                 .get(1)
-                .ok_or_else(|| anyhow!("usage: anyai providers use <name>"))?;
+                .ok_or_else(|| anyhow!("usage: myownllm providers use <name>"))?;
             let immediate = args.contains(&"--immediate".to_string());
             let mut config = load_config()?;
             let providers = config["providers"].as_array().cloned().unwrap_or_default();
@@ -568,11 +568,11 @@ async fn cmd_providers(args: &[String]) -> Result<()> {
         Some("rm") => {
             let name = args
                 .get(1)
-                .ok_or_else(|| anyhow!("usage: anyai providers rm <name>"))?;
+                .ok_or_else(|| anyhow!("usage: myownllm providers rm <name>"))?;
             let mut config = load_config()?;
             if config["active_provider"].as_str() == Some(name) {
                 return Err(anyhow!(
-                    "cannot remove active provider; switch first with `anyai providers use`"
+                    "cannot remove active provider; switch first with `myownllm providers use`"
                 ));
             }
             if let Some(arr) = config["providers"].as_array_mut() {
@@ -639,7 +639,7 @@ async fn cmd_providers(args: &[String]) -> Result<()> {
 async fn cmd_families(args: &[String]) -> Result<()> {
     let config = load_config()?;
     let provider_url = crate::resolver::active_provider_url(&config)
-        .ok_or_else(|| anyhow!("no active provider; add one with `anyai providers add`"))?;
+        .ok_or_else(|| anyhow!("no active provider; add one with `myownllm providers add`"))?;
     let manifest = crate::resolver::fetch_or_load_manifest(&provider_url).await?;
     let active_family = config["active_family"].as_str().unwrap_or("").to_string();
 
@@ -689,7 +689,7 @@ async fn cmd_families(args: &[String]) -> Result<()> {
         Some("use") => {
             let name = args
                 .get(1)
-                .ok_or_else(|| anyhow!("usage: anyai families use <name>"))?;
+                .ok_or_else(|| anyhow!("usage: myownllm families use <name>"))?;
             let exists = manifest["families"]
                 .as_object()
                 .map(|f| f.contains_key(name))
@@ -744,7 +744,7 @@ async fn cmd_families(args: &[String]) -> Result<()> {
 async fn cmd_import(args: &[String]) -> Result<()> {
     let url_or_path = args
         .first()
-        .ok_or_else(|| anyhow!("usage: anyai import <url|path>"))?;
+        .ok_or_else(|| anyhow!("usage: myownllm import <url|path>"))?;
     let json_str = if url_or_path.starts_with("http://") || url_or_path.starts_with("https://") {
         let out = tokio::process::Command::new("curl")
             .args(["-sf", "--max-time", "10", url_or_path])
@@ -785,7 +785,7 @@ async fn cmd_export(args: &[String]) -> Result<()> {
 
     if as_url {
         let encoded = base64_encode(&export.to_string());
-        println!("anyai:import:{encoded}");
+        println!("myownllm:import:{encoded}");
     } else {
         println!("{}", serde_json::to_string_pretty(&export)?);
     }
@@ -804,7 +804,7 @@ async fn cmd_preload(args: &[String]) -> Result<()> {
         .collect();
     if modes.is_empty() {
         return Err(anyhow!(
-            "usage: anyai preload <mode...> [--track] [--no-warm] [--json]"
+            "usage: myownllm preload <mode...> [--track] [--no-warm] [--json]"
         ));
     }
     for m in &modes {

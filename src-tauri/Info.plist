@@ -3,6 +3,6 @@
 <plist version="1.0">
 <dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>AnyAI captures microphone audio for Transcribe mode. Audio is processed locally; nothing leaves your machine.</string>
+  <string>MyOwnLLM captures microphone audio for Transcribe mode. Audio is processed locally; nothing leaves your machine.</string>
 </dict>
 </plist>

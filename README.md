@@ -1,31 +1,31 @@
-# AnyAI
+# MyOwnLLM
 
 > A local API surface for local AI. Self-host the JSON, set it, forget it.
 
-AnyAI is a single binary that exposes an OpenAI-compatible HTTP API on `127.0.0.1`. Every request asks one question — _"what model should this machine run for this mode?"_ — and answers it from a static JSON file at a URL you (or your team, or a publisher you trust) host. JSON files can `import` other JSON files, so an org or community can compose merged catalogs without coordinating servers. The binary auto-updates itself in the background, so once installed it keeps working.
+MyOwnLLM is a single binary that exposes an OpenAI-compatible HTTP API on `127.0.0.1`. Every request asks one question — _"what model should this machine run for this mode?"_ — and answers it from a static JSON file at a URL you (or your team, or a publisher you trust) host. JSON files can `import` other JSON files, so an org or community can compose merged catalogs without coordinating servers. The binary auto-updates itself in the background, so once installed it keeps working.
 
 ## Install
 
 macOS / Linux:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mrjeeves/AnyAI/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/scripts/install.sh | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/mrjeeves/AnyAI/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/scripts/install.ps1 | iex
 ```
 
-Or grab a binary from [Releases](https://github.com/mrjeeves/AnyAI/releases).
+Or grab a binary from [Releases](https://github.com/mrjeeves/MyOwnLLM/releases).
 
 Runs on a Raspberry Pi 5 too — the default manifest ships Gemma 4's edge variants (`e2b` / `e4b`), which are agentic, multimodal, Apache-2.0, and built for offline edge inference. See [DOCS.md › Small systems](DOCS.md#small-systems-raspberry-pi-4--pi-5).
 
 ## Quick start
 
 ```
-$ anyai serve
+$ myownllm serve
 Listening on http://127.0.0.1:1473
 Tracking: text → gemma4:e4b
 ```
@@ -35,28 +35,28 @@ In another shell, hit it:
 ```bash
 curl http://127.0.0.1:1473/v1/chat/completions \
   -H 'content-type: application/json' \
-  -d '{"model":"anyai-text","messages":[{"role":"user","content":"hello"}]}'
+  -d '{"model":"myownllm-text","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-To use AnyAI from Cursor / Continue / Aider / opencode / OpenClaw / OpenClaude / any OpenAI-compatible client, point at:
+To use MyOwnLLM from Cursor / Continue / Aider / opencode / OpenClaw / OpenClaude / any OpenAI-compatible client, point at:
 
 ```
 Base URL: http://127.0.0.1:1473/v1
-Model:    anyai-text
+Model:    myownllm-text
 API key:  any non-empty string
 ```
 
-The model behind `anyai-text` auto-resolves to the best tag for your hardware and stays current as upstream JSON changes — no client-side reconfiguration needed, ever.
+The model behind `myownllm-text` auto-resolves to the best tag for your hardware and stays current as upstream JSON changes — no client-side reconfiguration needed, ever.
 
 Copy-pasteable configs for the apps that hide these fields (opencode, OpenClaw, OpenClaude, Cursor, Continue, Cline, Aider, Zed, Open WebUI, LibreChat) live in [DOCS.md › Connecting client apps](DOCS.md#connecting-client-apps).
 
 ## Other ways in
 
 ```bash
-anyai run            # terminal chat
-anyai                # desktop GUI
-anyai status         # provider, hardware, ollama state
-anyai update         # self-update status / check / apply
+myownllm run            # terminal chat
+myownllm                # desktop GUI
+myownllm status         # provider, hardware, ollama state
+myownllm update         # self-update status / check / apply
 ```
 
 ## Documentation
@@ -67,10 +67,10 @@ anyai update         # self-update status / check / apply
 ## Build from source
 
 ```bash
-git clone https://github.com/mrjeeves/AnyAI
-cd AnyAI
+git clone https://github.com/mrjeeves/MyOwnLLM
+cd MyOwnLLM
 just setup       # rust, node, pnpm, tauri CLI, GTK on Linux
-just build       # → src-tauri/target/release/anyai
+just build       # → src-tauri/target/release/myownllm
 ```
 
 See [DOCS.md › Building from source](DOCS.md#building-from-source) for the prereq list and `pnpm tauri dev`.

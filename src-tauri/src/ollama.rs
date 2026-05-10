@@ -24,7 +24,7 @@ pub fn is_installed() -> bool {
     if which::which("ollama").is_ok() {
         return true;
     }
-    // After a fresh manual install on Windows the user's running anyai still
+    // After a fresh manual install on Windows the user's running myownllm still
     // has the pre-install PATH, so `which` keeps reporting "not installed"
     // even after they click Retry. Probe the standard install location and
     // augment PATH for the rest of this process so subsequent
@@ -118,7 +118,7 @@ pub async fn ensure_running() -> Result<()> {
     // the WebView's `Origin` (which on Tauri 2 / Windows is `http://tauri.localhost`,
     // not in Ollama's defaults). When the Windows installer runs Ollama as a
     // tray service we can't influence its env — that's why the GUI also routes
-    // chat through anyai's API server (see Chat.svelte).
+    // chat through myownllm's API server (see Chat.svelte).
     let child = Command::new("ollama")
         .arg("serve")
         .env("OLLAMA_ORIGINS", "*")
@@ -329,7 +329,7 @@ pub async fn has_model(model: &str) -> Result<bool> {
 }
 
 /// Fire a 1-token chat call so Ollama mmaps the weights and keeps the model loaded
-/// for `keep_alive`. Used by `anyai preload --warm`.
+/// for `keep_alive`. Used by `myownllm preload --warm`.
 pub async fn warm(model: &str) -> Result<()> {
     let body = serde_json::json!({
         "model": model,

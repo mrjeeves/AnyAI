@@ -68,7 +68,7 @@ async fn preload_modes(
 ) -> Result<(), String> {
     use tauri::Emitter;
     preload::preload(&modes, track, warm, |evt| {
-        let _ = window.emit("anyai://preload-progress", &evt);
+        let _ = window.emit("myownllm://preload-progress", &evt);
     })
     .await
     .map_err(|e| e.to_string())
@@ -129,7 +129,7 @@ fn set_active_conversation(id: Option<String>) {
 /// Streamed counterpart of `ollama_chat`. Emits per-token deltas on the
 /// caller-supplied event channel so the GUI can paint incrementally.
 ///
-/// Channel scheme: `anyai://chat-stream/{stream_id}` — the frontend picks
+/// Channel scheme: `myownllm://chat-stream/{stream_id}` — the frontend picks
 /// the id so it can subscribe before invoking, and so concurrent streams
 /// don't collide. Frames carry exactly one of `delta` (visible content),
 /// `thinking_delta` (reasoning from thinking models), or `done: true` with
@@ -142,7 +142,7 @@ async fn ollama_chat_stream(
     window: tauri::WebviewWindow,
 ) -> Result<(), String> {
     use tauri::Emitter;
-    let event = format!("anyai://chat-stream/{stream_id}");
+    let event = format!("myownllm://chat-stream/{stream_id}");
     let content_window = window.clone();
     let content_event = event.clone();
     let thinking_window = window.clone();
@@ -270,7 +270,7 @@ async fn remote_ui_kick(disable: bool) -> Result<RemoteUiStatus, String> {
 // ---------------------------------------------------------------------------
 // Local-only transcription pipeline. Audio capture + whisper-rs both run
 // in-process; nothing is sent over the network at runtime. Models live
-// under `~/.anyai/whisper/` and are downloaded on demand.
+// under `~/.myownllm/whisper/` and are downloaded on demand.
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
@@ -365,7 +365,7 @@ fn update_apply_now(app: tauri::AppHandle) {
 /// We only flip this on Linux + aarch64 because that's where the breakage
 /// lives; x86_64 desktops keep the fast path. Honors a user-set value so
 /// anyone wanting to re-enable DMABUF on hardware that doesn't have the
-/// bug can still do so via `WEBKIT_DISABLE_DMABUF_RENDERER=0 anyai`.
+/// bug can still do so via `WEBKIT_DISABLE_DMABUF_RENDERER=0 myownllm`.
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 fn workaround_pi_webkit_dmabuf() {
     if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
@@ -384,9 +384,9 @@ fn main() {
     // On Windows the release binary is built as a GUI subsystem app so the
     // GUI launches from Explorer without a console flash. The flip side is
     // that cmd.exe / PowerShell don't connect any stdio when they invoke
-    // anyai.exe for a CLI command, so println!/eprintln! go to the void.
+    // myownllm.exe for a CLI command, so println!/eprintln! go to the void.
     // Attach to the parent console and rewire std handles BEFORE any output
-    // (incl. self_update messages) so `anyai status`, `anyai --version`,
+    // (incl. self_update messages) so `myownllm status`, `myownllm --version`,
     // etc. actually print.
     #[cfg(target_os = "windows")]
     if cli_mode {
@@ -401,11 +401,11 @@ fn main() {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async {
             // Race the subcommand against Ctrl-C so we always reach the
-            // cleanup line below — `anyai run` blocks on stdin in a sync
+            // cleanup line below — `myownllm run` blocks on stdin in a sync
             // chat loop, and a bare Ctrl-C there would terminate the
             // process before any Drop or post-await code runs, leaving
             // the spawned `ollama serve` orphaned. Subcommands that
-            // install their own Ctrl-C handler (e.g. `anyai serve` for
+            // install their own Ctrl-C handler (e.g. `myownllm serve` for
             // graceful axum shutdown) resolve this race themselves first.
             let result = tokio::select! {
                 r = cli::run(args[1..].to_vec()) => r,
@@ -415,7 +415,7 @@ fn main() {
                 }
             };
             // Mirrors the GUI's RunEvent::Exit handler. ollama::stop() is a
-            // no-op when AnyAI didn't spawn the daemon (the static
+            // no-op when MyOwnLLM didn't spawn the daemon (the static
             // OLLAMA_PROCESS slot is empty for user-managed installs), so
             // this never disturbs an ollama the user started themselves.
             let _ = ollama::stop().await;
@@ -543,13 +543,13 @@ fn main() {
                 tauri::async_runtime::spawn(async move {
                     let mut rx = remote_ui::subscribe_active();
                     let initial = *rx.borrow();
-                    let _ = app_handle.emit("anyai://remote-active-changed", initial);
+                    let _ = app_handle.emit("myownllm://remote-active-changed", initial);
                     loop {
                         if rx.changed().await.is_err() {
                             break;
                         }
                         let active = *rx.borrow();
-                        let _ = app_handle.emit("anyai://remote-active-changed", active);
+                        let _ = app_handle.emit("myownllm://remote-active-changed", active);
                     }
                 });
             }
@@ -564,13 +564,13 @@ fn main() {
                 tauri::async_runtime::spawn(async move {
                     let mut rx = remote_ui::subscribe_active_conversation();
                     let initial = rx.borrow().clone();
-                    let _ = app_handle.emit("anyai://active-conversation-changed", initial);
+                    let _ = app_handle.emit("myownllm://active-conversation-changed", initial);
                     loop {
                         if rx.changed().await.is_err() {
                             break;
                         }
                         let id = rx.borrow().clone();
-                        let _ = app_handle.emit("anyai://active-conversation-changed", id);
+                        let _ = app_handle.emit("myownllm://active-conversation-changed", id);
                     }
                 });
             }
@@ -589,14 +589,14 @@ fn main() {
 }
 
 fn ensure_config_dir(_app: &tauri::AppHandle) -> anyhow::Result<()> {
-    let dir = anyai_dir()?;
+    let dir = myownllm_dir()?;
     std::fs::create_dir_all(&dir)?;
     std::fs::create_dir_all(dir.join("cache/manifests"))?;
     std::fs::create_dir_all(dir.join("updates"))?;
     Ok(())
 }
 
-pub fn anyai_dir() -> anyhow::Result<std::path::PathBuf> {
+pub fn myownllm_dir() -> anyhow::Result<std::path::PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
-    Ok(home.join(".anyai"))
+    Ok(home.join(".myownllm"))
 }

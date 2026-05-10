@@ -1,6 +1,6 @@
 [
   {
-    "name": "AnyAI Default",
-    "url": "https://raw.githubusercontent.com/mrjeeves/AnyAI/main/manifests/default.json"
+    "name": "MyOwnLLM Default",
+    "url": "https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/manifests/default.json"
   }
 ]

@@ -3,7 +3,7 @@
 //! cpal captures from the default (or named) input device. Samples flow
 //! through a small in-RAM hop into an *ingest* thread, which downmixes,
 //! resamples to 16 kHz, accumulates 5-second chunks, and spills each
-//! chunk to disk under `~/.anyai/transcribe-buffer/{stream_id}/{seq}.f32`.
+//! chunk to disk under `~/.myownllm/transcribe-buffer/{stream_id}/{seq}.f32`.
 //! A separate *inference* thread reads chunks from disk in sequence
 //! order, runs whisper-rs on them, emits text deltas, and deletes the
 //! chunk on success. Stitched-in-order text is therefore preserved even
@@ -12,7 +12,7 @@
 //! dropped.
 //!
 //! Nothing is sent over the network at runtime. The whisper model is
-//! loaded from `~/.anyai/whisper/ggml-{name}.bin`, which is downloaded on
+//! loaded from `~/.myownllm/whisper/ggml-{name}.bin`, which is downloaded on
 //! demand by `whisper_model_pull` (see below). No model files ship with
 //! the binary.
 
@@ -42,7 +42,7 @@ const CHUNK_SECONDS: f32 = 5.0;
 /// sub-second inputs so we just drop tails shorter than this.
 const TAIL_FLUSH_MIN_SECONDS: f32 = 1.0;
 
-/// Frame shape emitted on `anyai://transcribe-stream/{stream_id}`. `delta`
+/// Frame shape emitted on `myownllm://transcribe-stream/{stream_id}`. `delta`
 /// is the new text since the last frame; the frontend appends. `final`
 /// signals the worker has unwound (either user-stopped or errored).
 /// `pending_chunks` is how many 5-second chunks are still queued on disk
@@ -73,9 +73,9 @@ fn sessions() -> &'static DashMap<String, Session> {
 }
 
 /// Path to the directory whisper models are downloaded into. Mirrors the
-/// `~/.anyai/` convention the rest of the app uses.
+/// `~/.myownllm/` convention the rest of the app uses.
 pub fn whisper_dir() -> Result<PathBuf> {
-    let dir = crate::anyai_dir()?.join("whisper");
+    let dir = crate::myownllm_dir()?.join("whisper");
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
@@ -85,7 +85,7 @@ pub fn whisper_dir() -> Result<PathBuf> {
 /// cleanup against a previous crashed session leaving stale chunks),
 /// and removed entirely on session end.
 fn chunk_buffer_dir(stream_id: &str) -> Result<PathBuf> {
-    let dir = crate::anyai_dir()?
+    let dir = crate::myownllm_dir()?
         .join("transcribe-buffer")
         .join(sanitize_stream_id(stream_id));
     std::fs::create_dir_all(&dir)?;
@@ -96,10 +96,10 @@ fn chunk_buffer_dir(stream_id: &str) -> Result<PathBuf> {
 /// helpers that walk every stream the way Disk Usage does, rather than
 /// drilling into one stream by id.
 fn buffer_root() -> Result<PathBuf> {
-    Ok(crate::anyai_dir()?.join("transcribe-buffer"))
+    Ok(crate::myownllm_dir()?.join("transcribe-buffer"))
 }
 
-/// Recursive size of `~/.anyai/transcribe-buffer/`. The Storage tab
+/// Recursive size of `~/.myownllm/transcribe-buffer/`. The Storage tab
 /// surfaces this so the user can see how much disk a slow whisper backlog
 /// is parked on. Errors collapse to 0 — a missing dir is the steady state
 /// when there's no recording happening.
@@ -208,7 +208,7 @@ pub fn list_pending_streams() -> Vec<PendingStream> {
 
 /// `stream_id` comes from the frontend (UUIDs in practice), but we
 /// don't trust callers — strip anything that isn't a-z, 0-9, `-`, or
-/// `_` so the path can't escape `~/.anyai/transcribe-buffer/`.
+/// `_` so the path can't escape `~/.myownllm/transcribe-buffer/`.
 fn sanitize_stream_id(s: &str) -> String {
     s.chars()
         .map(|c| {
@@ -228,7 +228,7 @@ pub fn model_path(name: &str) -> Result<PathBuf> {
     Ok(whisper_dir()?.join(format!("ggml-{name}.bin")))
 }
 
-/// Catalogue of models AnyAI knows how to download. Sizes verified
+/// Catalogue of models MyOwnLLM knows how to download. Sizes verified
 /// against the HuggingFace API on 2026-05-10 (`approx`), with `min_bytes`
 /// set to about 60% of the real size so a successful download has to
 /// transfer most of the payload — anything smaller is almost certainly
@@ -304,7 +304,7 @@ pub struct WhisperPullProgress {
     pub error: Option<String>,
 }
 
-/// Download `ggml-{name}.bin` from HuggingFace into `~/.anyai/whisper/`.
+/// Download `ggml-{name}.bin` from HuggingFace into `~/.myownllm/whisper/`.
 /// Streams to a temp file then renames into place. Defends against the
 /// three failure modes that previously surfaced as "pull finished but
 /// model isn't installed":
@@ -322,7 +322,7 @@ pub async fn pull_model(name: String, window: WebviewWindow) -> Result<()> {
 
     let dir = whisper_dir()?;
     let final_path = dir.join(format!("ggml-{name}.bin"));
-    let event = format!("anyai://whisper-pull/{name}");
+    let event = format!("myownllm://whisper-pull/{name}");
     let emit = |frame: WhisperPullProgress| {
         let _ = window.emit(&event, frame);
     };
@@ -359,9 +359,9 @@ pub async fn pull_model(name: String, window: WebviewWindow) -> Result<()> {
     // ourselves so we get the binary.
     let client = reqwest::Client::builder()
         .user_agent(concat!(
-            "AnyAI/",
+            "MyOwnLLM/",
             env!("CARGO_PKG_VERSION"),
-            " (whisper-pull; +https://github.com/mrjeeves/AnyAI)"
+            " (whisper-pull; +https://github.com/mrjeeves/MyOwnLLM)"
         ))
         .build()?;
     let resp = client.get(&url).send().await?;
@@ -446,7 +446,7 @@ pub fn remove_model(name: &str) -> Result<()> {
 
 /// Spin up an audio capture + inference worker for `stream_id`. Returns
 /// once the worker is alive; the actual transcript flows back through
-/// `anyai://transcribe-stream/{stream_id}` events.
+/// `myownllm://transcribe-stream/{stream_id}` events.
 pub fn start(
     stream_id: String,
     model_name: String,
@@ -492,7 +492,7 @@ pub fn start(
     let paused_for_thread = paused.clone();
     let model_for_thread = model_name.clone();
     thread::spawn(move || {
-        let event = format!("anyai://transcribe-stream/{stream_id_for_thread}");
+        let event = format!("myownllm://transcribe-stream/{stream_id_for_thread}");
         let res = run_session(
             &event,
             &stream_id_for_thread,
@@ -551,7 +551,7 @@ pub fn resume(stream_id: &str) -> Result<()> {
 }
 
 /// Start an inference-only worker against an existing buffer dir. Used
-/// when AnyAI relaunches and finds chunks left over from a previous
+/// when MyOwnLLM relaunches and finds chunks left over from a previous
 /// session — we don't open the mic, we just chew through what's there
 /// and emit deltas the same way a normal session would. The worker
 /// exits as soon as the buffer is empty (or on cancel).
@@ -579,7 +579,7 @@ pub fn start_drain(stream_id: String, model_name: String, window: WebviewWindow)
     let stream_id_for_thread = stream_id.clone();
     let cancel_for_thread = cancel.clone();
     thread::spawn(move || {
-        let event = format!("anyai://transcribe-stream/{stream_id_for_thread}");
+        let event = format!("myownllm://transcribe-stream/{stream_id_for_thread}");
         let res = run_drain(
             &event,
             &stream_id_for_thread,

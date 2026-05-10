@@ -31,10 +31,10 @@ awk -v v="$v" '
 ' src-tauri/Cargo.toml > src-tauri/Cargo.toml.tmp
 mv src-tauri/Cargo.toml.tmp src-tauri/Cargo.toml
 
-# src-tauri/Cargo.lock — bump the [[package]] entry whose name is "anyai".
+# src-tauri/Cargo.lock — bump the [[package]] entry whose name is "myownllm".
 awk -v v="$v" '
   /^\[\[package\]\]/ { hit=0 }
-  /^name = "anyai"$/ { hit=1 }
+  /^name = "myownllm"$/ { hit=1 }
   hit && /^version = "[^"]*"/ { print "version = \"" v "\""; hit=0; next }
   { print }
 ' src-tauri/Cargo.lock > src-tauri/Cargo.lock.tmp

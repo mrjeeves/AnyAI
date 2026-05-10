@@ -41,7 +41,7 @@
 
   /** Whether the WebView's mediaDevices API is exposed. We only need it
    *  for the optional Test button — the actual transcription pipeline
-   *  uses cpal in Rust, which works on every platform AnyAI ships on. */
+   *  uses cpal in Rust, which works on every platform MyOwnLLM ships on. */
   const canPromptMic =
     typeof navigator !== "undefined" &&
     !!navigator.mediaDevices &&
@@ -181,7 +181,7 @@
 <div class="section">
   <div class="head">
     <p class="lede">
-      What AnyAI sees on this machine. The resolver picks model tiers against
+      What MyOwnLLM sees on this machine. The resolver picks model tiers against
       <strong>VRAM</strong> and <strong>RAM</strong>; storage limits how many
       models you can keep pulled.
     </p>
@@ -261,7 +261,7 @@
               {#if conversationDir}
                 <code class="path">{conversationDir}</code>
               {:else}
-                <span class="dim">default under ~/.anyai/</span>
+                <span class="dim">default under ~/.myownllm/</span>
               {/if}
             </dd>
           </div>

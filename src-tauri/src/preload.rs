@@ -1,7 +1,7 @@
 //! Preload modes ahead of time + `ensure_tracked_models` reconcile loop.
 //!
 //! Used by:
-//!   - `anyai preload <modes...>` (CLI)
+//!   - `myownllm preload <modes...>` (CLI)
 //!   - The API server's pull-on-demand handler
 //!   - The watcher (background ticks + post-config-change reconciliation)
 
@@ -51,7 +51,7 @@ pub async fn preload<F: FnMut(PreloadEvent)>(
 
     for mode in modes {
         // Modes whose runtime isn't Ollama (whisper today) live under
-        // `~/.anyai/whisper/` and are managed by Settings →
+        // `~/.myownllm/whisper/` and are managed by Settings →
         // Transcription, not by `ollama pull`. Skipping here avoids the
         // pre-#59 footgun of pulling a phantom tag like `whisper:medium`
         // and silently writing nothing to disk.

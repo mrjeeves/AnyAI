@@ -1,10 +1,10 @@
-# Contributing to AnyAI
+# Contributing to MyOwnLLM
 
 ## Setup
 
 ```bash
-git clone https://github.com/mrjeeves/AnyAI
-cd AnyAI
+git clone https://github.com/mrjeeves/MyOwnLLM
+cd MyOwnLLM
 just setup        # installs Rust 1.88, Node, pnpm, Tauri CLI, GTK deps on Linux
 just dev          # hot-reload GUI
 # or
@@ -46,4 +46,4 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the high-level design and the reque
 
 ## Filing bugs
 
-Include the output of `anyai status --json` and `anyai --version` in every bug report. If the API server is involved, include a `curl -i` of the failing request.
+Include the output of `myownllm status --json` and `myownllm --version` in every bug report. If the API server is involved, include a `curl -i` of the failing request.

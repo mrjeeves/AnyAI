@@ -25,7 +25,7 @@
   let diskFreeGb = $state<number | null>(null);
   let dirExists = $state<boolean | null>(null);
   let loading = $state(true);
-  /** Bytes parked under `~/.anyai/transcribe-buffer/`. > 0 when whisper
+  /** Bytes parked under `~/.myownllm/transcribe-buffer/`. > 0 when whisper
    *  fell behind realtime and audio is spilling to disk; the inference
    *  loop drains the dir as it catches up. The card stays hidden when
    *  there's nothing pending — there's no useful "0 GB" reading. */
@@ -40,7 +40,7 @@
         loadConfig(),
         invoke<number>("transcribe_buffer_size_bytes").catch(() => 0),
       ]);
-      // Whisper models live under ~/.anyai/whisper/, not in Ollama's library,
+      // Whisper models live under ~/.myownllm/whisper/, not in Ollama's library,
       // so the on-disk total has to sum both backends or it under-reports
       // every transcribe install. Only count installed entries with a known
       // size — pending downloads and unknown-size rows would inflate the
@@ -116,8 +116,8 @@
 <div class="section">
   <div class="head">
     <p class="lede">
-      Where AnyAI's data lives on this machine. Models are managed by Ollama;
-      conversations and artifacts live under <code>~/.anyai/</code> by default.
+      Where MyOwnLLM's data lives on this machine. Models are managed by Ollama;
+      conversations and artifacts live under <code>~/.myownllm/</code> by default.
     </p>
   </div>
 
@@ -153,8 +153,8 @@
                   ({backlogSeconds(transcribeBacklogBytes)} s of audio)
                 </span>
                 pending whisper inference under
-                <code>~/.anyai/transcribe-buffer/</code>.
-                Drains automatically while AnyAI is open.
+                <code>~/.myownllm/transcribe-buffer/</code>.
+                Drains automatically while MyOwnLLM is open.
               </div>
             </div>
           </div>
@@ -165,7 +165,7 @@
         <div class="card-title">Conversations &amp; artifacts</div>
         <p class="card-meta">
           Saved chats and any files generated during them. Defaults to a folder under
-          <code>~/.anyai/</code>; change it to a synced folder if you want them backed up.
+          <code>~/.myownllm/</code>; change it to a synced folder if you want them backed up.
         </p>
         <div class="path-row">
           <input

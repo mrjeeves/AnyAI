@@ -1,5 +1,5 @@
 //! Filesystem-backed conversation store. One JSON file per conversation
-//! under `~/.anyai/conversations/<id>.json` (or the user-overridden
+//! under `~/.myownllm/conversations/<id>.json` (or the user-overridden
 //! `conversation_dir` from config).
 //!
 //! Shared between the Tauri commands the local desktop UI calls and the
@@ -59,7 +59,7 @@ impl From<&Conversation> for ConversationMeta {
 
 fn dir() -> Result<PathBuf> {
     // Honour the user-overridden conversation_dir if present and absolute;
-    // otherwise default to ~/.anyai/conversations. The TS frontend uses
+    // otherwise default to ~/.myownllm/conversations. The TS frontend uses
     // the same precedence so the two surfaces never disagree on where to
     // look.
     if let Ok(cfg) = crate::resolver::load_config_value() {
@@ -69,7 +69,7 @@ fn dir() -> Result<PathBuf> {
             }
         }
     }
-    Ok(crate::anyai_dir()?.join("conversations"))
+    Ok(crate::myownllm_dir()?.join("conversations"))
 }
 
 /// Reject any id that could escape the conversations dir or carry

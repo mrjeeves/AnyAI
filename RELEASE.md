@@ -1,4 +1,4 @@
-# Releasing AnyAI
+# Releasing MyOwnLLM
 
 One command:
 
@@ -12,7 +12,7 @@ That's it. The recipe runs `scripts/bump-version.sh`, commits any diff, pushes, 
 
 1. **Bumps versions** via `scripts/bump-version.sh`:
    - `src-tauri/Cargo.toml` — `[package]` version (single source of truth).
-   - `src-tauri/Cargo.lock` — the `[[package]]` entry whose `name = "anyai"`.
+   - `src-tauri/Cargo.lock` — the `[[package]]` entry whose `name = "myownllm"`.
    - `package.json` — `version` field (kept in sync for tooling).
    - A leading `v` is accepted (`just release v0.1.8`) and stripped.
 2. **Commits** `chore(release): X.Y.Z` if any of the three files changed.
@@ -35,7 +35,7 @@ That's it. The recipe runs `scripts/bump-version.sh`, commits any diff, pushes, 
 1. **Verify tag matches manifest versions** — fails fast if `Cargo.toml` or `package.json` disagree with the tag. If this trips, run `just release X.Y.Z` to fix.
 2. Build the frontend with Vite, sanity-check `dist/` (entry rewritten, no SSR runtime leaked).
 3. Build the Tauri bundle for the platform's target.
-4. Package a portable binary (`anyai-<platform>.tar.gz` or `.zip`) with a SHA-256.
+4. Package a portable binary (`myownllm-<platform>.tar.gz` or `.zip`) with a SHA-256.
 5. Upload bundle + portable to the GitHub release for the tag.
 
 A separate `Upload installers` job attaches `scripts/install.sh` and `scripts/install.ps1`.
