@@ -48,6 +48,17 @@ const TAIL_FLUSH_MIN_SECONDS: f32 = 1.0;
 /// above ambient mic noise on a quiet desktop and well below conversational
 /// speech (which sits around 0.05 - 0.3 RMS).
 const SILENCE_RMS_THRESHOLD: f32 = 0.005;
+/// Sliding window for cross-chunk context: recycle the WhisperState after
+/// this many successful inferences. Each `state.full()` call appends decoded
+/// tokens to whisper.cpp's `prompt_past` (used to prime the next chunk for
+/// word-boundary continuity) and holds onto KV-cache buffers; over a long
+/// recording the state's RSS climbs steadily and on a memory-tight machine
+/// eventually crowds out the chat model. Recycling every ~2 min of audio
+/// (24 chunks × 5 s) bounds the growth — the trade-off is a single chunk
+/// loses cross-chunk priming each cycle, which is imperceptible at chunk
+/// boundaries that are already 5 s apart. The model `ctx` is preserved
+/// across the recycle, so we don't re-pay the model load cost.
+const WHISPER_STATE_RESET_CHUNKS: u64 = 24;
 
 fn chunk_rms(samples: &[f32]) -> f32 {
     if samples.is_empty() {
@@ -804,6 +815,8 @@ fn run_session(
     // ascending seq order so cross-chunk context (set_no_context(false))
     // still primes the next chunk from the previous decode's tokens.
     let mut next_seq: u64 = 1;
+    // Sliding-window counter for state recycling — see WHISPER_STATE_RESET_CHUNKS.
+    let mut chunks_since_reset: u64 = 0;
     // The status surfaced to the UI is the LAST noteworthy thing that
     // happened. A normal text frame clears it, so the user only sees a
     // status line when something is actually idle (loading, waiting for
@@ -938,6 +951,20 @@ fn run_session(
             )
         };
         let _ = window.emit(event, frame);
+
+        // Sliding window: drop the state every WHISPER_STATE_RESET_CHUNKS
+        // successful decodes to release accumulated `prompt_past` and KV
+        // buffers. The model context (`ctx`) is preserved so this is just
+        // an allocator churn, not a model reload. Skipped on silent /
+        // errored chunks above (those bypass the decode and don't grow the
+        // state in the first place).
+        chunks_since_reset += 1;
+        if chunks_since_reset >= WHISPER_STATE_RESET_CHUNKS {
+            chunks_since_reset = 0;
+            state = ctx
+                .create_state()
+                .map_err(|e| anyhow!("state recycle: {e}"))?;
+        }
     }
 
     drop(stream);
@@ -979,6 +1006,8 @@ fn run_drain(
     // the crash). Walking the dir once is fine — there can only be a
     // few thousand entries even on the worst backlog.
     let mut next_seq: u64 = lowest_pending_seq(&buffer_dir).unwrap_or(1);
+    // Sliding-window counter for state recycling — see WHISPER_STATE_RESET_CHUNKS.
+    let mut chunks_since_reset: u64 = 0;
     let initial_pending = count_pending_chunks(&buffer_dir);
     let _ = window.emit(
         event,
@@ -1099,6 +1128,18 @@ fn run_drain(
             )
         };
         let _ = window.emit(event, frame);
+
+        // Sliding window — same rationale as run_session. Drain backlogs can
+        // be very long (the whole point of this function is to catch up after
+        // a crash), so this is exactly where unbounded state growth would
+        // bite hardest.
+        chunks_since_reset += 1;
+        if chunks_since_reset >= WHISPER_STATE_RESET_CHUNKS {
+            chunks_since_reset = 0;
+            state = ctx
+                .create_state()
+                .map_err(|e| anyhow!("state recycle: {e}"))?;
+        }
     }
 
     let _ = std::fs::remove_dir_all(&buffer_dir);
