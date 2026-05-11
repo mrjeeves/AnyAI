@@ -659,7 +659,28 @@
    *  Surfaces a conflict modal if the chat slot is already occupied. */
   async function requestActivateTalkingPoints(): Promise<void> {
     if (!transcribeUi.active) return;
-    const tpModel = activeModel; // chat model — TP runs on whichever ollama model is active
+    // TP always wants the text-mode model (the chat LLM), regardless of the
+    // current view. `activeModel` reflects the *active mode* — on the
+    // Transcribe view that's the whisper model name, which Ollama 404s on,
+    // which is why TP cycles silently failed for every user who clicked the
+    // button from Transcribe (i.e. every user).
+    if (!hardware) {
+      console.warn("TP: hardware not yet detected; aborting");
+      return;
+    }
+    const [config, manifest] = await Promise.all([loadConfig(), getActiveManifest()]);
+    const resolved = resolveModelEx(
+      hardware,
+      manifest,
+      "text",
+      config.mode_overrides,
+      activeFamilyName,
+    );
+    if (resolved.runtime === "whisper" || !resolved.model) {
+      console.warn("TP: no chat model resolved for family", activeFamilyName);
+      return;
+    }
+    const tpModel = resolved.model;
     const startTp = () => startTalkingPoints({ model: tpModel });
     if (!chatSlot.kind) {
       startTp();
