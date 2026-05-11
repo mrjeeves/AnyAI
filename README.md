@@ -6,7 +6,7 @@
 [![Platforms](https://img.shields.io/badge/platforms-macOS_·_Linux_·_Windows_·_Pi_5-2ea44f.svg)](DOCS.md#installation)
 [![OpenAI-compatible](https://img.shields.io/badge/OpenAI-compatible-10a37f.svg)](DOCS.md#api-server)
 
-This is the entire README. The rest is in [DOCS.md](DOCS.md), because it turns out a tool that picks a model, downloads it, hosts it, talks four wire formats, ships a desktop app, transcribes meetings, and updates itself can't really be explained in a README. Sorry.
+This is the entire README, I promise. Everything else lives in [DOCS.md](DOCS.md) — somewhere between picking a model, downloading it, hosting it, speaking four wire formats, shipping a desktop app, transcribing meetings, and updating itself, the scope got away from me. Please keep reading. I made this for you.
 
 ## Install
 
