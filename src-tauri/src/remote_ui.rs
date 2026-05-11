@@ -562,6 +562,7 @@ async fn api_chat_stream(
             &stream_id,
             &resolved,
             messages,
+            None,
             move |delta| {
                 let _ = tx_content.send(Ok(
                     Event::default().data(json!({ "delta": delta }).to_string())

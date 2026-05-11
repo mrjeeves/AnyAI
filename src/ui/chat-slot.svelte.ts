@@ -110,22 +110,31 @@ function resetSlot() {
  *  small enough that the silence window feels responsive without spamming
  *  whisper with re-reads of the conversation file. */
 const TP_TICK_MS = 3_000;
-/** Words-based trigger: re-summarise as soon as this many new chars have
- *  accrued since the last cycle. Catches the "user is still talking"
- *  case so a long monologue still gets summarised mid-stream. */
-const TP_MIN_NEW_CHARS = 120;
-/** Silence-based trigger: if there's *any* new content since the last
- *  cycle and the transcript hasn't grown for this long, run a cycle. The
- *  ingest loop now drops silent chunks (no whisper hallucinations), so a
+/** Words-based trigger: condense as soon as this many new chars have
+ *  accrued since we last processed. Big enough to give the model a
+ *  meaningful passage (a few sentences), small enough that the bullets
+ *  stay close to real-time. */
+const TP_MIN_NEW_CHARS = 250;
+/** Silence-based trigger: if there's *any* unprocessed content and the
+ *  transcript hasn't grown for this long, condense what we have. The
+ *  ingest loop drops silent chunks (no whisper hallucinations), so a
  *  flat transcript here genuinely means the speaker paused — a natural
  *  sentence/turn boundary worth summarising at. */
-const TP_SILENCE_MS = 6_000;
+const TP_SILENCE_MS = 5_000;
+/** Rolling cap on total bullets so a long meeting doesn't grow the
+ *  right pane unboundedly. Oldest bullets fall off the top. */
+const TP_MAX_BULLETS = 50;
 
 let tpModel = "";
 let tpInterval: ReturnType<typeof setInterval> | null = null;
 let tpInFlightStreamId: string | null = null;
 let tpInFlightUnlisten: UnlistenFn | null = null;
-let tpLastTranscriptLen = 0;
+/** Index into `transcript` up to which we've already condensed into
+ *  bullets. Each cycle takes `transcript.slice(tpProcessedLen)` and
+ *  advances this on success — the model only ever sees the *new* slice,
+ *  not the whole transcript. Critical on memory-tight machines where a
+ *  growing prompt would starve whisper and trigger repetition. */
+let tpProcessedLen = 0;
 /** Wall-clock ms when we last observed the transcript grow. Drives the
  *  silence trigger — `now - tpLastGrowthAt > TP_SILENCE_MS` means "the
  *  speaker has stopped, summarise what we have". */
@@ -149,18 +158,32 @@ export function startTalkingPoints(args: { model: string }): void {
   chatSlot.conversationTitle = "Talking Points";
   chatSlot.status = "running";
   tpModel = args.model;
-  tpLastTranscriptLen = 0;
+  tpProcessedLen = 0;
   tpObservedLen = 0;
   tpLastGrowthAt = Date.now();
   startTimer();
-  // Kick one immediate cycle so the user sees points show up without
-  // waiting a full interval, then settle into the periodic cadence.
-  void runTpCycle();
+  // Skip past whatever transcript already exists so activating mid-meeting
+  // doesn't blast a huge backlog through the model in one shot — TP
+  // summarises what's said *from activation onward*. The first cycle fires
+  // when the words- or silence-trigger hits, so no immediate kick.
+  void seedProcessedFromTranscript(convId);
   tpInterval = setInterval(() => {
     if (chatSlot.kind !== "tp") return;
     if (chatSlot.status !== "running") return;
     void maybeRunTpCycle();
   }, TP_TICK_MS);
+}
+
+async function seedProcessedFromTranscript(convId: string): Promise<void> {
+  try {
+    const conv = await loadConversation(convId);
+    const len = (conv?.transcript ?? "").length;
+    tpProcessedLen = len;
+    tpObservedLen = len;
+    tpLastGrowthAt = Date.now();
+  } catch {
+    // Leave the zero-init in place; the next tick will seed from the file.
+  }
 }
 
 export function pauseTalkingPoints(): void {
@@ -209,14 +232,13 @@ async function maybeRunTpCycle(): Promise<void> {
     return;
   }
   if (!conv) return;
-  const transcript = (conv.transcript ?? "").trim();
+  const transcript = conv.transcript ?? "";
   const len = transcript.length;
   if (len > tpObservedLen) {
     tpObservedLen = len;
     tpLastGrowthAt = Date.now();
   }
-  if (!transcript) return;
-  const newChars = len - tpLastTranscriptLen;
+  const newChars = len - tpProcessedLen;
   if (newChars <= 0) return;
   const wordsTrigger = newChars >= TP_MIN_NEW_CHARS;
   const silenceTrigger = Date.now() - tpLastGrowthAt >= TP_SILENCE_MS;
@@ -236,8 +258,18 @@ async function runTpCycle(): Promise<void> {
     return;
   }
   if (!conv) return;
-  const transcript = (conv.transcript ?? "").trim();
-  if (!transcript) return;
+  const transcript = conv.transcript ?? "";
+  // Only the *new* slice — the model never sees the whole transcript, so the
+  // prompt stays small even after a long meeting. This is what keeps TP from
+  // starving whisper on a memory-tight machine.
+  const sliceEnd = transcript.length;
+  const newSlice = transcript.slice(tpProcessedLen, sliceEnd).trim();
+  if (!newSlice) {
+    // Nothing substantive in the new region (e.g., trimmed to empty); skip
+    // ahead so we don't keep retrying the same dead slice every tick.
+    tpProcessedLen = sliceEnd;
+    return;
+  }
 
   const streamId = crypto.randomUUID();
   tpInFlightStreamId = streamId;
@@ -253,34 +285,45 @@ async function runTpCycle(): Promise<void> {
     await invoke("ollama_chat_stream", {
       streamId,
       model: tpModel,
+      // Reasoning models can spend thousands of tokens "thinking" before
+      // producing bullets — that compounds with whisper for memory and CPU
+      // and is the trigger for the transcription-repetition bug. Bullets
+      // don't need reasoning, so we skip it.
+      think: false,
       messages: [
         {
           role: "system",
           content:
-            "You extract concise talking points from a live meeting transcript. " +
-            "Reply with a bullet list, one talking point per line, prefixed with '- '. " +
-            "Keep points short (< 12 words). No preamble, no commentary, just the bullets.",
+            "You condense passages of a live meeting transcript into bullet notes. " +
+            "Reply with 1-3 bullets, one per line, prefixed with '- '. " +
+            "Each bullet < 12 words. No preamble, no commentary, just the bullets. " +
+            "If the passage is filler or small talk with no substance, reply with nothing.",
         },
         {
           role: "user",
           content:
-            "Summarise the following transcript into 3-7 talking points. " +
-            "Focus on decisions, action items, and key facts.\n\n" +
-            transcript,
+            "Condense this passage into 1-3 bullet notes:\n\n" + newSlice,
         },
       ],
     });
-    const points = parseBullets(collected);
-    if (points.length > 0) {
+    const newBullets = parseBullets(collected);
+    if (newBullets.length > 0) {
       const fresh = await loadConversation(convId);
       if (fresh) {
-        fresh.talking_points = points;
+        const existing = fresh.talking_points ?? [];
+        const merged = [...existing, ...newBullets];
+        // Keep the most recent bullets; oldest fall off so a long meeting
+        // doesn't grow the right pane unboundedly.
+        fresh.talking_points = merged.slice(-TP_MAX_BULLETS);
         await saveConversation(fresh);
       }
     }
-    tpLastTranscriptLen = transcript.length;
+    // Advance the marker even when the model returned nothing — that slice
+    // was deemed filler and we don't want to re-send it next tick.
+    tpProcessedLen = sliceEnd;
   } catch (e) {
     console.warn("TP cycle failed:", e);
+    // On error, leave tpProcessedLen alone so we retry the slice next tick.
   } finally {
     tpInFlightUnlisten?.();
     tpInFlightUnlisten = null;
