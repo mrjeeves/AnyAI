@@ -773,7 +773,6 @@ fn run_session(
     // ascending seq order so cross-chunk context (set_no_context(false))
     // still primes the next chunk from the previous decode's tokens.
     let mut next_seq: u64 = 1;
-    let mut ingest_alive = true;
 
     loop {
         // Eagerly bail when cancelled, BEFORE pulling the next chunk into
@@ -783,21 +782,19 @@ fn run_session(
         // The Stop dialog explicitly tells the user "Stopping now drops
         // that audio without transcribing it" — exit fast and let the
         // buffer_dir wipe below discard whatever's still queued.
+        //
+        // Cancel is the ONLY exit signal we trust here: previously this
+        // loop also broke when `ingest_handle.is_finished()` flipped to
+        // true, but on some cpal backends the input stream's closure can
+        // be released right after `stream.play()` returns (before the
+        // first sample arrives) — which torpedoed the recording within
+        // ~1 s of pressing record. Spinning while waiting for chunks is
+        // safe; the cancel path tears the stream down cleanly.
         if cancel.load(Ordering::SeqCst) {
             break;
         }
         let next_path = buffer_dir.join(format!("{next_seq:010}.f32"));
         if !next_path.exists() {
-            // Nothing ready yet. If the ingest thread has finished, we're
-            // done — there will never be another chunk. Until then, sit
-            // tight (a short sleep beats a busy spin).
-            if ingest_alive && ingest_handle.is_finished() {
-                ingest_alive = false;
-                continue;
-            }
-            if !ingest_alive {
-                break;
-            }
             thread::sleep(Duration::from_millis(75));
             continue;
         }
