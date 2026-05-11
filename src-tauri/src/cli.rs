@@ -729,8 +729,16 @@ async fn cmd_families(args: &[String]) -> Result<()> {
                         for tier in tiers {
                             let vram = tier["min_vram_gb"].as_f64().unwrap_or(0.0);
                             let ram = tier["min_ram_gb"].as_f64().unwrap_or(0.0);
+                            let unified = tier["min_unified_ram_gb"].as_f64();
                             let model = tier["model"].as_str().unwrap_or("?");
-                            println!("    ≥{vram:>3.0} GB VRAM · ≥{ram:>3.0} GB RAM   {model}");
+                            match unified {
+                                Some(u) => println!(
+                                    "    ≥{vram:>3.0} GB VRAM · ≥{ram:>3.0} GB RAM (discrete) · ≥{u:>3.0} GB RAM (unified)   {model}"
+                                ),
+                                None => println!(
+                                    "    ≥{vram:>3.0} GB VRAM · ≥{ram:>3.0} GB RAM   {model}"
+                                ),
+                            }
                         }
                     }
                 }

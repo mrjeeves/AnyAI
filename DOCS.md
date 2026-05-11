@@ -670,7 +670,7 @@ A single manifest can expose multiple families — that's how you ship "use our 
 ```jsonc
 {
   "name": "My Provider",         // display name
-  "version": "4",
+  "version": "11",
   "ttl_minutes": 360,            // how long MyOwnLLM caches THIS file before re-fetching (default: 360).
                                  // Publisher's rate-limit signal — pick what fits your host.
   "default_family": "gemma4",    // family used until the user picks one
@@ -680,6 +680,13 @@ A single manifest can expose multiple families — that's how you ship "use our 
   ],
                                  // Each imported manifest is fetched + cached against ITS OWN ttl_minutes.
                                  // Importing file wins on family-key collision.
+
+  "headroom_gb": {               // optional: RAM (GB) reserved for OS / WebView / ollama / paired
+    "apple": 8,                  //   whisper before crediting RAM toward tier thresholds. Apple's
+    "none":  4,                  //   pool hosts the whole desktop, so headroom is largest; discrete
+    "nvidia": 2,                 //   GPU hosts only reserve enough system RAM for the client.
+    "amd": 2                     //   Missing keys inherit these compiled-in defaults.
+  },
 
   "families": {
     "gemma4": {
@@ -691,28 +698,15 @@ A single manifest can expose multiple families — that's how you ship "use our 
           "label": "Text",
           "tiers": [
             // Tiers are walked top-to-bottom. First match wins.
-            // A tier matches if vram_gb >= min_vram_gb OR ram_gb >= min_ram_gb.
-            { "min_vram_gb": 20, "min_ram_gb": 40, "model": "gemma4:31b", "fallback": "gemma4:26b" },
-            { "min_vram_gb": 14, "min_ram_gb": 28, "model": "gemma4:26b", "fallback": "gemma4:e4b" },
-            { "min_vram_gb": 6,  "min_ram_gb": 12, "model": "gemma4:e4b", "fallback": "gemma4:e2b" },
-            { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "gemma4:e2b", "fallback": "gemma4:e2b" }
+            // Unified-memory hosts (apple, none) match on `min_unified_ram_gb` — raw RAM that
+            // must include OS headroom AND the paired transcribe model.
+            // Discrete GPUs (nvidia, amd) match if vram_gb >= min_vram_gb OR
+            // (ram_gb - headroom_gb[gpu]) >= min_ram_gb.
+            { "min_vram_gb": 26, "min_ram_gb": 28, "min_unified_ram_gb": 48, "model": "gemma4:31b", "fallback": "gemma4:26b" },
+            { "min_vram_gb": 14, "min_ram_gb": 14, "min_unified_ram_gb": 24, "model": "gemma4:12b", "fallback": "gemma4:9b"  },
+            { "min_vram_gb": 7,  "min_ram_gb": 6,  "min_unified_ram_gb": 12, "model": "gemma4:e4b", "fallback": "gemma4:e2b" },
+            { "min_vram_gb": 0,  "min_ram_gb": 0,  "min_unified_ram_gb": 0,  "model": "gemma4:270m","fallback": "gemma4:270m"}
             // Always include a zero-threshold catch-all as the last tier.
-            // gemma4:e2b runs on a Pi 5 at ~7.6 tok/s, so it's a sane catch-all.
-          ]
-        }
-      }
-    },
-    "qwen3": {
-      "label": "Qwen 3",
-      "default_mode": "text",
-      "modes": {
-        "text": {
-          "label": "Text",
-          "tiers": [
-            { "min_vram_gb": 24, "min_ram_gb": 48, "model": "qwen3.6:35b", "fallback": "qwen3.6:27b" },
-            { "min_vram_gb": 16, "min_ram_gb": 32, "model": "qwen3.6:27b", "fallback": "qwen3.5:9b"  },
-            { "min_vram_gb": 8,  "min_ram_gb": 16, "model": "qwen3.5:9b",  "fallback": "qwen3.5:1b"  },
-            { "min_vram_gb": 0,  "min_ram_gb": 0,  "model": "qwen3.5:1b",  "fallback": "qwen3.5:1b"  }
           ]
         }
       }
@@ -723,13 +717,15 @@ A single manifest can expose multiple families — that's how you ship "use our 
 
 **Rules:**
 - A family **must** define `default_mode` and at least one entry under `modes`.
-- `min_vram_gb` and `min_ram_gb` are checked with OR — either threshold qualifies.
+- **Unified-memory hosts** (`gpu_type` `apple` or `none`) match on `min_unified_ram_gb`. The threshold is raw total RAM — the publisher already factored in OS headroom and the paired transcribe model so a single machine can run text + audio together. When the field is omitted the resolver synthesises it as `min_ram_gb + headroom_gb[gpu_type]`, so legacy tiers keep working.
+- **Discrete-GPU hosts** (`nvidia`, `amd`) match if **either** `vram_gb >= min_vram_gb` (model lives on GPU) **or** `(ram_gb - headroom_gb[gpu_type]) >= min_ram_gb` (CPU fallback).
 - Tiers walked top-to-bottom; first match wins.
-- Last tier should always be `min_vram_gb: 0, min_ram_gb: 0` as a catch-all.
+- Last tier should always be a zero-threshold catch-all.
 - `fallback` is tried if the primary model fails to pull.
 - If the user's saved `active_family` doesn't exist in the manifest, the resolver falls back to `default_family`, then to the first family in document order.
 - Unknown fields are ignored — manifests are forward-compatible within the schema version.
 - `ttl_minutes` controls how long MyOwnLLM caches **this file** before re-fetching (default 360). It is the publisher's rate-limit signal; MyOwnLLM honours it.
+- `headroom_gb` is optional. Missing keys inherit the compiled-in defaults (`apple: 8`, `none: 4`, `nvidia: 2`, `amd: 2`). The values are sized to cover the OS, WebView, ollama daemon, and a running whisper model so that the resolver's text pick leaves room for transcribe to run alongside it.
 - `imports` lets a manifest pull families from other manifests; each imported file obeys its own TTL and is cached separately. Family-key collisions favour the importing file.
 
 Model tags are standard Ollama tags (e.g. `gemma4:e4b`, `qwen3.5:9b`). Anything in the [Ollama library](https://ollama.com/library) works.

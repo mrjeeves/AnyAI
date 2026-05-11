@@ -3,9 +3,13 @@
 //! Mirrors the TypeScript `src/manifest.ts` so the headless CLI / API server can resolve
 //! models without booting the JS runtime. Reads the same on-disk caches the GUI writes.
 //!
-//! Schema (v4): a manifest exposes named **families** (e.g. `gemma4`, `qwen3`); each
+//! Schema (v11): a manifest exposes named **families** (e.g. `gemma4`, `qwen3.6`); each
 //! family owns its own per-mode tier table. The resolver picks
 //! `families[active_family].modes[mode].tiers` and walks them against current hardware.
+//! Tiers carry separate thresholds for discrete-GPU hosts (`min_vram_gb` /
+//! `min_ram_gb`, the latter taken after the manifest's `headroom_gb`) and for
+//! unified-memory hosts (`min_unified_ram_gb`, raw RAM that already reserves OS
+//! headroom + the paired transcribe model).
 
 use anyhow::{anyhow, Result};
 use serde_json::{Map, Value};
@@ -162,13 +166,11 @@ pub fn resolve_full(
         .and_then(|t| t.as_array())
         .ok_or_else(|| anyhow!("no tiers in active family"))?;
 
-    let vram = effective_vram_gb(hw);
-    let ram = hw.ram_gb;
+    let unified = is_unified_memory(hw);
+    let headroom = headroom_gb(manifest, &hw.gpu_type);
 
     for tier in tiers {
-        let min_vram = tier["min_vram_gb"].as_f64().unwrap_or(0.0);
-        let min_ram = tier["min_ram_gb"].as_f64().unwrap_or(0.0);
-        if vram >= min_vram || ram >= min_ram {
+        if tier_matches(tier, hw, unified, headroom) {
             if let Some(model) = tier["model"].as_str() {
                 return Ok((model.to_string(), runtime));
             }
@@ -209,18 +211,73 @@ pub fn mode_runtime(manifest: &Value, mode: &str, active_family: &str) -> Option
     )
 }
 
-/// VRAM the resolver should credit toward `min_vram_gb` checks. Mirrors
-/// `effectiveVramGb` in `src/manifest.ts`: only discrete GPUs (NVIDIA, AMD)
-/// own VRAM separately from system RAM. Apple Silicon and integrated GPUs
-/// share the same physical pool `ram_gb` already counts, so crediting their
-/// "VRAM" again would let an 8 GB Mac match a `vram>=6` tier and pick a
-/// model the system can't fit.
-fn effective_vram_gb(hw: &HardwareProfile) -> f64 {
+/// Compiled-in headroom defaults when a manifest omits `headroom_gb`. Mirror
+/// of `DEFAULT_HEADROOM_GB` in `src/manifest.ts`. Sized to cover the OS,
+/// WebView, ollama daemon, and a running whisper model so the text pick
+/// leaves room for transcribe to run alongside it.
+fn default_headroom_gb(gpu: &crate::hardware::GpuType) -> f64 {
     use crate::hardware::GpuType;
-    match hw.gpu_type {
-        GpuType::Nvidia | GpuType::Amd => hw.vram_gb.unwrap_or(0.0),
-        GpuType::Apple | GpuType::None => 0.0,
+    match gpu {
+        GpuType::Apple => 8.0,
+        GpuType::None => 4.0,
+        GpuType::Nvidia | GpuType::Amd => 2.0,
     }
+}
+
+fn headroom_gb(manifest: &Value, gpu: &crate::hardware::GpuType) -> f64 {
+    use crate::hardware::GpuType;
+    let key = match gpu {
+        GpuType::Apple => "apple",
+        GpuType::None => "none",
+        GpuType::Nvidia => "nvidia",
+        GpuType::Amd => "amd",
+    };
+    manifest
+        .get("headroom_gb")
+        .and_then(|h| h.get(key))
+        .and_then(|v| v.as_f64())
+        .unwrap_or_else(|| default_headroom_gb(gpu))
+}
+
+/// A host is "unified memory" when its GPU shares the same physical pool as
+/// system RAM — Apple Silicon and the no-GPU SBC / desktop case. On these
+/// hosts crediting `vram_gb` toward `min_vram_gb` would double-count the
+/// same bytes; tiers are matched purely off `min_unified_ram_gb` (or a
+/// synthesised default) against raw RAM with full headroom factored in.
+fn is_unified_memory(hw: &HardwareProfile) -> bool {
+    use crate::hardware::GpuType;
+    matches!(hw.gpu_type, GpuType::Apple | GpuType::None)
+}
+
+/// Raw-RAM threshold a tier requires on a unified-memory host. Explicit
+/// `min_unified_ram_gb` always wins; otherwise we synthesise it from
+/// `min_ram_gb + headroom_gb[gpu]` so a legacy tier without the field still
+/// reserves OS overhead.
+fn unified_threshold_gb(tier: &Value, headroom: f64) -> f64 {
+    if let Some(u) = tier.get("min_unified_ram_gb").and_then(|v| v.as_f64()) {
+        return u;
+    }
+    tier["min_ram_gb"].as_f64().unwrap_or(0.0) + headroom
+}
+
+fn tier_matches(tier: &Value, hw: &HardwareProfile, unified: bool, headroom: f64) -> bool {
+    if unified {
+        // Single shared pool — VRAM column is the same bytes as RAM, so the
+        // only meaningful check is whether raw RAM is large enough to host
+        // the OS, the LLM, and the paired transcribe model.
+        return hw.ram_gb >= unified_threshold_gb(tier, headroom);
+    }
+    // Discrete GPU: either the GPU is big enough for the model to live on
+    // it entirely, or system RAM (after headroom) is enough for CPU
+    // inference. Either path qualifies the tier.
+    let min_vram = tier["min_vram_gb"].as_f64().unwrap_or(0.0);
+    let vram = hw.vram_gb.unwrap_or(0.0);
+    if vram >= min_vram {
+        return true;
+    }
+    let min_ram = tier["min_ram_gb"].as_f64().unwrap_or(0.0);
+    let cpu_budget = (hw.ram_gb - headroom).max(0.0);
+    cpu_budget >= min_ram
 }
 
 /// All model tags recommended by a manifest across every family/mode/tier.
@@ -686,6 +743,7 @@ mod tests {
     fn manifest() -> Value {
         serde_json::json!({
             "default_family": "test",
+            "headroom_gb": { "apple": 8, "none": 4, "nvidia": 2, "amd": 2 },
             "families": {
                 "test": {
                     "label": "Test",
@@ -693,10 +751,10 @@ mod tests {
                     "modes": {
                         "text": {
                             "tiers": [
-                                { "min_vram_gb": 24, "min_ram_gb": 48, "model": "big:35b"   },
-                                { "min_vram_gb":  8, "min_ram_gb": 16, "model": "mid:9b"    },
-                                { "min_vram_gb":  4, "min_ram_gb": 10, "model": "small:2b"  },
-                                { "min_vram_gb":  0, "min_ram_gb":  0, "model": "tiny:1b"   }
+                                { "min_vram_gb": 24, "min_ram_gb": 32, "min_unified_ram_gb": 48, "model": "big:35b"   },
+                                { "min_vram_gb": 10, "min_ram_gb": 14, "min_unified_ram_gb": 24, "model": "mid:9b"    },
+                                { "min_vram_gb":  6, "min_ram_gb":  8, "min_unified_ram_gb": 16, "model": "small:2b"  },
+                                { "min_vram_gb":  0, "min_ram_gb":  0, "min_unified_ram_gb":  0, "model": "tiny:1b"   }
                             ]
                         }
                     }
@@ -706,10 +764,11 @@ mod tests {
     }
 
     #[test]
-    fn apple_8gb_unified_lands_on_tiny_not_mid() {
-        // Regression: pre-fix, Apple 8 GB reported vram=8 AND ram=8, the
-        // resolver OR-matched `vram >= 6` at the 9 B tier, picked a model
-        // the system couldn't fit, and ground at ~1 token / 10 s.
+    fn apple_8gb_unified_lands_on_tiny() {
+        // Pre-fix, Apple 8 GB reported vram=8 AND ram=8, the resolver
+        // OR-matched on RAM at the 9 B tier and picked a model the system
+        // couldn't fit. The unified-memory path now ignores VRAM entirely
+        // and gates on min_unified_ram_gb.
         let mac = hw(GpuType::Apple, Some(8.0), 8.0);
         assert_eq!(
             resolve_in_manifest(&manifest(), &mac, "text", "test").unwrap(),
@@ -727,10 +786,35 @@ mod tests {
     }
 
     #[test]
-    fn apple_16gb_unified_lands_on_mid() {
-        // Mac with enough headroom for a 9 B model — picks `mid` via
-        // ram>=16, not via the (still-zero) effective vram.
+    fn apple_16gb_unified_lands_on_small_not_mid() {
+        // Regression for the user's report: 16 GB of unified memory has
+        // to host macOS + WebView + ollama + the LLM + a paired whisper,
+        // and 9 B doesn't leave room. The new ladder lands on `small`
+        // (2 B), leaving headroom for transcribe.
         let mac = hw(GpuType::Apple, Some(16.0), 16.0);
+        assert_eq!(
+            resolve_in_manifest(&manifest(), &mac, "text", "test").unwrap(),
+            "small:2b"
+        );
+    }
+
+    #[test]
+    fn apple_24gb_unified_lands_on_mid() {
+        // M-Pro class — enough budget to host 9 B + whisper-turbo
+        // simultaneously with macOS overhead reserved.
+        let mac = hw(GpuType::Apple, Some(24.0), 24.0);
+        assert_eq!(
+            resolve_in_manifest(&manifest(), &mac, "text", "test").unwrap(),
+            "mid:9b"
+        );
+    }
+
+    #[test]
+    fn apple_36gb_unified_does_not_land_on_big() {
+        // 36 GB Mac stops at `mid` because the test ladder's `big` tier
+        // requires 48 GB unified. Guards against the old OR-on-RAM logic
+        // that landed 24 GB Macs on a 26 B model.
+        let mac = hw(GpuType::Apple, Some(36.0), 36.0);
         assert_eq!(
             resolve_in_manifest(&manifest(), &mac, "text", "test").unwrap(),
             "mid:9b"
@@ -749,6 +833,19 @@ mod tests {
     }
 
     #[test]
+    fn discrete_nvidia_cpu_fallback_subtracts_headroom() {
+        // 4 GB GPU + 16 GB RAM: VRAM misses every tier above `small`, but
+        // 16 - 2 = 14 GB CPU budget clears the `mid` tier's
+        // min_ram_gb=14. Before headroom subtraction this would have
+        // landed on `big` via the old OR logic.
+        let pc = hw(GpuType::Nvidia, Some(4.0), 16.0);
+        assert_eq!(
+            resolve_in_manifest(&manifest(), &pc, "text", "test").unwrap(),
+            "mid:9b"
+        );
+    }
+
+    #[test]
     fn unknown_family_falls_back_to_default_family() {
         // Stale config still resolves: the family the user has saved is gone,
         // so the resolver falls back to the manifest's default_family.
@@ -756,6 +853,38 @@ mod tests {
         assert_eq!(
             resolve_in_manifest(&manifest(), &pc, "text", "no-such-family").unwrap(),
             "mid:9b"
+        );
+    }
+
+    #[test]
+    fn legacy_tier_without_unified_field_synthesises_threshold() {
+        // A tier missing `min_unified_ram_gb` should be treated as
+        // `min_ram_gb + headroom_gb[gpu]` so older manifests still
+        // reserve OS overhead on Apple. With ram=20, the legacy `mid`
+        // tier (min_ram_gb=14) needs 14+8=22 of unified RAM and so
+        // misses; the resolver drops to `small`.
+        let legacy = serde_json::json!({
+            "default_family": "test",
+            "headroom_gb": { "apple": 8 },
+            "families": {
+                "test": {
+                    "default_mode": "text",
+                    "modes": {
+                        "text": {
+                            "tiers": [
+                                { "min_vram_gb": 24, "min_ram_gb": 30, "model": "big"   },
+                                { "min_vram_gb": 10, "min_ram_gb": 14, "model": "mid"   },
+                                { "min_vram_gb":  0, "min_ram_gb":  0, "model": "small" }
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+        let mac = hw(GpuType::Apple, Some(20.0), 20.0);
+        assert_eq!(
+            resolve_in_manifest(&legacy, &mac, "text", "test").unwrap(),
+            "small"
         );
     }
 }

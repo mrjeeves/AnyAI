@@ -16,8 +16,20 @@ export type Mode = "text" | "vision" | "code" | "transcribe";
 export type ModelRuntime = "ollama" | "whisper";
 
 export interface ManifestTier {
+  /** Discrete-GPU path: matches when `vram_gb >= min_vram_gb`. Meaningless
+   *  on unified-memory hosts (Apple, no-GPU SBCs); use `min_unified_ram_gb`
+   *  there. */
   min_vram_gb: number;
+  /** Discrete-GPU CPU-fallback path: matches when system RAM is at least
+   *  this big *after* the manifest's per-GPU-class `headroom_gb` is
+   *  subtracted, letting the model run on CPU when VRAM is too small. */
   min_ram_gb?: number;
+  /** Unified-memory path (Apple Silicon, integrated GPUs, CPU-only SBCs):
+   *  the raw total RAM the host must have for this tier to fit alongside
+   *  the OS, ollama, the WebView, and the paired transcribe model. When
+   *  absent the resolver synthesises `min_ram_gb + headroom_gb[gpu_type]`
+   *  so legacy tiers keep working. */
+  min_unified_ram_gb?: number;
   /** Approximate on-disk size of the model file(s) in MB. Surfaced in the
    *  Settings → Family tier ladder so users can see what each rung costs
    *  before committing. Optional: tiers without it just hide the column. */
@@ -53,6 +65,16 @@ export interface ManifestFamily {
   modes: Record<string, ManifestMode>;
 }
 
+/** Per-GPU-class RAM (in GB) the resolver reserves for OS / WebView /
+ *  ollama / paired transcribe overhead before crediting the rest toward
+ *  tier thresholds. Apple unified memory shares the LLM pool with the
+ *  whole desktop, so its headroom is the largest; discrete-GPU hosts
+ *  reserve only enough system RAM for the host process. Used both as the
+ *  `min_ram_gb` budget offset on discrete CPU-fallback and as the
+ *  synthesised default for tiers that don't declare an explicit
+ *  `min_unified_ram_gb`. */
+export type HeadroomMap = Partial<Record<GpuType, number>>;
+
 export interface Manifest {
   name: string;
   version: string;
@@ -61,6 +83,10 @@ export interface Manifest {
   default_family: string;
   /** URLs of other manifests whose families are merged into this one. */
   imports?: string[];
+  /** Per-GPU-class headroom budget. Missing keys fall back to the
+   *  resolver's compiled-in defaults (apple: 8, none: 4, nvidia/amd: 2)
+   *  so older cached manifests automatically inherit sensible numbers. */
+  headroom_gb?: HeadroomMap;
   /**
    * Mode blocks every family inherits unless it declares its own.
    * Used today for the canonical whisper transcribe ladder so we don't
