@@ -158,11 +158,75 @@ pub async fn install() -> Result<()> {
     }
     #[cfg(target_os = "windows")]
     {
-        // No silent install on Windows — the user has to run the official
-        // installer. Surface the URL so the GUI can render it as a link.
-        return Err(anyhow!(
-            "Ollama for Windows must be installed manually. Download it from https://ollama.com/download then click Retry."
-        ));
+        // Download the official OllamaSetup.exe and run it with /SILENT. UAC
+        // still fires (per-machine install requires it), but the wizard's
+        // click-through screens are suppressed. After the installer returns,
+        // fold %LOCALAPPDATA%\Programs\Ollama into PATH so the very next
+        // which::which("ollama") resolves.
+        use futures_util::StreamExt;
+        use tokio::io::AsyncWriteExt;
+
+        const URL: &str = "https://ollama.com/download/OllamaSetup.exe";
+        let installer_path = std::env::temp_dir().join("OllamaSetup.exe");
+
+        // Only the download is wrapped in retry — once the bytes are on disk,
+        // retrying the exec only helps if the user fat-fingered UAC, and
+        // re-prompting them five times in 30s would be hostile.
+        with_retry(|| {
+            let installer_path = installer_path.clone();
+            async move {
+                let client = reqwest::Client::builder()
+                    .pool_idle_timeout(Duration::from_secs(30))
+                    .build()
+                    .context("reqwest client")?;
+                let resp = client
+                    .get(URL)
+                    .send()
+                    .await
+                    .context("download OllamaSetup.exe")?;
+                if !resp.status().is_success() {
+                    return Err(anyhow!(
+                        "download OllamaSetup.exe: HTTP {}",
+                        resp.status()
+                    ));
+                }
+                let mut file = tokio::fs::File::create(&installer_path)
+                    .await
+                    .with_context(|| format!("create {}", installer_path.display()))?;
+                let mut stream = resp.bytes_stream();
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.context("read OllamaSetup.exe body")?;
+                    file.write_all(&chunk)
+                        .await
+                        .context("write OllamaSetup.exe")?;
+                }
+                file.flush().await.context("flush OllamaSetup.exe")?;
+                Ok(())
+            }
+        })
+        .await
+        .map_err(|e| {
+            anyhow!(
+                "Could not download Ollama installer ({}). Download it manually from https://ollama.com/download then click Retry.",
+                e
+            )
+        })?;
+
+        let status = quiet_tokio_command(&installer_path)
+            .arg("/SILENT")
+            .status()
+            .await
+            .context("run OllamaSetup.exe")?;
+        let _ = std::fs::remove_file(&installer_path);
+        if !status.success() {
+            return Err(anyhow!(
+                "OllamaSetup.exe exited with {} (UAC may have been declined). Click Retry to try again."
+                ,
+                status
+            ));
+        }
+        ensure_windows_default_on_path();
+        return Ok(());
     }
     Ok(())
 }
@@ -171,10 +235,6 @@ pub async fn install() -> Result<()> {
 // ride out a flaky DNS lookup or a Wi-Fi reconnect without surfacing a "Could
 // not install" toast the user would otherwise hit Retry on anyway. Persistent
 // failures still bubble up after ~30s of total wait.
-//
-// Windows install() is purely a manual-action error message — no network call
-// to wrap — so this helper is gated off there to keep dead_code lints quiet.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn with_retry<F, Fut>(mut op: F) -> Result<()>
 where
     F: FnMut() -> Fut,
