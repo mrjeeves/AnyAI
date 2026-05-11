@@ -52,11 +52,23 @@ The same Rust binary handles three personas, picked at process-start by argv:
 
 One kind of JSON file:
 
-- **Manifest** — `{ name, version, ttl_minutes?, default_family, families: { ... }, imports? }`. Each family declares its own `default_mode` and per-mode tier table; the resolver walks `families[active_family].modes[active_mode].tiers` against the local hardware. The user picks active provider + active family; the rest is automatic.
+- **Manifest** — `{ name, version, ttl_minutes?, default_family, families: { ... }, imports?, headroom_gb?, shared_modes? }`. Each family declares its own `default_mode` and per-mode tier table; the resolver walks `families[active_family].modes[active_mode].tiers` against the local hardware. The user picks active provider + active family; the rest is automatic.
 
 `imports` is an array of URLs to other manifests. The fetcher walks them recursively, dedupes by URL, detects cycles, and merges family maps in document order (the importing file's own families win on key collision). **Each imported file is fetched and cached against its own `ttl_minutes`** — the recursion does not flatten TTL, so a slow-changing top-level manifest can import a fast-moving one without the publisher having to coordinate.
 
 That per-file TTL is also how publishers express rate-limit expectations: a manifest hosted on a free static host might say `ttl_minutes: 1440` to keep load down; a high-availability commercial endpoint might say `5`.
+
+### Tier resolution and unified memory
+
+A tier carries three RAM/VRAM thresholds because Apple Silicon and discrete GPUs behave differently:
+
+- `min_vram_gb` — discrete GPU path. Matches when VRAM is large enough to host the model on the card.
+- `min_ram_gb` — discrete GPU CPU-fallback path. Matches when `ram_gb - headroom_gb[gpu_type]` clears the bar; the model runs on CPU because VRAM didn't fit.
+- `min_unified_ram_gb` — unified-memory path (Apple, integrated GPUs, CPU-only SBCs). Matches against raw RAM. The publisher has already factored in OS headroom and the paired transcribe model, so a single number captures "this machine can host text + audio together". Omitted on legacy tiers, in which case the resolver synthesises `min_ram_gb + headroom_gb[gpu_type]` so older manifests keep working.
+
+`headroom_gb` is a manifest-level map (`apple`/`none`/`nvidia`/`amd` → GB) that reserves system overhead for the OS, WebView, ollama daemon, and `large-v3-turbo` (the default whisper pick, ~2 GB resident). Compiled-in defaults: `apple: 5, none: 2, nvidia: 1, amd: 1`. Apple is highest because macOS + browser tabs share the LLM pool; discrete-GPU hosts are lowest because the LLM lives on the card and system RAM only hosts the client.
+
+`shared_modes` lets a manifest publish a canonical mode block (today, `transcribe`) once and have every family inherit it without redeclaring tiers. A family's own `modes[k]` always wins on collision so a family can override (e.g. ship a non-turbo whisper picker for a specific use case). The default manifest collapses `shared_modes.transcribe` to a single rung at `large-v3-turbo` because the smaller ggml variants are too slow to be usable interactively — users who need them can still pin them via `mode_overrides.transcribe`.
 
 ## Modules (Rust)
 

@@ -3,13 +3,16 @@
 //! Mirrors the TypeScript `src/manifest.ts` so the headless CLI / API server can resolve
 //! models without booting the JS runtime. Reads the same on-disk caches the GUI writes.
 //!
-//! Schema (v11): a manifest exposes named **families** (e.g. `gemma4`, `qwen3.6`); each
+//! Schema (v12): a manifest exposes named **families** (e.g. `gemma4`, `qwen3.6`); each
 //! family owns its own per-mode tier table. The resolver picks
 //! `families[active_family].modes[mode].tiers` and walks them against current hardware.
 //! Tiers carry separate thresholds for discrete-GPU hosts (`min_vram_gb` /
 //! `min_ram_gb`, the latter taken after the manifest's `headroom_gb`) and for
 //! unified-memory hosts (`min_unified_ram_gb`, raw RAM that already reserves OS
-//! headroom + the paired transcribe model).
+//! headroom + the paired transcribe model). The shared transcribe ladder
+//! collapses to a single rung — `large-v3-turbo` is the only whisper variant
+//! fast enough to be usable in practice; smaller ggml models exist in
+//! `KNOWN_MODELS` but are not recommended by the default manifest.
 
 use anyhow::{anyhow, Result};
 use serde_json::{Map, Value};
@@ -212,15 +215,17 @@ pub fn mode_runtime(manifest: &Value, mode: &str, active_family: &str) -> Option
 }
 
 /// Compiled-in headroom defaults when a manifest omits `headroom_gb`. Mirror
-/// of `DEFAULT_HEADROOM_GB` in `src/manifest.ts`. Sized to cover the OS,
-/// WebView, ollama daemon, and a running whisper model so the text pick
-/// leaves room for transcribe to run alongside it.
+/// of `DEFAULT_HEADROOM_GB` in `src/manifest.ts`. Sized to cover the OS +
+/// WebView + ollama overhead each GPU class pays once large-v3-turbo
+/// (~2 GB resident) is also loaded: Apple reserves macOS + browser tabs,
+/// Linux SBCs reserve the base distro, and discrete-GPU hosts only need a
+/// sliver of system RAM because the LLM lives on the GPU.
 fn default_headroom_gb(gpu: &crate::hardware::GpuType) -> f64 {
     use crate::hardware::GpuType;
     match gpu {
-        GpuType::Apple => 8.0,
-        GpuType::None => 4.0,
-        GpuType::Nvidia | GpuType::Amd => 2.0,
+        GpuType::Apple => 5.0,
+        GpuType::None => 2.0,
+        GpuType::Nvidia | GpuType::Amd => 1.0,
     }
 }
 
@@ -739,11 +744,12 @@ mod tests {
 
     /// Tier table mirroring the bundled manifest's shape so the test stays
     /// stable if `manifests/default.json` is retuned. Don't load the real
-    /// file: that couples the resolver test to manifest content.
+    /// file: that couples the resolver test to manifest content. Numbers
+    /// match the v12 ladder where every rung pairs with large-v3-turbo.
     fn manifest() -> Value {
         serde_json::json!({
             "default_family": "test",
-            "headroom_gb": { "apple": 8, "none": 4, "nvidia": 2, "amd": 2 },
+            "headroom_gb": { "apple": 5, "none": 2, "nvidia": 1, "amd": 1 },
             "families": {
                 "test": {
                     "label": "Test",
@@ -751,10 +757,11 @@ mod tests {
                     "modes": {
                         "text": {
                             "tiers": [
-                                { "min_vram_gb": 24, "min_ram_gb": 32, "min_unified_ram_gb": 48, "model": "big:35b"   },
-                                { "min_vram_gb": 10, "min_ram_gb": 14, "min_unified_ram_gb": 24, "model": "mid:9b"    },
-                                { "min_vram_gb":  6, "min_ram_gb":  8, "min_unified_ram_gb": 16, "model": "small:2b"  },
-                                { "min_vram_gb":  0, "min_ram_gb":  0, "min_unified_ram_gb":  0, "model": "tiny:1b"   }
+                                { "min_vram_gb": 24, "min_ram_gb": 24, "min_unified_ram_gb": 32, "model": "big:31b"   },
+                                { "min_vram_gb": 12, "min_ram_gb": 12, "min_unified_ram_gb": 18, "model": "mid:12b"   },
+                                { "min_vram_gb":  5, "min_ram_gb":  6, "min_unified_ram_gb": 10, "model": "e4b"       },
+                                { "min_vram_gb":  4, "min_ram_gb":  4, "min_unified_ram_gb":  8, "model": "e2b"       },
+                                { "min_vram_gb":  0, "min_ram_gb":  0, "min_unified_ram_gb":  0, "model": "tiny:270m" }
                             ]
                         }
                     }
@@ -764,84 +771,108 @@ mod tests {
     }
 
     #[test]
-    fn apple_8gb_unified_lands_on_tiny() {
-        // Pre-fix, Apple 8 GB reported vram=8 AND ram=8, the resolver
-        // OR-matched on RAM at the 9 B tier and picked a model the system
-        // couldn't fit. The unified-memory path now ignores VRAM entirely
-        // and gates on min_unified_ram_gb.
+    fn apple_8gb_unified_lands_on_e2b() {
+        // Smallest Mac — e2b's per-layer arch keeps it at ~2 GB resident
+        // so it fits alongside whisper turbo + macOS in 8 GB.
         let mac = hw(GpuType::Apple, Some(8.0), 8.0);
         assert_eq!(
             resolve_in_manifest(&manifest(), &mac, "text", "test").unwrap(),
-            "tiny:1b"
+            "e2b"
         );
     }
 
     #[test]
-    fn pi_8gb_no_gpu_lands_on_tiny() {
+    fn pi_4gb_no_gpu_lands_on_tiny() {
+        // 4 GB Pi 5 catches the bottom rung — 270m + turbo barely fit
+        // alongside the Linux base distro.
+        let pi = hw(GpuType::None, None, 4.0);
+        assert_eq!(
+            resolve_in_manifest(&manifest(), &pi, "text", "test").unwrap(),
+            "tiny:270m"
+        );
+    }
+
+    #[test]
+    fn pi_8gb_no_gpu_lands_on_e2b() {
+        // 8 GB Pi / Jetson Orin Nano 8 GB: headroom of 2 GB leaves 6 GB
+        // for e2b (~2) + turbo (~2). Clears the `min_unified_ram_gb: 8`
+        // threshold (low OS overhead on the `none` GPU class).
         let pi = hw(GpuType::None, None, 8.0);
         assert_eq!(
             resolve_in_manifest(&manifest(), &pi, "text", "test").unwrap(),
-            "tiny:1b"
+            "e2b"
         );
     }
 
     #[test]
-    fn apple_16gb_unified_lands_on_small_not_mid() {
-        // Regression for the user's report: 16 GB of unified memory has
-        // to host macOS + WebView + ollama + the LLM + a paired whisper,
-        // and 9 B doesn't leave room. The new ladder lands on `small`
-        // (2 B), leaving headroom for transcribe.
+    fn apple_16gb_unified_lands_on_e4b() {
+        // 16 GB Mac: e4b (~3 GB) + turbo (~2 GB) + macOS (~5 GB) = 10 GB
+        // resident. Comfortable headroom; doesn't reach for 12b which
+        // needs 18 GB raw.
         let mac = hw(GpuType::Apple, Some(16.0), 16.0);
         assert_eq!(
             resolve_in_manifest(&manifest(), &mac, "text", "test").unwrap(),
-            "small:2b"
+            "e4b"
         );
     }
 
     #[test]
     fn apple_24gb_unified_lands_on_mid() {
-        // M-Pro class — enough budget to host 9 B + whisper-turbo
-        // simultaneously with macOS overhead reserved.
+        // M-Pro 24 GB — enough budget to host 12b (~8.5 GB) + turbo (~2)
+        // alongside macOS. Regression test for the original report where
+        // 24 GB Macs were landing on a 26 B model and grinding through
+        // swap.
         let mac = hw(GpuType::Apple, Some(24.0), 24.0);
         assert_eq!(
             resolve_in_manifest(&manifest(), &mac, "text", "test").unwrap(),
-            "mid:9b"
+            "mid:12b"
         );
     }
 
     #[test]
-    fn apple_36gb_unified_does_not_land_on_big() {
-        // 36 GB Mac stops at `mid` because the test ladder's `big` tier
-        // requires 48 GB unified. Guards against the old OR-on-RAM logic
-        // that landed 24 GB Macs on a 26 B model.
+    fn apple_36gb_unified_reaches_big() {
+        // 36 GB Mac clears the `big:31b` threshold (32 GB) — the v12
+        // ladder has it sized for 31 B + turbo + macOS comfortably.
         let mac = hw(GpuType::Apple, Some(36.0), 36.0);
         assert_eq!(
             resolve_in_manifest(&manifest(), &mac, "text", "test").unwrap(),
-            "mid:9b"
+            "big:31b"
+        );
+    }
+
+    #[test]
+    fn apple_28gb_unified_stops_at_mid() {
+        // 28 GB Mac doesn't reach the 32 GB threshold for `big`, so it
+        // sits on `mid:12b`. Guards against any future regression to the
+        // old OR-on-RAM logic.
+        let mac = hw(GpuType::Apple, Some(28.0), 28.0);
+        assert_eq!(
+            resolve_in_manifest(&manifest(), &mac, "text", "test").unwrap(),
+            "mid:12b"
         );
     }
 
     #[test]
     fn discrete_nvidia_vram_still_credited() {
-        // 12 GB NVIDIA card with 8 GB system RAM should still get the 9 B
-        // tier — the VRAM is its own pool here, so the check stays useful.
+        // 12 GB NVIDIA card with 8 GB system RAM picks `mid:12b` via
+        // VRAM — the model lives on GPU, system RAM only needs headroom
+        // for whisper + ollama.
         let pc = hw(GpuType::Nvidia, Some(12.0), 8.0);
         assert_eq!(
             resolve_in_manifest(&manifest(), &pc, "text", "test").unwrap(),
-            "mid:9b"
+            "mid:12b"
         );
     }
 
     #[test]
     fn discrete_nvidia_cpu_fallback_subtracts_headroom() {
-        // 4 GB GPU + 16 GB RAM: VRAM misses every tier above `small`, but
-        // 16 - 2 = 14 GB CPU budget clears the `mid` tier's
-        // min_ram_gb=14. Before headroom subtraction this would have
-        // landed on `big` via the old OR logic.
+        // 4 GB GPU + 16 GB RAM: VRAM misses `mid` (needs 12 GB), but
+        // 16 - 1 = 15 GB CPU budget clears `mid`'s min_ram_gb=12 — so
+        // we run on CPU rather than overshooting.
         let pc = hw(GpuType::Nvidia, Some(4.0), 16.0);
         assert_eq!(
             resolve_in_manifest(&manifest(), &pc, "text", "test").unwrap(),
-            "mid:9b"
+            "mid:12b"
         );
     }
 
@@ -852,7 +883,7 @@ mod tests {
         let pc = hw(GpuType::Nvidia, Some(12.0), 8.0);
         assert_eq!(
             resolve_in_manifest(&manifest(), &pc, "text", "no-such-family").unwrap(),
-            "mid:9b"
+            "mid:12b"
         );
     }
 
@@ -860,20 +891,20 @@ mod tests {
     fn legacy_tier_without_unified_field_synthesises_threshold() {
         // A tier missing `min_unified_ram_gb` should be treated as
         // `min_ram_gb + headroom_gb[gpu]` so older manifests still
-        // reserve OS overhead on Apple. With ram=20, the legacy `mid`
-        // tier (min_ram_gb=14) needs 14+8=22 of unified RAM and so
+        // reserve OS overhead on Apple. With ram=14, the legacy `mid`
+        // tier (min_ram_gb=10) needs 10+5=15 of unified RAM and so
         // misses; the resolver drops to `small`.
         let legacy = serde_json::json!({
             "default_family": "test",
-            "headroom_gb": { "apple": 8 },
+            "headroom_gb": { "apple": 5 },
             "families": {
                 "test": {
                     "default_mode": "text",
                     "modes": {
                         "text": {
                             "tiers": [
-                                { "min_vram_gb": 24, "min_ram_gb": 30, "model": "big"   },
-                                { "min_vram_gb": 10, "min_ram_gb": 14, "model": "mid"   },
+                                { "min_vram_gb": 24, "min_ram_gb": 24, "model": "big"   },
+                                { "min_vram_gb": 12, "min_ram_gb": 10, "model": "mid"   },
                                 { "min_vram_gb":  0, "min_ram_gb":  0, "model": "small" }
                             ]
                         }
@@ -881,10 +912,43 @@ mod tests {
                 }
             }
         });
-        let mac = hw(GpuType::Apple, Some(20.0), 20.0);
+        let mac = hw(GpuType::Apple, Some(14.0), 14.0);
         assert_eq!(
             resolve_in_manifest(&legacy, &mac, "text", "test").unwrap(),
             "small"
+        );
+    }
+
+    #[test]
+    fn whisper_ladder_returns_turbo_everywhere() {
+        // The default manifest's transcribe ladder collapses to a single
+        // rung at threshold 0: any hardware running text gets turbo
+        // because smaller whisper variants are unusably slow in practice.
+        let turbo = serde_json::json!({
+            "default_family": "f",
+            "shared_modes": {
+                "transcribe": {
+                    "runtime": "whisper",
+                    "tiers": [
+                        { "min_vram_gb": 0, "min_ram_gb": 0, "min_unified_ram_gb": 0, "model": "large-v3-turbo", "fallback": "large-v3-turbo" }
+                    ]
+                }
+            },
+            "families": {
+                "f": { "default_mode": "text", "modes": { "text": { "tiers": [
+                    { "min_vram_gb": 0, "min_ram_gb": 0, "min_unified_ram_gb": 0, "model": "x" }
+                ]}}}
+            }
+        });
+        let pi = hw(GpuType::None, None, 4.0);
+        let mac = hw(GpuType::Apple, Some(64.0), 64.0);
+        assert_eq!(
+            resolve_in_manifest(&turbo, &pi, "transcribe", "f").unwrap(),
+            "large-v3-turbo"
+        );
+        assert_eq!(
+            resolve_in_manifest(&turbo, &mac, "transcribe", "f").unwrap(),
+            "large-v3-turbo"
         );
     }
 }

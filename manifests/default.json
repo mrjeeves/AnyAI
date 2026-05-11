@@ -1,13 +1,13 @@
 {
   "name": "MyOwnLLM Default",
-  "version": "11",
+  "version": "12",
   "ttl_minutes": 360,
   "default_family": "gemma4",
   "headroom_gb": {
-    "apple": 8,
-    "none": 4,
-    "nvidia": 2,
-    "amd": 2
+    "apple": 5,
+    "none": 2,
+    "nvidia": 1,
+    "amd": 1
   },
   "shared_modes": {
     "transcribe": {
@@ -15,50 +15,45 @@
       "input": "audio",
       "runtime": "whisper",
       "tiers": [
-        { "min_vram_gb": 4, "min_ram_gb": 8, "min_unified_ram_gb": 24, "disk_mb": 1550, "model": "large-v3-turbo", "fallback": "medium.en" },
-        { "min_vram_gb": 3, "min_ram_gb": 6, "min_unified_ram_gb": 18, "disk_mb": 1463, "model": "medium.en",      "fallback": "small.en"  },
-        { "min_vram_gb": 2, "min_ram_gb": 4, "min_unified_ram_gb": 12, "disk_mb": 465,  "model": "small.en",       "fallback": "base.en"   },
-        { "min_vram_gb": 0, "min_ram_gb": 2, "min_unified_ram_gb": 8,  "disk_mb": 141,  "model": "base.en",        "fallback": "tiny.en"   },
-        { "min_vram_gb": 0, "min_ram_gb": 0, "min_unified_ram_gb": 0,  "disk_mb": 74,   "model": "tiny.en",        "fallback": "tiny.en"   }
+        { "min_vram_gb": 0, "min_ram_gb": 0, "min_unified_ram_gb": 0, "disk_mb": 1550, "model": "large-v3-turbo", "fallback": "large-v3-turbo" }
       ]
     }
   },
   "families": {
     "gemma4": {
       "label": "Gemma 4",
-      "description": "Google Gemma 4 (Apache-2.0) — multimodal open models with agentic skills, multi-step planning, and audio-visual processing. The e2b/e4b edge variants use per-layer activations to keep the runtime footprint near 2B / 4B parameters, so they're a great fit for Raspberry Pi 5, NVIDIA Jetson Orin Nano, and other small / offline-only setups (e2b runs at ~7.6 tok/s on a Pi 5). The 26B MoE and 31B dense tiers scale up for workstation-class hardware. Tier thresholds reserve room for OS headroom and the paired whisper transcribe model so a single machine can run text + audio side-by-side.",
+      "description": "Google Gemma 4 (Apache-2.0) — multimodal open models with agentic skills, multi-step planning, and audio-visual processing. The e2b/e4b edge variants use per-layer activations: ~2 GB / ~3 GB resident at runtime despite a larger on-disk footprint, which keeps Pi 5, NVIDIA Jetson Orin Nano, and 8 GB Macs comfortably inside their memory budget alongside whisper. The 26B MoE and 31B dense tiers scale up for workstation-class hardware. Every tier pairs with large-v3-turbo so the same machine can run text + audio together.",
       "default_mode": "text",
       "modes": {
         "text": {
           "label": "Text",
           "tiers": [
-            { "min_vram_gb": 26, "min_ram_gb": 28, "min_unified_ram_gb": 48, "disk_mb": 20480, "model": "gemma4:31b",  "fallback": "gemma4:26b" },
-            { "min_vram_gb": 24, "min_ram_gb": 24, "min_unified_ram_gb": 36, "disk_mb": 18432, "model": "gemma4:26b",  "fallback": "gemma4:12b" },
-            { "min_vram_gb": 14, "min_ram_gb": 14, "min_unified_ram_gb": 24, "disk_mb": 9000,  "model": "gemma4:12b",  "fallback": "gemma4:9b"  },
-            { "min_vram_gb": 10, "min_ram_gb": 10, "min_unified_ram_gb": 18, "disk_mb": 6500,  "model": "gemma4:9b",   "fallback": "gemma4:e4b" },
-            { "min_vram_gb": 7,  "min_ram_gb": 6,  "min_unified_ram_gb": 12, "disk_mb": 4400,  "model": "gemma4:e4b",  "fallback": "gemma4:e2b" },
-            { "min_vram_gb": 5,  "min_ram_gb": 4,  "min_unified_ram_gb": 8,  "disk_mb": 2200,  "model": "gemma4:e2b",  "fallback": "gemma4:1b"  },
-            { "min_vram_gb": 3,  "min_ram_gb": 2,  "min_unified_ram_gb": 4,  "disk_mb": 900,   "model": "gemma4:1b",   "fallback": "gemma4:270m"},
-            { "min_vram_gb": 0,  "min_ram_gb": 0,  "min_unified_ram_gb": 0,  "disk_mb": 350,   "model": "gemma4:270m", "fallback": "gemma4:270m"}
+            { "min_vram_gb": 24, "min_ram_gb": 24, "min_unified_ram_gb": 32, "disk_mb": 19000, "model": "gemma4:31b",  "fallback": "gemma4:26b" },
+            { "min_vram_gb": 22, "min_ram_gb": 22, "min_unified_ram_gb": 28, "disk_mb": 17000, "model": "gemma4:26b",  "fallback": "gemma4:12b" },
+            { "min_vram_gb": 12, "min_ram_gb": 12, "min_unified_ram_gb": 18, "disk_mb": 8100,  "model": "gemma4:12b",  "fallback": "gemma4:e4b" },
+            { "min_vram_gb": 5,  "min_ram_gb": 6,  "min_unified_ram_gb": 10, "disk_mb": 7500,  "model": "gemma4:e4b",  "fallback": "gemma4:e2b" },
+            { "min_vram_gb": 4,  "min_ram_gb": 4,  "min_unified_ram_gb": 8,  "disk_mb": 5600,  "model": "gemma4:e2b",  "fallback": "gemma4:1b"  },
+            { "min_vram_gb": 3,  "min_ram_gb": 3,  "min_unified_ram_gb": 6,  "disk_mb": 815,   "model": "gemma4:1b",   "fallback": "gemma4:270m"},
+            { "min_vram_gb": 0,  "min_ram_gb": 0,  "min_unified_ram_gb": 0,  "disk_mb": 290,   "model": "gemma4:270m", "fallback": "gemma4:270m"}
           ]
         }
       }
     },
     "qwen3.6": {
       "label": "Qwen 3.6",
-      "description": "Alibaba Qwen 3.6 — strong multilingual + reasoning. The 3.6 release ships at 14B / 27B / 35B; smaller hardware tiers fall back to Qwen 3.5 (0.8B / 2B / 4B / 9B). Tier thresholds reserve room for OS headroom and the paired whisper transcribe model so a single machine can run text + audio side-by-side.",
+      "description": "Alibaba Qwen 3.6 — strong multilingual + reasoning. The 3.6 release ships at 14B / 27B / 35B; smaller hardware tiers fall back to Qwen 3.5 (0.6B / 1.7B / 4B / 8B). Every tier pairs with large-v3-turbo so the same machine can run text + audio together.",
       "default_mode": "text",
       "modes": {
         "text": {
           "label": "Text",
           "tiers": [
-            { "min_vram_gb": 28, "min_ram_gb": 32, "min_unified_ram_gb": 56, "disk_mb": 24576, "model": "qwen3.6:35b",  "fallback": "qwen3.6:27b" },
-            { "min_vram_gb": 22, "min_ram_gb": 22, "min_unified_ram_gb": 36, "disk_mb": 17408, "model": "qwen3.6:27b",  "fallback": "qwen3.6:14b" },
-            { "min_vram_gb": 14, "min_ram_gb": 14, "min_unified_ram_gb": 24, "disk_mb": 9500,  "model": "qwen3.6:14b",  "fallback": "qwen3.5:9b"  },
-            { "min_vram_gb": 10, "min_ram_gb": 10, "min_unified_ram_gb": 18, "disk_mb": 6758,  "model": "qwen3.5:9b",   "fallback": "qwen3.5:4b"  },
-            { "min_vram_gb": 6,  "min_ram_gb": 6,  "min_unified_ram_gb": 12, "disk_mb": 3000,  "model": "qwen3.5:4b",   "fallback": "qwen3.5:2b"  },
-            { "min_vram_gb": 4,  "min_ram_gb": 4,  "min_unified_ram_gb": 8,  "disk_mb": 1800,  "model": "qwen3.5:2b",   "fallback": "qwen3.5:0.8b"},
-            { "min_vram_gb": 0,  "min_ram_gb": 0,  "min_unified_ram_gb": 0,  "disk_mb": 1024,  "model": "qwen3.5:0.8b", "fallback": "qwen3.5:0.8b"}
+            { "min_vram_gb": 24, "min_ram_gb": 24, "min_unified_ram_gb": 32, "disk_mb": 21000, "model": "qwen3.6:35b",  "fallback": "qwen3.6:27b" },
+            { "min_vram_gb": 20, "min_ram_gb": 20, "min_unified_ram_gb": 28, "disk_mb": 17000, "model": "qwen3.6:27b",  "fallback": "qwen3.6:14b" },
+            { "min_vram_gb": 12, "min_ram_gb": 12, "min_unified_ram_gb": 18, "disk_mb": 9000,  "model": "qwen3.6:14b",  "fallback": "qwen3.5:8b"  },
+            { "min_vram_gb": 7,  "min_ram_gb": 8,  "min_unified_ram_gb": 14, "disk_mb": 5200,  "model": "qwen3.5:8b",   "fallback": "qwen3.5:4b"  },
+            { "min_vram_gb": 4,  "min_ram_gb": 5,  "min_unified_ram_gb": 10, "disk_mb": 2600,  "model": "qwen3.5:4b",   "fallback": "qwen3.5:1.7b"},
+            { "min_vram_gb": 3,  "min_ram_gb": 4,  "min_unified_ram_gb": 8,  "disk_mb": 1100,  "model": "qwen3.5:1.7b", "fallback": "qwen3.5:0.6b"},
+            { "min_vram_gb": 0,  "min_ram_gb": 0,  "min_unified_ram_gb": 0,  "disk_mb": 500,   "model": "qwen3.5:0.6b", "fallback": "qwen3.5:0.6b"}
           ]
         }
       }
