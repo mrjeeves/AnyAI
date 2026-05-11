@@ -8,6 +8,7 @@ import type {
   ManifestTier,
   ModelRuntime,
   HardwareProfile,
+  GpuType,
   Mode,
 } from "./types";
 import BUNDLED_MANIFEST_JSON from "../manifests/default.json";
@@ -63,7 +64,7 @@ function isStale(cachedAt: string, ttlMinutes: number): boolean {
  *  understands a manifest format the cached file might predate, so we
  *  refuse to use the cache and re-fetch (or fall back to the bundled
  *  copy). Versions are simple integers stringified — `parseInt` does
- *  the right thing across "6" / "7" / "8" / "9" / "10". */
+ *  the right thing across "6" / "7" / "8" / "9" / "10" / "11". */
 function bundledVersionIsNewer(cached: Manifest | null | undefined): boolean {
   if (!cached) return false;
   const bundledV = parseInt((BUNDLED_MANIFEST_JSON as Manifest).version ?? "", 10);
@@ -264,11 +265,11 @@ export function resolveModelEx(
     return { model: "tinyllama", runtime, tier: null, override: false };
   }
 
-  const vram = effectiveVramGb(hardware);
-  const ram = hardware.ram_gb;
+  const unified = isUnifiedMemory(hardware);
+  const headroom = headroomGb(manifest, hardware.gpu_type);
 
   for (const tier of tierSpec.tiers) {
-    if (vram >= tier.min_vram_gb || ram >= (tier.min_ram_gb ?? 0)) {
+    if (tierMatches(tier, hardware, manifest, unified, headroom)) {
       return { model: tier.model, runtime, tier, override: false };
     }
   }
@@ -279,6 +280,62 @@ export function resolveModelEx(
     tier: last,
     override: false,
   };
+}
+
+/** Compiled-in headroom defaults when a manifest omits `headroom_gb` (or a
+ *  GPU class within it). Sized to the OS + WebView + ollama overhead each
+ *  class actually pays. */
+const DEFAULT_HEADROOM_GB: Record<GpuType, number> = {
+  apple: 8,
+  none: 4,
+  nvidia: 2,
+  amd: 2,
+};
+
+function headroomGb(manifest: Manifest, gpu: GpuType): number {
+  return manifest.headroom_gb?.[gpu] ?? DEFAULT_HEADROOM_GB[gpu];
+}
+
+/** A host is "unified memory" when its GPU shares the same physical pool
+ *  as system RAM — Apple Silicon and the no-GPU SBC / desktop case. On
+ *  these hosts crediting `vram_gb` toward tier checks double-counts the
+ *  same bytes; the resolver tiers them purely off `min_unified_ram_gb`
+ *  (or a synthesised default) with full headroom subtracted. */
+function isUnifiedMemory(hw: HardwareProfile): boolean {
+  return hw.gpu_type === "apple" || hw.gpu_type === "none";
+}
+
+/** Raw-RAM threshold a tier requires on a unified-memory host. Explicit
+ *  `min_unified_ram_gb` always wins; otherwise we synthesise it from
+ *  `min_ram_gb + headroom_gb[gpu]` so a legacy tier written for discrete
+ *  hardware automatically gets bumped by the OS overhead on Apple/none. */
+function unifiedThresholdGb(tier: ManifestTier, headroom: number): number {
+  if (typeof tier.min_unified_ram_gb === "number") {
+    return tier.min_unified_ram_gb;
+  }
+  return (tier.min_ram_gb ?? 0) + headroom;
+}
+
+function tierMatches(
+  tier: ManifestTier,
+  hw: HardwareProfile,
+  manifest: Manifest,
+  unified: boolean,
+  headroom: number,
+): boolean {
+  if (unified) {
+    // Single shared pool — VRAM column is the same bytes as RAM, so the
+    // only meaningful check is "is the raw RAM large enough to host the
+    // OS, the LLM, and the paired transcribe model".
+    return hw.ram_gb >= unifiedThresholdGb(tier, headroom);
+  }
+  // Discrete GPU: either the GPU is big enough to host the model
+  // entirely, or system RAM (after headroom) is enough for CPU
+  // inference. Either path qualifies the tier.
+  const vram = hw.vram_gb ?? 0;
+  if (vram >= tier.min_vram_gb) return true;
+  const cpuBudget = Math.max(0, hw.ram_gb - headroom);
+  return cpuBudget >= (tier.min_ram_gb ?? 0);
 }
 
 /** Backwards-compatible string-only resolution used by call sites that
@@ -292,22 +349,6 @@ export function resolveModel(
   familyName?: string,
 ): string {
   return resolveModelEx(hardware, manifest, mode, modeOverrides, familyName).model;
-}
-
-/**
- * VRAM the resolver should credit toward `min_vram_gb` checks.
- *
- * Discrete GPUs (NVIDIA, AMD) own their VRAM separately from system RAM, so
- * a 12 GB card lets the model live entirely off-CPU and the tier check is
- * meaningful. On Apple Silicon and integrated GPUs, "VRAM" is just a slice
- * of the same physical pool `ram_gb` already counts — crediting it again
- * means an 8 GB Mac matches a tier wanting `vram>=6`, picks a 9 B model,
- * and grinds at ~1 token / 10 s while the OS swaps. Treat non-discrete
- * vram as 0 so those systems are tiered purely on `ram_gb`.
- */
-function effectiveVramGb(hw: HardwareProfile): number {
-  if (hw.gpu_type === "nvidia" || hw.gpu_type === "amd") return hw.vram_gb ?? 0;
-  return 0;
 }
 
 /** All model tags recommended by a manifest across every family/mode/tier. */
