@@ -632,6 +632,7 @@ pub async fn chat_stream<FC, FT, FE>(
     stream_id: &str,
     model: &str,
     messages: serde_json::Value,
+    think: Option<bool>,
     mut on_content: FC,
     mut on_thinking: FT,
     on_done: FE,
@@ -646,14 +647,19 @@ where
         .pool_idle_timeout(Duration::from_secs(30))
         .build()
         .context("reqwest client")?;
-    // We don't pass an explicit `think` flag: thinking models default to
-    // emitting thinking, plain models don't have the field. Forwarding
-    // `message.thinking` if it shows up is enough.
-    let body = serde_json::json!({
+    // `think` is opt-in: chat leaves it None so reasoning models default to
+    // emitting thinking. Background loops (Talking Points) pass Some(false)
+    // to skip the reasoning step — keeps inference cheap enough to coexist
+    // with whisper on a memory-tight machine. Ollama silently ignores the
+    // field on non-thinking models.
+    let mut body = serde_json::json!({
         "model": model,
         "messages": messages,
         "stream": true,
     });
+    if let Some(t) = think {
+        body["think"] = serde_json::json!(t);
+    }
 
     // Register the cancel notifier BEFORE the network call so a cancel
     // racing with an early-arriving first byte still wins.

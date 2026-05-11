@@ -140,6 +140,7 @@ async fn ollama_chat_stream(
     stream_id: String,
     model: String,
     messages: serde_json::Value,
+    think: Option<bool>,
     window: tauri::WebviewWindow,
 ) -> Result<(), String> {
     use tauri::Emitter;
@@ -154,6 +155,7 @@ async fn ollama_chat_stream(
         &stream_id,
         &model,
         messages,
+        think,
         move |delta| {
             let _ = content_window.emit(&content_event, serde_json::json!({ "delta": delta }));
         },
