@@ -94,14 +94,18 @@ fn ensure_macos_default_on_path() -> bool {
 pub async fn install() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        let status = quiet_tokio_command("sh")
-            .args(["-c", "curl -fsSL https://ollama.com/install.sh | sh"])
-            .status()
-            .await
-            .context("failed to run ollama install script")?;
-        if !status.success() {
-            return Err(anyhow!("ollama install failed"));
-        }
+        with_retry(|| async {
+            let status = quiet_tokio_command("sh")
+                .args(["-c", "curl -fsSL https://ollama.com/install.sh | sh"])
+                .status()
+                .await
+                .context("failed to run ollama install script")?;
+            if !status.success() {
+                return Err(anyhow!("ollama install failed"));
+            }
+            Ok(())
+        })
+        .await?;
     }
     #[cfg(target_os = "macos")]
     {
@@ -116,20 +120,29 @@ pub async fn install() -> Result<()> {
             .or_else(|| which::which("brew").ok());
 
         if let Some(brew_bin) = brew {
-            let status = quiet_tokio_command(&brew_bin)
-                .args(["install", "ollama"])
-                .status()
-                .await;
-            if let Ok(s) = status {
-                if s.success() {
-                    // brew dropped the symlink in /opt/homebrew/bin or
-                    // /usr/local/bin, but that's still not in this process's
-                    // PATH — fold it in so the very next ensure_running() /
-                    // has_model() call resolves `ollama` instead of erroring
-                    // out as "not found".
-                    ensure_macos_default_on_path();
-                    return Ok(());
+            let result = with_retry(|| {
+                let brew_bin = brew_bin.clone();
+                async move {
+                    let status = quiet_tokio_command(&brew_bin)
+                        .args(["install", "ollama"])
+                        .status()
+                        .await
+                        .context("failed to run brew install ollama")?;
+                    if !status.success() {
+                        return Err(anyhow!("brew install ollama exited with {}", status));
+                    }
+                    Ok(())
                 }
+            })
+            .await;
+            if result.is_ok() {
+                // brew dropped the symlink in /opt/homebrew/bin or
+                // /usr/local/bin, but that's still not in this process's
+                // PATH — fold it in so the very next ensure_running() /
+                // has_model() call resolves `ollama` instead of erroring
+                // out as "not found".
+                ensure_macos_default_on_path();
+                return Ok(());
             }
         }
 
@@ -152,6 +165,37 @@ pub async fn install() -> Result<()> {
         ));
     }
     Ok(())
+}
+
+// Up to 5 attempts with 2s / 4s / 8s / 16s sleeps between them — enough to
+// ride out a flaky DNS lookup or a Wi-Fi reconnect without surfacing a "Could
+// not install" toast the user would otherwise hit Retry on anyway. Persistent
+// failures still bubble up after ~30s of total wait.
+//
+// Windows install() is purely a manual-action error message — no network call
+// to wrap — so this helper is gated off there to keep dead_code lints quiet.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn with_retry<F, Fut>(mut op: F) -> Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    const MAX_ATTEMPTS: u32 = 5;
+    let mut delay = Duration::from_secs(2);
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match op().await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = Some(e);
+                if attempt < MAX_ATTEMPTS {
+                    tokio::time::sleep(delay).await;
+                    delay *= 2;
+                }
+            }
+        }
+    }
+    Err(last_err.expect("MAX_ATTEMPTS >= 1, so at least one attempt ran"))
 }
 
 pub async fn ensure_running() -> Result<()> {
