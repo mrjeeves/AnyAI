@@ -1,3 +1,4 @@
+use crate::process::quiet_tokio_command;
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -6,7 +7,7 @@ use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tauri::Emitter;
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::sync::{Mutex, Notify};
 
 static OLLAMA_PROCESS: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
@@ -28,7 +29,7 @@ pub fn is_installed() -> bool {
     // has the pre-install PATH, so `which` keeps reporting "not installed"
     // even after they click Retry. Probe the standard install location and
     // augment PATH for the rest of this process so subsequent
-    // Command::new("ollama") calls also resolve.
+    // quiet_tokio_command("ollama") calls also resolve.
     #[cfg(target_os = "windows")]
     {
         if ensure_windows_default_on_path() {
@@ -63,7 +64,7 @@ fn ensure_windows_default_on_path() -> bool {
 pub async fn install() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        let status = Command::new("sh")
+        let status = quiet_tokio_command("sh")
             .args(["-c", "curl -fsSL https://ollama.com/install.sh | sh"])
             .status()
             .await
@@ -75,12 +76,12 @@ pub async fn install() -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         // Try brew first, then fall back to the install script
-        let brew = Command::new("brew")
+        let brew = quiet_tokio_command("brew")
             .args(["install", "ollama"])
             .status()
             .await;
         if brew.map(|s| !s.success()).unwrap_or(true) {
-            let status = Command::new("sh")
+            let status = quiet_tokio_command("sh")
                 .args(["-c", "curl -fsSL https://ollama.com/install.sh | sh"])
                 .status()
                 .await
@@ -119,7 +120,7 @@ pub async fn ensure_running() -> Result<()> {
     // not in Ollama's defaults). When the Windows installer runs Ollama as a
     // tray service we can't influence its env — that's why the GUI also routes
     // chat through myownllm's API server (see Chat.svelte).
-    let child = Command::new("ollama")
+    let child = quiet_tokio_command("ollama")
         .arg("serve")
         .env("OLLAMA_ORIGINS", "*")
         .stdout(Stdio::null())
@@ -145,7 +146,7 @@ async fn api_reachable() -> bool {
 
 // Minimal HTTP GET using std (avoids reqwest dep in Rust; frontend uses Tauri http plugin)
 async fn reqwest_get(url: &str) -> Result<String> {
-    let out = Command::new("curl")
+    let out = quiet_tokio_command("curl")
         .args(["-sf", "--max-time", "2", url])
         .output()
         .await
@@ -318,7 +319,7 @@ pub async fn pull_with<F: FnMut(&PullEvent)>(model: &str, mut on_event: F) -> Re
 
 /// True if the named model+tag is already pulled.
 pub async fn has_model(model: &str) -> Result<bool> {
-    let out = Command::new("ollama")
+    let out = quiet_tokio_command("ollama")
         .args(["show", "--modelfile", model])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -339,7 +340,7 @@ pub async fn warm(model: &str) -> Result<()> {
         "options": { "num_predict": 1 }
     })
     .to_string();
-    let out = Command::new("curl")
+    let out = quiet_tokio_command("curl")
         .args([
             "-sf",
             "--max-time",
@@ -409,7 +410,7 @@ fn parse_tags_response(body: &str) -> Vec<ModelInfo> {
 }
 
 pub async fn delete_model(name: &str) -> Result<()> {
-    let status = Command::new("ollama")
+    let status = quiet_tokio_command("ollama")
         .args(["rm", name])
         .status()
         .await

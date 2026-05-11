@@ -776,16 +776,27 @@ fn run_session(
     let mut ingest_alive = true;
 
     loop {
+        // Eagerly bail when cancelled, BEFORE pulling the next chunk into
+        // whisper. Each whisper.full() takes several seconds on slower
+        // hardware, so processing a multi-chunk backlog after the user
+        // clicked Stop made it look like the app was wedged for minutes.
+        // The Stop dialog explicitly tells the user "Stopping now drops
+        // that audio without transcribing it" — exit fast and let the
+        // buffer_dir wipe below discard whatever's still queued.
+        if cancel.load(Ordering::SeqCst) {
+            break;
+        }
         let next_path = buffer_dir.join(format!("{next_seq:010}.f32"));
         if !next_path.exists() {
-            // Nothing ready yet. If we were cancelled and the ingest
-            // thread has finished writing its tail, we're done. Until
-            // then, sit tight — short sleep beats a busy spin.
-            if cancel.load(Ordering::SeqCst) && !ingest_alive {
-                break;
-            }
+            // Nothing ready yet. If the ingest thread has finished, we're
+            // done — there will never be another chunk. Until then, sit
+            // tight (a short sleep beats a busy spin).
             if ingest_alive && ingest_handle.is_finished() {
                 ingest_alive = false;
+                continue;
+            }
+            if !ingest_alive {
+                break;
             }
             thread::sleep(Duration::from_millis(75));
             continue;
@@ -880,13 +891,17 @@ fn run_drain(
     let mut next_seq: u64 = lowest_pending_seq(&buffer_dir).unwrap_or(1);
 
     loop {
+        // Same eager-cancel as run_session: bail before the next whisper.full()
+        // so the user can stop a long backlog drain without waiting for it to
+        // finish. The drain-only Stop dialog explicitly warns that pending
+        // audio is dropped, which only holds if we exit promptly here.
+        if cancel.load(Ordering::SeqCst) {
+            break;
+        }
         let next_path = buffer_dir.join(format!("{next_seq:010}.f32"));
         if !next_path.exists() {
             // Nothing at this seq. If anything else is queued (a hole),
             // skip forward to the next real chunk; otherwise we're done.
-            if cancel.load(Ordering::SeqCst) {
-                break;
-            }
             match lowest_pending_seq(&buffer_dir) {
                 Some(s) if s > next_seq => {
                     next_seq = s;
