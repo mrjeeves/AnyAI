@@ -552,24 +552,6 @@
   // outside Chat / TranscribeView and survives mode switches.
   // ---------------------------------------------------------------------
 
-  /** Set when the user clicks the stop button on the recording chip.
-   *  When the chunk backlog is non-zero, we hold the user in this
-   *  dialog until they decide whether to drain or discard the rest. */
-  let stopConfirm = $state<{
-    pendingChunks: number;
-    paused: boolean;
-    drainOnly: boolean;
-  } | null>(null);
-
-  function requestStopTranscribe() {
-    if (!transcribeUi.active) return;
-    stopConfirm = {
-      pendingChunks: transcribeUi.pendingChunks,
-      paused: transcribeUi.paused,
-      drainOnly: transcribeUi.drainOnly,
-    };
-  }
-
   function jumpToTranscribe() {
     if (activeMode !== "transcribe") {
       onModeChange("transcribe").catch(() => {});
@@ -584,8 +566,8 @@
     }
   }
 
-  async function confirmStopTranscribe(): Promise<void> {
-    stopConfirm = null;
+  async function requestStopTranscribe(): Promise<void> {
+    if (!transcribeUi.active) return;
     // Stopping the transcription pulls the rug out from under TP — the
     // loop has nothing to summarise once the transcript stops growing,
     // so release the chat slot at the same time.
@@ -598,10 +580,6 @@
     // already flushed any text it cared about.
     clearLiveDelta();
     clearAfterPersist();
-  }
-
-  function cancelStopTranscribe() {
-    stopConfirm = null;
   }
 
   // ---------------------------------------------------------------------
@@ -874,43 +852,6 @@
     />
   {/if}
 
-  {#if stopConfirm}
-    {@const c = stopConfirm}
-    <div class="confirm-overlay" onclick={cancelStopTranscribe} role="presentation"></div>
-    <div class="stop-confirm" role="dialog" aria-label="Stop transcription">
-      <h3>Stop transcription?</h3>
-      {#if c.drainOnly}
-        <p class="stop-meta">
-          This is a recovery drain — stopping discards
-          <strong>{c.pendingChunks * 5} s</strong> of un-transcribed audio
-          ({c.pendingChunks} {c.pendingChunks === 1 ? "chunk" : "chunks"})
-          left over from a previous session.
-        </p>
-      {:else if c.pendingChunks > 0}
-        <p class="stop-meta">
-          Whisper is still
-          <strong>{c.pendingChunks * 5} s</strong> behind realtime
-          ({c.pendingChunks} {c.pendingChunks === 1 ? "chunk" : "chunks"} pending).
-          Stopping now drops that audio without transcribing it.
-        </p>
-        <p class="stop-hint">
-          To finish without losing it, pause the mic and let the backlog
-          drain — the transcript chip stays in the bar until it's empty.
-        </p>
-      {:else}
-        <p class="stop-meta">
-          The session will end and the final transcript will be saved.
-        </p>
-      {/if}
-      <div class="stop-actions">
-        <button class="cancel" onclick={cancelStopTranscribe}>Cancel</button>
-        <button class="confirm-stop" onclick={confirmStopTranscribe}>
-          {c.pendingChunks > 0 ? "Stop & discard backlog" : "Stop"}
-        </button>
-      </div>
-    </div>
-  {/if}
-
   {#if remoteActive}
     <!--
       Curtain renders above everything in the app so accidental clicks /
@@ -1053,64 +994,6 @@
       transform: rotate(360deg);
     }
   }
-
-  /* Curtain: full-bleed scrim that swallows pointer + keyboard while a
-     remote device is driving the UI. Sits above the settings panel too
-     so opening Settings → Remote on the desktop doesn't accidentally
-     punch through. */
-  .confirm-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, .55);
-    z-index: 9000;
-  }
-  .stop-confirm {
-    position: fixed;
-    top: 50%; left: 50%;
-    transform: translate(-50%, -50%);
-    width: min(420px, 90vw);
-    background: #161616;
-    border: 1px solid #2a2a2a;
-    border-radius: 10px;
-    padding: 1.1rem 1.2rem;
-    z-index: 9001;
-    box-shadow: 0 18px 48px rgba(0, 0, 0, .65);
-  }
-  .stop-confirm h3 {
-    font-size: .95rem; font-weight: 600;
-    color: #e8e8e8;
-    margin-bottom: .65rem;
-  }
-  .stop-confirm .stop-meta {
-    font-size: .82rem; color: #ccc; line-height: 1.55;
-    margin-bottom: .55rem;
-  }
-  .stop-confirm .stop-meta strong { color: #ffd166; }
-  .stop-confirm .stop-hint {
-    font-size: .76rem; color: #888;
-    line-height: 1.5;
-    background: #131318;
-    padding: .5rem .65rem;
-    border-radius: 6px;
-    margin-bottom: .85rem;
-  }
-  .stop-actions {
-    display: flex; justify-content: flex-end; gap: .55rem;
-    margin-top: .25rem;
-  }
-  .stop-actions button {
-    padding: .45rem 1rem; border-radius: 6px;
-    font-size: .82rem; cursor: pointer;
-    border: 1px solid transparent;
-  }
-  .stop-actions .cancel {
-    background: #1e1e1e; color: #ccc; border-color: #2a2a2a;
-  }
-  .stop-actions .cancel:hover { background: #252525; }
-  .stop-actions .confirm-stop {
-    background: #5a2424; color: #ffd6d6; border-color: #7a3434;
-  }
-  .stop-actions .confirm-stop:hover { background: #6a2c2c; }
 
   .remote-curtain {
     position: fixed;
