@@ -670,7 +670,7 @@ A single manifest can expose multiple families — that's how you ship "use our 
 ```jsonc
 {
   "name": "My Provider",         // display name
-  "version": "11",
+  "version": "12",
   "ttl_minutes": 360,            // how long MyOwnLLM caches THIS file before re-fetching (default: 360).
                                  // Publisher's rate-limit signal — pick what fits your host.
   "default_family": "gemma4",    // family used until the user picks one
@@ -681,11 +681,24 @@ A single manifest can expose multiple families — that's how you ship "use our 
                                  // Each imported manifest is fetched + cached against ITS OWN ttl_minutes.
                                  // Importing file wins on family-key collision.
 
-  "headroom_gb": {               // optional: RAM (GB) reserved for OS / WebView / ollama / paired
-    "apple": 8,                  //   whisper before crediting RAM toward tier thresholds. Apple's
-    "none":  4,                  //   pool hosts the whole desktop, so headroom is largest; discrete
-    "nvidia": 2,                 //   GPU hosts only reserve enough system RAM for the client.
-    "amd": 2                     //   Missing keys inherit these compiled-in defaults.
+  "headroom_gb": {               // optional: RAM (GB) reserved for OS / WebView / ollama overhead
+    "apple": 5,                  //   alongside large-v3-turbo (~2 GB resident). Apple holds back
+    "none":  2,                  //   the most because macOS + browser tabs share the LLM pool;
+    "nvidia": 1,                 //   discrete-GPU hosts only need a sliver of system RAM because
+    "amd": 1                     //   the LLM lives on the GPU. Missing keys inherit the compiled-in
+  },                             //   defaults shown.
+
+  "shared_modes": {
+    "transcribe": {              // Every family inherits this unless it overrides `modes.transcribe`.
+      "runtime": "whisper",
+      "tiers": [                 // The default manifest collapses whisper to a single rung — the
+                                 // smaller ggml models (tiny/base/small/medium) are too slow to be
+                                 // realistic in practice. Override per-family if your audience needs
+                                 // a non-turbo variant.
+        { "min_vram_gb": 0, "min_ram_gb": 0, "min_unified_ram_gb": 0,
+          "model": "large-v3-turbo", "fallback": "large-v3-turbo" }
+      ]
+    }
   },
 
   "families": {
@@ -699,13 +712,14 @@ A single manifest can expose multiple families — that's how you ship "use our 
           "tiers": [
             // Tiers are walked top-to-bottom. First match wins.
             // Unified-memory hosts (apple, none) match on `min_unified_ram_gb` — raw RAM that
-            // must include OS headroom AND the paired transcribe model.
+            // must include OS headroom AND the paired transcribe model (large-v3-turbo, ~2 GB).
             // Discrete GPUs (nvidia, amd) match if vram_gb >= min_vram_gb OR
             // (ram_gb - headroom_gb[gpu]) >= min_ram_gb.
-            { "min_vram_gb": 26, "min_ram_gb": 28, "min_unified_ram_gb": 48, "model": "gemma4:31b", "fallback": "gemma4:26b" },
-            { "min_vram_gb": 14, "min_ram_gb": 14, "min_unified_ram_gb": 24, "model": "gemma4:12b", "fallback": "gemma4:9b"  },
-            { "min_vram_gb": 7,  "min_ram_gb": 6,  "min_unified_ram_gb": 12, "model": "gemma4:e4b", "fallback": "gemma4:e2b" },
-            { "min_vram_gb": 0,  "min_ram_gb": 0,  "min_unified_ram_gb": 0,  "model": "gemma4:270m","fallback": "gemma4:270m"}
+            { "min_vram_gb": 24, "min_ram_gb": 24, "min_unified_ram_gb": 32, "model": "gemma4:31b",  "fallback": "gemma4:26b" },
+            { "min_vram_gb": 12, "min_ram_gb": 12, "min_unified_ram_gb": 18, "model": "gemma4:12b",  "fallback": "gemma4:e4b" },
+            { "min_vram_gb": 5,  "min_ram_gb": 6,  "min_unified_ram_gb": 10, "model": "gemma4:e4b",  "fallback": "gemma4:e2b" },
+            { "min_vram_gb": 4,  "min_ram_gb": 4,  "min_unified_ram_gb": 8,  "model": "gemma4:e2b",  "fallback": "gemma4:1b"  },
+            { "min_vram_gb": 0,  "min_ram_gb": 0,  "min_unified_ram_gb": 0,  "model": "gemma4:270m", "fallback": "gemma4:270m"}
             // Always include a zero-threshold catch-all as the last tier.
           ]
         }
@@ -714,6 +728,20 @@ A single manifest can expose multiple families — that's how you ship "use our 
   }
 }
 ```
+
+**Default tier ladder, sized to actual gemma3 / gemma3n resident memory + large-v3-turbo:**
+
+| Hardware (unified)        | Pick                          | Runtime peak |
+|---------------------------|-------------------------------|--------------|
+| Pi 5 4 GB                 | `gemma4:270m` + turbo         | ~3.6 GB      |
+| Pi 5 8 GB / Orin Nano 8   | `gemma4:e2b`  + turbo         | ~4 GB        |
+| 8 GB Mac                  | `gemma4:e2b`  + turbo         | ~8 GB (tight)|
+| 16 GB Mac (M1/M2/M3)      | `gemma4:e4b`  + turbo         | ~10 GB       |
+| 24 GB Mac (M-Pro)         | `gemma4:12b`  + turbo         | ~16 GB       |
+| 36 GB Mac (M-Pro/Max)     | `gemma4:26b`  + turbo         | ~27 GB       |
+| 48+ GB Mac (M-Max/Ultra)  | `gemma4:31b`  + turbo         | ~29 GB       |
+
+Discrete GPUs use `min_vram_gb` for the GPU-resident path (model lives on the card, system RAM only hosts whisper + the ollama client), with a CPU-fallback path through `min_ram_gb`.
 
 **Rules:**
 - A family **must** define `default_mode` and at least one entry under `modes`.
@@ -725,7 +753,8 @@ A single manifest can expose multiple families — that's how you ship "use our 
 - If the user's saved `active_family` doesn't exist in the manifest, the resolver falls back to `default_family`, then to the first family in document order.
 - Unknown fields are ignored — manifests are forward-compatible within the schema version.
 - `ttl_minutes` controls how long MyOwnLLM caches **this file** before re-fetching (default 360). It is the publisher's rate-limit signal; MyOwnLLM honours it.
-- `headroom_gb` is optional. Missing keys inherit the compiled-in defaults (`apple: 8`, `none: 4`, `nvidia: 2`, `amd: 2`). The values are sized to cover the OS, WebView, ollama daemon, and a running whisper model so that the resolver's text pick leaves room for transcribe to run alongside it.
+- `headroom_gb` is optional. Missing keys inherit the compiled-in defaults (`apple: 5`, `none: 2`, `nvidia: 1`, `amd: 1`). Sized to cover the OS, WebView, and ollama daemon alongside `large-v3-turbo` (~2 GB resident) so the text pick has room to share memory with transcribe.
+- The default `shared_modes.transcribe` ladder collapses to a single rung: `large-v3-turbo`. The smaller whisper variants (`tiny.en`, `base.en`, `small.en`, `medium.en`) are still in `KNOWN_MODELS` and can be selected via `mode_overrides.transcribe`, but their decode path is too slow for realistic interactive use — typically 5–10× slower per minute of audio than turbo.
 - `imports` lets a manifest pull families from other manifests; each imported file obeys its own TTL and is cached separately. Family-key collisions favour the importing file.
 
 Model tags are standard Ollama tags (e.g. `gemma4:e4b`, `qwen3.5:9b`). Anything in the [Ollama library](https://ollama.com/library) works.

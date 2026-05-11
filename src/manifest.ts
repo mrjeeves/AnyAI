@@ -64,7 +64,7 @@ function isStale(cachedAt: string, ttlMinutes: number): boolean {
  *  understands a manifest format the cached file might predate, so we
  *  refuse to use the cache and re-fetch (or fall back to the bundled
  *  copy). Versions are simple integers stringified — `parseInt` does
- *  the right thing across "6" / "7" / "8" / "9" / "10" / "11". */
+ *  the right thing across "6" / "7" / "8" / "9" / "10" / "11" / "12". */
 function bundledVersionIsNewer(cached: Manifest | null | undefined): boolean {
   if (!cached) return false;
   const bundledV = parseInt((BUNDLED_MANIFEST_JSON as Manifest).version ?? "", 10);
@@ -284,12 +284,15 @@ export function resolveModelEx(
 
 /** Compiled-in headroom defaults when a manifest omits `headroom_gb` (or a
  *  GPU class within it). Sized to the OS + WebView + ollama overhead each
- *  class actually pays. */
+ *  class actually pays once large-v3-turbo (~2 GB resident) is also loaded:
+ *  Apple reserves macOS + browser tabs, Linux SBCs reserve the base
+ *  distro, and discrete-GPU hosts only need a sliver of system RAM for
+ *  the ollama client because the LLM lives on the GPU. */
 const DEFAULT_HEADROOM_GB: Record<GpuType, number> = {
-  apple: 8,
-  none: 4,
-  nvidia: 2,
-  amd: 2,
+  apple: 5,
+  none: 2,
+  nvidia: 1,
+  amd: 1,
 };
 
 function headroomGb(manifest: Manifest, gpu: GpuType): number {
