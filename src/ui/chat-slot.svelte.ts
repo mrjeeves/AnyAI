@@ -105,22 +105,22 @@ function resetSlot() {
 // conversation's `talking_points`. Holds the chat slot for its lifetime.
 // ---------------------------------------------------------------------
 
-/** Tick cadence. We poll the transcript every few seconds and decide on
- *  each tick whether the words- or silence-based trigger has fired. Set
- *  small enough that the silence window feels responsive without spamming
- *  whisper with re-reads of the conversation file. */
-const TP_TICK_MS = 3_000;
-/** Words-based trigger: condense as soon as this many new chars have
- *  accrued since we last processed. Big enough to give the model a
- *  meaningful passage (a few sentences), small enough that the bullets
- *  stay close to real-time. */
-const TP_MIN_NEW_CHARS = 250;
+/** Tick cadence. We poll on this interval and decide whether the chunks-
+ *  or silence-based trigger has fired. Polling is cheap (a count compare
+ *  and one disk read), and a tight tick keeps bullets feeling like a
+ *  pipeline that flows with the conversation rather than appearing in
+ *  big batches. */
+const TP_TICK_MS = 1_000;
+/** Pool size: condense after this many transcribed chunks have arrived
+ *  since the last cycle. Each chunk is ~5 s of speech, so 2 chunks ≈
+ *  10 s of audio — small enough that bullets keep flowing through the
+ *  conversation, large enough to give the model a meaningful passage. */
+const TP_MIN_NEW_CHUNKS = 2;
 /** Silence-based trigger: if there's *any* unprocessed content and the
- *  transcript hasn't grown for this long, condense what we have. The
- *  ingest loop drops silent chunks (no whisper hallucinations), so a
- *  flat transcript here genuinely means the speaker paused — a natural
- *  sentence/turn boundary worth summarising at. */
-const TP_SILENCE_MS = 5_000;
+ *  transcript hasn't grown for this long, condense what we have anyway.
+ *  Handles the one-chunk-then-pause case so a slow speaker still gets
+ *  bullets without waiting for a second chunk that may not come soon. */
+const TP_SILENCE_MS = 4_000;
 /** Rolling cap on total bullets so a long meeting doesn't grow the
  *  right pane unboundedly. Oldest bullets fall off the top. */
 const TP_MAX_BULLETS = 50;
@@ -135,6 +135,10 @@ let tpInFlightUnlisten: UnlistenFn | null = null;
  *  not the whole transcript. Critical on memory-tight machines where a
  *  growing prompt would starve whisper and trigger repetition. */
 let tpProcessedLen = 0;
+/** Value of `transcribeUi.framePulse` at the moment we last *started* a
+ *  cycle. The chunks-trigger is `framePulse - tpFramePulseSeen >= N` —
+ *  this is the "pool" the user pictures filling up between summaries. */
+let tpFramePulseSeen = 0;
 /** Wall-clock ms when we last observed the transcript grow. Drives the
  *  silence trigger — `now - tpLastGrowthAt > TP_SILENCE_MS` means "the
  *  speaker has stopped, summarise what we have". */
@@ -161,6 +165,10 @@ export function startTalkingPoints(args: { model: string }): void {
   tpProcessedLen = 0;
   tpObservedLen = 0;
   tpLastGrowthAt = Date.now();
+  // Anchor the chunk-pool counter to whatever has been transcribed before
+  // activation so the first cycle fires after the next 2 chunks of speech,
+  // not on a backlog of frames that arrived before TP was even enabled.
+  tpFramePulseSeen = transcribeUi.framePulse;
   startTimer();
   // Skip past whatever transcript already exists so activating mid-meeting
   // doesn't blast a huge backlog through the model in one shot — TP
@@ -217,7 +225,7 @@ export async function stopTalkingPoints(): Promise<void> {
 }
 
 /** Tick handler: read the on-disk transcript, update growth bookkeeping,
- *  and decide whether the words- or silence-based trigger has fired.
+ *  and decide whether the chunks-pool or silence trigger has fired.
  *  Kept separate from `runTpCycle` so cycles don't double-fire while a
  *  previous one is still in flight. */
 async function maybeRunTpCycle(): Promise<void> {
@@ -238,11 +246,14 @@ async function maybeRunTpCycle(): Promise<void> {
     tpObservedLen = len;
     tpLastGrowthAt = Date.now();
   }
-  const newChars = len - tpProcessedLen;
-  if (newChars <= 0) return;
-  const wordsTrigger = newChars >= TP_MIN_NEW_CHARS;
+  if (len <= tpProcessedLen) return;
+  // Chunks pool: each whisper frame with non-empty text bumps framePulse, so
+  // the diff is "transcribed chunks waiting to be condensed" — exactly the
+  // pool the user pictures filling up between summaries.
+  const newChunks = transcribeUi.framePulse - tpFramePulseSeen;
+  const chunksTrigger = newChunks >= TP_MIN_NEW_CHUNKS;
   const silenceTrigger = Date.now() - tpLastGrowthAt >= TP_SILENCE_MS;
-  if (!wordsTrigger && !silenceTrigger) return;
+  if (!chunksTrigger && !silenceTrigger) return;
   await runTpCycle();
 }
 
@@ -263,11 +274,15 @@ async function runTpCycle(): Promise<void> {
   // prompt stays small even after a long meeting. This is what keeps TP from
   // starving whisper on a memory-tight machine.
   const sliceEnd = transcript.length;
+  // Snapshot the chunk-pool counter alongside the slice so success advances
+  // both atomically — otherwise a frame arriving mid-cycle could be missed.
+  const pulseAtCycleStart = transcribeUi.framePulse;
   const newSlice = transcript.slice(tpProcessedLen, sliceEnd).trim();
   if (!newSlice) {
     // Nothing substantive in the new region (e.g., trimmed to empty); skip
     // ahead so we don't keep retrying the same dead slice every tick.
     tpProcessedLen = sliceEnd;
+    tpFramePulseSeen = pulseAtCycleStart;
     return;
   }
 
@@ -318,12 +333,15 @@ async function runTpCycle(): Promise<void> {
         await saveConversation(fresh);
       }
     }
-    // Advance the marker even when the model returned nothing — that slice
-    // was deemed filler and we don't want to re-send it next tick.
+    // Advance both markers even when the model returned nothing — that
+    // slice was deemed filler and we don't want to re-send it next tick.
+    // Pulse counter advances to the snapshot (not the live value) so
+    // chunks arriving *during* the cycle stay in the next pool.
     tpProcessedLen = sliceEnd;
+    tpFramePulseSeen = pulseAtCycleStart;
   } catch (e) {
     console.warn("TP cycle failed:", e);
-    // On error, leave tpProcessedLen alone so we retry the slice next tick.
+    // On error, leave both markers alone so we retry the slice next tick.
   } finally {
     tpInFlightUnlisten?.();
     tpInFlightUnlisten = null;
