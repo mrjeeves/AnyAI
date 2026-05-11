@@ -25,14 +25,23 @@ pub fn is_installed() -> bool {
     if which::which("ollama").is_ok() {
         return true;
     }
-    // After a fresh manual install on Windows the user's running myownllm still
-    // has the pre-install PATH, so `which` keeps reporting "not installed"
-    // even after they click Retry. Probe the standard install location and
+    // After a fresh install the user's running myownllm still has the
+    // pre-install PATH, so `which` keeps reporting "not installed" even
+    // after they click Retry. Also on macOS, GUI processes inherit
+    // launchd's minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin), so an
+    // ollama symlink in /opt/homebrew/bin or /usr/local/bin is invisible
+    // even on first launch. Probe the standard install locations and
     // augment PATH for the rest of this process so subsequent
     // quiet_tokio_command("ollama") calls also resolve.
     #[cfg(target_os = "windows")]
     {
         if ensure_windows_default_on_path() {
+            return which::which("ollama").is_ok();
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if ensure_macos_default_on_path() {
             return which::which("ollama").is_ok();
         }
     }
@@ -61,6 +70,27 @@ fn ensure_windows_default_on_path() -> bool {
     true
 }
 
+#[cfg(target_os = "macos")]
+fn ensure_macos_default_on_path() -> bool {
+    use std::env;
+    // /opt/homebrew/bin: Apple Silicon Homebrew prefix (the M-series default).
+    // /usr/local/bin:    Intel Homebrew prefix, and where Ollama.app drops
+    //                    its CLI symlink on first launch.
+    for dir in ["/opt/homebrew/bin", "/usr/local/bin"] {
+        if std::path::Path::new(dir).join("ollama").is_file() {
+            let existing = env::var_os("PATH").unwrap_or_default();
+            let mut new_path = std::ffi::OsString::from(dir);
+            if !existing.is_empty() {
+                new_path.push(":");
+                new_path.push(&existing);
+            }
+            env::set_var("PATH", new_path);
+            return true;
+        }
+    }
+    false
+}
+
 pub async fn install() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
@@ -75,21 +105,43 @@ pub async fn install() -> Result<()> {
     }
     #[cfg(target_os = "macos")]
     {
-        // Try brew first, then fall back to the install script
-        let brew = quiet_tokio_command("brew")
-            .args(["install", "ollama"])
-            .status()
-            .await;
-        if brew.map(|s| !s.success()).unwrap_or(true) {
-            let status = quiet_tokio_command("sh")
-                .args(["-c", "curl -fsSL https://ollama.com/install.sh | sh"])
+        // GUI processes on macOS inherit launchd's minimal PATH, so a plain
+        // `brew` lookup fails on Apple Silicon (brew lives at
+        // /opt/homebrew/bin, which isn't in that PATH). Probe the canonical
+        // prefixes directly so an installed brew is actually reachable.
+        let brew = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+            .iter()
+            .map(std::path::PathBuf::from)
+            .find(|p| p.is_file())
+            .or_else(|| which::which("brew").ok());
+
+        if let Some(brew_bin) = brew {
+            let status = quiet_tokio_command(&brew_bin)
+                .args(["install", "ollama"])
                 .status()
-                .await
-                .context("failed to run ollama install script")?;
-            if !status.success() {
-                return Err(anyhow!("ollama install failed"));
+                .await;
+            if let Ok(s) = status {
+                if s.success() {
+                    // brew dropped the symlink in /opt/homebrew/bin or
+                    // /usr/local/bin, but that's still not in this process's
+                    // PATH — fold it in so the very next ensure_running() /
+                    // has_model() call resolves `ollama` instead of erroring
+                    // out as "not found".
+                    ensure_macos_default_on_path();
+                    return Ok(());
+                }
             }
         }
+
+        // No usable brew, or brew install failed. The official ollama install
+        // script (https://ollama.com/install.sh) is Linux-only — running it
+        // on Darwin aborts with "This script is intended to run on Linux
+        // only.", so we can't fall back to it. Surface a manual-download
+        // message with the URL; FirstRun.svelte renders URLs as click-to-open
+        // links and offers a Retry button.
+        return Err(anyhow!(
+            "Could not install Ollama automatically. Install Homebrew (https://brew.sh) and click Retry, or download Ollama for macOS from https://ollama.com/download/mac."
+        ));
     }
     #[cfg(target_os = "windows")]
     {
