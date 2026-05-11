@@ -8,6 +8,11 @@ interface TranscribeFrame {
   elapsed_ms: number;
   final: boolean;
   pending_chunks?: number;
+  /** Ephemeral status message ("Loading whisper model…", "Low mic level",
+   *  whisper errors, …). Present only when something noteworthy is
+   *  happening — a normal text frame omits it, which clears the rendered
+   *  status. */
+  status?: string | null;
 }
 
 /** Per-stream pending entry returned by the recovery probe. Mirror of
@@ -58,6 +63,11 @@ export const transcribeUi = $state({
    *  it without having to inspect string length changes that race
    *  against same-text reappends. */
   framePulse: 0,
+  /** Ephemeral subtitle ("Loading whisper model…", "Low mic level…",
+   *  whisper errors). Empty when the session is producing normal text;
+   *  rendered under the transcript so the user can see WHY the
+   *  transcript is idle. */
+  status: "" as string,
   error: "" as string,
 });
 
@@ -84,6 +94,7 @@ function resetState() {
   transcribeUi.elapsed = 0;
   transcribeUi.pendingChunks = 0;
   transcribeUi.liveDelta = "";
+  transcribeUi.status = "";
 }
 
 async function attachListener(streamId: string) {
@@ -98,6 +109,11 @@ async function attachListener(streamId: string) {
       if (typeof f.pending_chunks === "number") {
         transcribeUi.pendingChunks = f.pending_chunks;
       }
+      // A frame with no `status` field clears the subtitle — the Rust
+      // side omits `status` on normal text frames specifically so the
+      // "Loading whisper model…" / "Low mic level" line disappears once
+      // real transcription starts flowing.
+      transcribeUi.status = typeof f.status === "string" ? f.status : "";
       if (f.final) {
         // Worker unwound (cancel or natural end). Tear down our side.
         clearTimers();

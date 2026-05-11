@@ -346,6 +346,16 @@
             {/if}
           </div>
         {/if}
+        {#if isMyRecording && transcribeUi.status}
+          <!--
+            Subtitle that surfaces phases ("Loading whisper model…"), low
+            mic level, whisper errors, etc. Empty when normal text is
+            flowing — the transcript itself is evidence in that case.
+            Rendered at pane bottom so it doesn't push the transcript
+            around while it appears and disappears.
+          -->
+          <p class="transcribe-status">{transcribeUi.status}</p>
+        {/if}
       </div>
     </section>
 
@@ -616,6 +626,17 @@
     max-width: 38ch;
   }
   .placeholder strong { color: #aaa; font-weight: 600; }
+
+  .transcribe-status {
+    margin-top: 0.65rem;
+    padding: 0.4rem 0.6rem;
+    font-size: 0.75rem;
+    color: #8a8aa0;
+    background: #161620;
+    border: 1px solid #25252e;
+    border-radius: 6px;
+    line-height: 1.45;
+  }
 
   .mic-error {
     background: #3a1717;

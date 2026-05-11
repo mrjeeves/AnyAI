@@ -70,6 +70,26 @@ pub struct TranscribeFrame {
     #[serde(rename = "final")]
     pub is_final: bool,
     pub pending_chunks: u32,
+    /// Ephemeral state the UI renders as a subtitle under the transcript:
+    /// "loading whisper model", "listening", "low mic level", whisper
+    /// errors, etc. `None` clears the status. Each chunk produces a
+    /// status — `Some("…")` while something noteworthy is happening, or
+    /// `None` once normal text starts flowing — so the user can see
+    /// WHY the transcript looks idle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+impl TranscribeFrame {
+    fn heartbeat(elapsed_ms: u128, pending_chunks: u32, status: Option<String>) -> Self {
+        Self {
+            delta: String::new(),
+            elapsed_ms,
+            is_final: false,
+            pending_chunks,
+            status,
+        }
+    }
 }
 
 struct Session {
@@ -525,12 +545,14 @@ pub fn start(
                 elapsed_ms: 0,
                 is_final: true,
                 pending_chunks: 0,
+                status: None,
             },
             Err(e) => TranscribeFrame {
                 delta: format!("[transcription error: {e}]"),
                 elapsed_ms: 0,
                 is_final: true,
                 pending_chunks: 0,
+                status: None,
             },
         };
         let _ = window.emit(&event, final_frame);
@@ -609,12 +631,14 @@ pub fn start_drain(stream_id: String, model_name: String, window: WebviewWindow)
                 elapsed_ms: 0,
                 is_final: true,
                 pending_chunks: 0,
+                status: None,
             },
             Err(e) => TranscribeFrame {
                 delta: format!("[transcription error: {e}]"),
                 elapsed_ms: 0,
                 is_final: true,
                 pending_chunks: 0,
+                status: None,
             },
         };
         let _ = window.emit(&event, final_frame);
@@ -636,6 +660,13 @@ fn run_session(
     let model_path_str = model_path
         .to_str()
         .ok_or_else(|| anyhow!("model path is not utf-8"))?;
+    // Whisper model loading is the longest blocking call in this thread on
+    // first run (several seconds for tiny, tens of seconds for the larger
+    // models). Surface it so the user doesn't think Record did nothing.
+    let _ = window.emit(
+        event,
+        TranscribeFrame::heartbeat(0, 0, Some("Loading whisper model…".into())),
+    );
     let ctx = WhisperContext::new_with_params(model_path_str, WhisperContextParameters::default())
         .map_err(|e| anyhow!("whisper init failed: {e}"))?;
 
@@ -773,6 +804,18 @@ fn run_session(
     // ascending seq order so cross-chunk context (set_no_context(false))
     // still primes the next chunk from the previous decode's tokens.
     let mut next_seq: u64 = 1;
+    // The status surfaced to the UI is the LAST noteworthy thing that
+    // happened. A normal text frame clears it, so the user only sees a
+    // status line when something is actually idle (loading, waiting for
+    // first chunk, persistent silence, whisper errors, …).
+    let _ = window.emit(
+        event,
+        TranscribeFrame::heartbeat(
+            started.elapsed().as_millis(),
+            0,
+            Some("Listening… first chunk in ~5 s".into()),
+        ),
+    );
 
     loop {
         // Eagerly bail when cancelled, BEFORE pulling the next chunk into
@@ -805,13 +848,38 @@ fn run_session(
                 eprintln!("transcribe-buffer read failed for {next_path:?}: {e}");
                 let _ = std::fs::remove_file(&next_path);
                 next_seq += 1;
+                let _ = window.emit(
+                    event,
+                    TranscribeFrame::heartbeat(
+                        started.elapsed().as_millis(),
+                        count_pending_chunks(&buffer_dir),
+                        Some(format!("Chunk read failed: {e}")),
+                    ),
+                );
                 continue;
             }
         };
 
-        if chunk_rms(&samples) < SILENCE_RMS_THRESHOLD {
+        let rms = chunk_rms(&samples);
+        if rms < SILENCE_RMS_THRESHOLD {
             let _ = std::fs::remove_file(&next_path);
             next_seq += 1;
+            // Surface silence so a user with a muted / very quiet mic can
+            // tell that audio IS being captured but isn't loud enough to
+            // pass the silence gate — otherwise this looks identical to
+            // "whisper produced nothing." Heartbeat carries the updated
+            // pending_chunks count so the "X s behind realtime" indicator
+            // keeps moving even when no text is emitted.
+            let _ = window.emit(
+                event,
+                TranscribeFrame::heartbeat(
+                    started.elapsed().as_millis(),
+                    count_pending_chunks(&buffer_dir),
+                    Some(format!(
+                        "Low mic level (RMS {rms:.4} < {SILENCE_RMS_THRESHOLD})"
+                    )),
+                ),
+            );
             continue;
         }
 
@@ -827,6 +895,14 @@ fn run_session(
             eprintln!("whisper full failed: {e}");
             let _ = std::fs::remove_file(&next_path);
             next_seq += 1;
+            let _ = window.emit(
+                event,
+                TranscribeFrame::heartbeat(
+                    started.elapsed().as_millis(),
+                    count_pending_chunks(&buffer_dir),
+                    Some(format!("Whisper inference error: {e}")),
+                ),
+            );
             continue;
         }
         let n = state.full_n_segments().unwrap_or(0);
@@ -840,15 +916,28 @@ fn run_session(
         next_seq += 1;
 
         let trimmed = text.trim();
-        if !trimmed.is_empty() {
-            let frame = TranscribeFrame {
+        let frame = if !trimmed.is_empty() {
+            TranscribeFrame {
                 delta: format!("{trimmed} "),
                 elapsed_ms: started.elapsed().as_millis(),
                 is_final: false,
                 pending_chunks: count_pending_chunks(&buffer_dir),
-            };
-            let _ = window.emit(event, frame);
-        }
+                // Producing text clears the status — the transcript is
+                // its own evidence that things are working.
+                status: None,
+            }
+        } else {
+            // Whisper accepted the audio but emitted nothing (or only
+            // whitespace). Heartbeat so the UI still updates the
+            // "behind realtime" counter, and surface a status so the
+            // user doesn't think the inference stalled.
+            TranscribeFrame::heartbeat(
+                started.elapsed().as_millis(),
+                count_pending_chunks(&buffer_dir),
+                Some("Whisper produced no text for this chunk".into()),
+            )
+        };
+        let _ = window.emit(event, frame);
     }
 
     drop(stream);
@@ -873,6 +962,10 @@ fn run_drain(
     let model_path_str = model_path
         .to_str()
         .ok_or_else(|| anyhow!("model path is not utf-8"))?;
+    let _ = window.emit(
+        event,
+        TranscribeFrame::heartbeat(0, 0, Some("Loading whisper model…".into())),
+    );
     let ctx = WhisperContext::new_with_params(model_path_str, WhisperContextParameters::default())
         .map_err(|e| anyhow!("whisper init failed: {e}"))?;
     let buffer_dir = chunk_buffer_dir(stream_id)?;
@@ -886,6 +979,15 @@ fn run_drain(
     // the crash). Walking the dir once is fine — there can only be a
     // few thousand entries even on the worst backlog.
     let mut next_seq: u64 = lowest_pending_seq(&buffer_dir).unwrap_or(1);
+    let initial_pending = count_pending_chunks(&buffer_dir);
+    let _ = window.emit(
+        event,
+        TranscribeFrame::heartbeat(
+            started.elapsed().as_millis(),
+            initial_pending,
+            Some(format!("Draining {initial_pending} recovered chunk(s)…")),
+        ),
+    );
 
     loop {
         // Same eager-cancel as run_session: bail before the next whisper.full()
@@ -921,13 +1023,30 @@ fn run_drain(
                 eprintln!("transcribe-buffer read failed for {next_path:?}: {e}");
                 let _ = std::fs::remove_file(&next_path);
                 next_seq += 1;
+                let _ = window.emit(
+                    event,
+                    TranscribeFrame::heartbeat(
+                        started.elapsed().as_millis(),
+                        count_pending_chunks(&buffer_dir),
+                        Some(format!("Chunk read failed: {e}")),
+                    ),
+                );
                 continue;
             }
         };
 
-        if chunk_rms(&samples) < SILENCE_RMS_THRESHOLD {
+        let rms = chunk_rms(&samples);
+        if rms < SILENCE_RMS_THRESHOLD {
             let _ = std::fs::remove_file(&next_path);
             next_seq += 1;
+            let _ = window.emit(
+                event,
+                TranscribeFrame::heartbeat(
+                    started.elapsed().as_millis(),
+                    count_pending_chunks(&buffer_dir),
+                    Some(format!("Skipped silent chunk (RMS {rms:.4})")),
+                ),
+            );
             continue;
         }
 
@@ -943,6 +1062,14 @@ fn run_drain(
             eprintln!("whisper full failed: {e}");
             let _ = std::fs::remove_file(&next_path);
             next_seq += 1;
+            let _ = window.emit(
+                event,
+                TranscribeFrame::heartbeat(
+                    started.elapsed().as_millis(),
+                    count_pending_chunks(&buffer_dir),
+                    Some(format!("Whisper inference error: {e}")),
+                ),
+            );
             continue;
         }
         let n = state.full_n_segments().unwrap_or(0);
@@ -956,15 +1083,22 @@ fn run_drain(
         next_seq += 1;
 
         let trimmed = text.trim();
-        if !trimmed.is_empty() {
-            let frame = TranscribeFrame {
+        let frame = if !trimmed.is_empty() {
+            TranscribeFrame {
                 delta: format!("{trimmed} "),
                 elapsed_ms: started.elapsed().as_millis(),
                 is_final: false,
                 pending_chunks: count_pending_chunks(&buffer_dir),
-            };
-            let _ = window.emit(event, frame);
-        }
+                status: None,
+            }
+        } else {
+            TranscribeFrame::heartbeat(
+                started.elapsed().as_millis(),
+                count_pending_chunks(&buffer_dir),
+                Some("Whisper produced no text for this chunk".into()),
+            )
+        };
+        let _ = window.emit(event, frame);
     }
 
     let _ = std::fs::remove_dir_all(&buffer_dir);
