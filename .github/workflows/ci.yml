@@ -30,16 +30,15 @@ jobs:
             librsvg2-dev \
             libssl-dev \
             libasound2-dev \
-            cmake \
-            libvulkan-dev \
-            glslang-tools
+            cmake
 
-      # Whisper Vulkan backend on Windows needs the LunarG SDK at build
-      # time — the build.rs hard-panics if VULKAN_SDK isn't set. The action
-      # below sets that env var and adds the SDK's Bin to PATH for the
-      # rest of the job.
-      - name: Install Vulkan SDK (Windows)
-        if: runner.os == 'Windows'
+      # Whisper Vulkan backend needs the LunarG SDK at build time. Linux's
+      # apt-provided libvulkan-dev is missing glslc, which whisper.cpp's
+      # FindVulkan.cmake demands; on Windows whisper-rs-sys panics outright
+      # if VULKAN_SDK isn't set. The action installs the full SDK on
+      # whichever OS the job is on and exports VULKAN_SDK for the build.
+      - name: Install Vulkan SDK
+        if: runner.os != 'macOS'
         uses: humbletim/install-vulkan-sdk@v1.2
         with:
           version: 1.3.290.0
