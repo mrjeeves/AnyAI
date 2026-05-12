@@ -321,6 +321,22 @@ fn transcribe_drain_start(
 }
 
 #[tauri::command]
+fn transcribe_upload_start(
+    stream_id: String,
+    model: String,
+    file_path: String,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
+    transcribe::start_upload(
+        stream_id,
+        model,
+        std::path::PathBuf::from(file_path),
+        window,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn whisper_models_list() -> Result<Vec<transcribe::WhisperModelInfo>, String> {
     transcribe::list_models().map_err(|e| e.to_string())
 }
@@ -484,6 +500,7 @@ fn main() {
             transcribe_buffer_size_bytes,
             transcribe_pending_streams,
             transcribe_drain_start,
+            transcribe_upload_start,
             whisper_models_list,
             whisper_model_pull,
             whisper_model_remove,

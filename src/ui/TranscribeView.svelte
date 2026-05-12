@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import ModeBar from "./ModeBar.svelte";
   import StatusBar from "./StatusBar.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
@@ -8,6 +9,7 @@
   import {
     transcribeUi,
     startRecording,
+    startUpload,
     stopRecording,
     clearLiveDelta,
     clearAfterPersist,
@@ -259,6 +261,57 @@
     persist().catch((e) => console.warn("save after stop failed:", e));
   }
 
+  /** Pick an audio file and transcribe it. Goes through the same conflict
+   *  check as Record so we don't start an upload over a live recording. */
+  async function pickAndUpload() {
+    transcribeError = "";
+    let picked: string | string[] | null;
+    try {
+      picked = await openDialog({
+        multiple: false,
+        directory: false,
+        title: "Pick an audio file to transcribe",
+        filters: [
+          {
+            name: "Audio",
+            extensions: ["wav", "mp3", "m4a", "flac", "ogg", "oga", "aac", "mp4"],
+          },
+        ],
+      });
+    } catch (e) {
+      transcribeError = `Open file dialog failed: ${e}`;
+      return;
+    }
+    if (!picked || Array.isArray(picked)) return;
+    const filePath = picked;
+    onRequestStartRecording(() => doUpload(filePath));
+  }
+
+  async function doUpload(filePath: string): Promise<void> {
+    if (transcribeUi.active) return;
+    const model = activeModel.startsWith("whisper:")
+      ? activeModel.slice("whisper:".length)
+      : activeModel || "tiny.en";
+    if (!(await modelInstalled(model))) {
+      transcribeError =
+        `The whisper '${model}' model isn't downloaded yet. Switch family ` +
+        `or relaunch to trigger the auto-pull, or check Settings → Models.`;
+      return;
+    }
+    // Persist a conversation so deltas have somewhere to land — same
+    // snapshot-before-start pattern as live recording.
+    const conv = await persist({ force: true });
+    try {
+      await startUpload({
+        model,
+        filePath,
+        conversationId: conv?.id ?? null,
+      });
+    } catch (e) {
+      transcribeError = String(e);
+    }
+  }
+
   async function handleModeChange(mode: Mode) {
     // No longer auto-stop on mode switch — that's the whole point of the
     // global store. The recording keeps capturing in the background and
@@ -438,8 +491,15 @@
   {/if}
 
   <div class="input-row">
-    <button class="new-btn" onclick={onNewSession} title="New session">
-      <span class="plus" aria-hidden="true">+</span> New
+    <button
+      class="new-btn"
+      onclick={pickAndUpload}
+      disabled={transcribeUi.active}
+      title={transcribeUi.active
+        ? "Stop the current session before uploading another file"
+        : "Transcribe an audio file"}
+    >
+      <span class="plus" aria-hidden="true">+</span> Upload
     </button>
     <label class="name-field">
       <span class="name-label">Session Name:</span>

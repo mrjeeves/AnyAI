@@ -38,6 +38,10 @@ export const transcribeUi = $state({
    *  hide pause/resume controls and the "MM:SS" capture timer that
    *  would lie about how long this session has been "running". */
   drainOnly: false,
+  /** Upload-only sessions are file-driven, no mic. Same hiding rules
+   *  as drainOnly but the StatusBar wording is "Transcribing…" instead
+   *  of "Recovering…". The two flags are mutually exclusive. */
+  uploadOnly: false,
   streamId: null as string | null,
   /** Whisper model name without the "whisper:" prefix. We need it to
    *  start a drain session and to label the pending state in the bar. */
@@ -87,6 +91,7 @@ function resetState() {
   transcribeUi.active = false;
   transcribeUi.paused = false;
   transcribeUi.drainOnly = false;
+  transcribeUi.uploadOnly = false;
   transcribeUi.streamId = null;
   transcribeUi.model = "";
   transcribeUi.conversationId = null;
@@ -157,6 +162,7 @@ export async function startRecording(args: StartArgs): Promise<void> {
   transcribeUi.active = true;
   transcribeUi.paused = false;
   transcribeUi.drainOnly = false;
+  transcribeUi.uploadOnly = false;
   transcribeUi.streamId = streamId;
   transcribeUi.model = args.model;
   transcribeUi.conversationId = args.conversationId;
@@ -168,6 +174,43 @@ export async function startRecording(args: StartArgs): Promise<void> {
     if (transcribeUi.paused) return;
     transcribeUi.elapsed = Math.floor((Date.now() - transcribeUi.startedAt) / 1000);
   }, 250);
+}
+
+/** Spin up an inference-only session against an audio file the user
+ *  picked. The mic is never touched; the Rust side decodes the file with
+ *  symphonia and runs whisper on each 5-second chunk. */
+export async function startUpload(args: {
+  model: string;
+  filePath: string;
+  conversationId: string | null;
+}): Promise<void> {
+  if (transcribeUi.active) return;
+  transcribeUi.error = "";
+  const streamId = crypto.randomUUID();
+  await attachListener(streamId);
+  try {
+    await invoke("transcribe_upload_start", {
+      streamId,
+      model: args.model,
+      filePath: args.filePath,
+    });
+  } catch (e) {
+    unlistenStream?.();
+    unlistenStream = null;
+    transcribeUi.error = String(e);
+    throw e;
+  }
+  transcribeUi.active = true;
+  transcribeUi.paused = false;
+  transcribeUi.drainOnly = false;
+  transcribeUi.uploadOnly = true;
+  transcribeUi.streamId = streamId;
+  transcribeUi.model = args.model;
+  transcribeUi.conversationId = args.conversationId;
+  transcribeUi.startedAt = Date.now();
+  transcribeUi.elapsed = 0;
+  transcribeUi.pendingChunks = 0;
+  transcribeUi.liveDelta = "";
 }
 
 export async function pauseRecording(): Promise<void> {
@@ -234,6 +277,7 @@ export async function startDrain(args: {
   transcribeUi.active = true;
   transcribeUi.paused = false;
   transcribeUi.drainOnly = true;
+  transcribeUi.uploadOnly = false;
   transcribeUi.streamId = args.streamId;
   transcribeUi.model = args.model;
   transcribeUi.conversationId = args.conversationId;

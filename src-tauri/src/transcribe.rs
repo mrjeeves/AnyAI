@@ -24,7 +24,7 @@ use serde::Serialize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use tauri::{Emitter, WebviewWindow};
@@ -59,6 +59,24 @@ const SILENCE_RMS_THRESHOLD: f32 = 0.005;
 /// boundaries that are already 5 s apart. The model `ctx` is preserved
 /// across the recycle, so we don't re-pay the model load cost.
 const WHISPER_STATE_RESET_CHUNKS: u64 = 24;
+
+/// Build a cpal `err_fn` closure that latches the first error into the
+/// shared slot. Used per-branch in the sample-format match so each cpal
+/// `build_input_stream` call gets its own owned closure (the closures
+/// aren't `Copy` because they hold an `Arc<Mutex<…>>`). Run on the audio
+/// thread, so the body has to stay short.
+fn stream_err_fn(
+    slot: Arc<Mutex<Option<String>>>,
+) -> impl FnMut(cpal::StreamError) + Send + 'static {
+    move |e| {
+        eprintln!("audio stream error: {e}");
+        if let Ok(mut s) = slot.lock() {
+            if s.is_none() {
+                *s = Some(format!("{e}"));
+            }
+        }
+    }
+}
 
 fn chunk_rms(samples: &[f32]) -> f32 {
     if samples.is_empty() {
@@ -657,6 +675,66 @@ pub fn start_drain(stream_id: String, model_name: String, window: WebviewWindow)
     Ok(())
 }
 
+/// Transcribe an existing audio file. Decodes via symphonia, downmixes
+/// to mono + resamples to 16 kHz, runs whisper on 5-second chunks the
+/// same way a live session does. Lifecycle mirrors `start_drain`: no mic
+/// is touched, the user gets one final frame on completion.
+pub fn start_upload(
+    stream_id: String,
+    model_name: String,
+    file_path: PathBuf,
+    window: WebviewWindow,
+) -> Result<()> {
+    if sessions().contains_key(&stream_id) {
+        return Err(anyhow!("transcription {stream_id} is already running"));
+    }
+    let model_path = model_path(&model_name)?;
+    if !model_path.exists() {
+        return Err(anyhow!(
+            "whisper model '{model_name}' isn't installed yet — install it from Settings → Models."
+        ));
+    }
+    if !file_path.exists() {
+        return Err(anyhow!("audio file not found: {}", file_path.display()));
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    sessions().insert(
+        stream_id.clone(),
+        Session {
+            cancel: cancel.clone(),
+            // Uploads have no mic to gate. Pause is a no-op for them; the
+            // field stays present so DashMap entries are uniformly shaped.
+            paused: Arc::new(AtomicBool::new(false)),
+        },
+    );
+
+    let stream_id_for_thread = stream_id.clone();
+    let cancel_for_thread = cancel.clone();
+    thread::spawn(move || {
+        let event = format!("myownllm://transcribe-stream/{stream_id_for_thread}");
+        let res = run_upload(&event, &model_path, &file_path, cancel_for_thread, &window);
+        sessions().remove(&stream_id_for_thread);
+        let final_frame = match res {
+            Ok(()) => TranscribeFrame {
+                delta: String::new(),
+                elapsed_ms: 0,
+                is_final: true,
+                pending_chunks: 0,
+                status: None,
+            },
+            Err(e) => TranscribeFrame {
+                delta: format!("[transcription error: {e}]"),
+                elapsed_ms: 0,
+                is_final: true,
+                pending_chunks: 0,
+                status: None,
+            },
+        };
+        let _ = window.emit(&event, final_frame);
+    });
+    Ok(())
+}
+
 fn run_session(
     event: &str,
     stream_id: &str,
@@ -722,7 +800,14 @@ fn run_session(
     // practice.
     let (tx, rx) = bounded::<Vec<f32>>(128);
 
-    let err_fn = |e| eprintln!("audio stream error: {e}");
+    // cpal err_fn fires on the audio thread when the backend kicks the
+    // stream (device disappeared, driver hiccuped, WASAPI session reset,
+    // …). Previously we just eprintln!'d it and the inference loop kept
+    // spinning forever waiting for chunks that would never arrive — which
+    // is the "sometimes recording works, sometimes it just dies silently"
+    // symptom on Windows. Latch the first error so the inference loop can
+    // pick it up and surface it through the normal error path.
+    let stream_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let cancel_audio = cancel.clone();
     let stream = match format {
         cpal::SampleFormat::F32 => {
@@ -739,7 +824,7 @@ fn run_session(
                         let _ = tx.try_send(downmix_f32(data, channels));
                     }
                 },
-                err_fn,
+                stream_err_fn(stream_err.clone()),
                 None,
             )?
         }
@@ -759,7 +844,7 @@ fn run_session(
                         let _ = tx.try_send(downmix_f32(&f, channels));
                     }
                 },
-                err_fn,
+                stream_err_fn(stream_err.clone()),
                 None,
             )?
         }
@@ -781,7 +866,7 @@ fn run_session(
                         let _ = tx.try_send(downmix_f32(&f, channels));
                     }
                 },
-                err_fn,
+                stream_err_fn(stream_err.clone()),
                 None,
             )?
         }
@@ -848,6 +933,14 @@ fn run_session(
         // safe; the cancel path tears the stream down cleanly.
         if cancel.load(Ordering::SeqCst) {
             break;
+        }
+        // If cpal's err_fn latched a stream error, the audio side is dead
+        // and we'll never see another chunk. Bail with the message so the
+        // wrapper turns it into a visible "[transcription error: …]" frame
+        // instead of leaving the user staring at an "Active" indicator
+        // that's secretly orphaned.
+        if let Some(err) = stream_err.lock().ok().and_then(|mut s| s.take()) {
+            return Err(anyhow!("audio capture failed: {err}"));
         }
         let next_path = buffer_dir.join(format!("{next_seq:010}.f32"));
         if !next_path.exists() {
@@ -1166,6 +1259,276 @@ fn run_drain(
     }
 
     let _ = std::fs::remove_dir_all(&buffer_dir);
+    Ok(())
+}
+
+/// File-decode counterpart of `run_session`. Reads an audio file via
+/// symphonia, downmixes to mono + resamples to 16 kHz on the fly,
+/// accumulates 5-second chunks, and runs whisper on each in the same
+/// thread. No disk buffer is involved — a multi-hour upload streams
+/// through RAM instead of spilling a gigabyte of f32 chunks under
+/// `~/.myownllm/transcribe-buffer/`.
+fn run_upload(
+    event: &str,
+    model_path: &Path,
+    file_path: &Path,
+    cancel: Arc<AtomicBool>,
+    window: &WebviewWindow,
+) -> Result<()> {
+    use std::fs::File;
+    use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
+    use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+    use symphonia::core::errors::Error as SymError;
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+
+    let started = std::time::Instant::now();
+    let model_path_str = model_path
+        .to_str()
+        .ok_or_else(|| anyhow!("model path is not utf-8"))?;
+    let _ = window.emit(
+        event,
+        TranscribeFrame::heartbeat(0, 0, Some("Loading whisper model…".into())),
+    );
+    let ctx = WhisperContext::new_with_params(model_path_str, WhisperContextParameters::default())
+        .map_err(|e| anyhow!("whisper init failed: {e}"))?;
+    let mut state = ctx
+        .create_state()
+        .map_err(|e| anyhow!("state create: {e}"))?;
+
+    let file = File::open(file_path).map_err(|e| anyhow!("open audio file: {e}"))?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = file_path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .map_err(|e| anyhow!("probe audio: {e}"))?;
+    let mut format = probed.format;
+
+    let track = format
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+        .ok_or_else(|| anyhow!("no decodable audio track in file"))?;
+    let track_id = track.id;
+    let src_rate = track
+        .codec_params
+        .sample_rate
+        .ok_or_else(|| anyhow!("audio file has no sample rate"))?;
+    let src_channels = track
+        .codec_params
+        .channels
+        .map(|c| c.count())
+        .unwrap_or(1)
+        .max(1);
+    let total_frames = track.codec_params.n_frames;
+
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .map_err(|e| anyhow!("decoder: {e}"))?;
+
+    let chunk_at_src_rate = (src_rate as f32 * CHUNK_SECONDS) as usize;
+    let tail_min_src = (src_rate as f32 * TAIL_FLUSH_MIN_SECONDS) as usize;
+    let mut buf: Vec<f32> = Vec::with_capacity(chunk_at_src_rate * 2);
+    let mut frames_decoded: u64 = 0;
+    let mut chunks_since_reset: u64 = 0;
+    // Reused across packets so we don't reallocate per packet. Symphonia
+    // requires the spec to match; on the rare cross-track spec change we
+    // toss it and rebuild on the next packet.
+    let mut sample_buf: Option<SampleBuffer<f32>> = None;
+
+    let progress_status = |frames_decoded: u64| -> Option<String> {
+        match total_frames {
+            Some(total) if total > 0 => {
+                let pct = (frames_decoded as f64 / total as f64 * 100.0).clamp(0.0, 100.0);
+                Some(format!("Transcribing… {pct:.0}%"))
+            }
+            _ => Some("Transcribing…".into()),
+        }
+    };
+
+    let _ = window.emit(
+        event,
+        TranscribeFrame::heartbeat(0, 0, Some("Decoding audio…".into())),
+    );
+
+    'outer: loop {
+        if cancel.load(Ordering::SeqCst) {
+            break;
+        }
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(SymError::ResetRequired) => break,
+            Err(e) => return Err(anyhow!("read packet: {e}")),
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+        let decoded: AudioBufferRef = match decoder.decode(&packet) {
+            Ok(d) => d,
+            // Skip recoverable decode errors (corrupt frame in a mostly-good
+            // file). Fatal codec errors fall through.
+            Err(SymError::DecodeError(_)) => continue,
+            Err(e) => return Err(anyhow!("decode: {e}")),
+        };
+        let spec = *decoded.spec();
+        let frames = decoded.frames();
+        if frames == 0 {
+            continue;
+        }
+        let need = frames * src_channels;
+        let sb = match &mut sample_buf {
+            Some(sb) if sb.capacity() >= need => sb,
+            _ => {
+                sample_buf = Some(SampleBuffer::<f32>::new(frames as u64, spec));
+                sample_buf.as_mut().unwrap()
+            }
+        };
+        sb.copy_interleaved_ref(decoded);
+        let samples = sb.samples();
+        if src_channels == 1 {
+            buf.extend_from_slice(samples);
+        } else {
+            for f in 0..frames {
+                let base = f * src_channels;
+                let mut sum = 0.0f32;
+                for c in 0..src_channels {
+                    sum += samples[base + c];
+                }
+                buf.push(sum / src_channels as f32);
+            }
+        }
+        frames_decoded += frames as u64;
+
+        while buf.len() >= chunk_at_src_rate {
+            if cancel.load(Ordering::SeqCst) {
+                break 'outer;
+            }
+            let chunk: Vec<f32> = buf.drain(..chunk_at_src_rate).collect();
+            let resampled = resample_linear(&chunk, src_rate, TARGET_SR);
+            let rms = chunk_rms(&resampled);
+            if rms < SILENCE_RMS_THRESHOLD {
+                let _ = window.emit(
+                    event,
+                    TranscribeFrame::heartbeat(
+                        started.elapsed().as_millis(),
+                        0,
+                        progress_status(frames_decoded),
+                    ),
+                );
+                continue;
+            }
+            let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+            params.set_translate(false);
+            params.set_print_progress(false);
+            params.set_print_realtime(false);
+            params.set_print_special(false);
+            params.set_print_timestamps(false);
+            params.set_no_context(false);
+            params.set_single_segment(true);
+            let abort_cancel = cancel.clone();
+            params.set_abort_callback_safe(move || abort_cancel.load(Ordering::Relaxed));
+            if let Err(e) = state.full(params, &resampled) {
+                if cancel.load(Ordering::SeqCst) {
+                    break 'outer;
+                }
+                eprintln!("whisper full failed: {e}");
+                let _ = window.emit(
+                    event,
+                    TranscribeFrame::heartbeat(
+                        started.elapsed().as_millis(),
+                        0,
+                        Some(format!("Whisper inference error: {e}")),
+                    ),
+                );
+                continue;
+            }
+            let n = state.full_n_segments().unwrap_or(0);
+            let mut text = String::new();
+            for i in 0..n {
+                if let Ok(seg) = state.full_get_segment_text(i) {
+                    text.push_str(&seg);
+                }
+            }
+            let trimmed = text.trim();
+            let frame = if !trimmed.is_empty() {
+                TranscribeFrame {
+                    delta: format!("{trimmed} "),
+                    elapsed_ms: started.elapsed().as_millis(),
+                    is_final: false,
+                    pending_chunks: 0,
+                    status: progress_status(frames_decoded),
+                }
+            } else {
+                TranscribeFrame::heartbeat(
+                    started.elapsed().as_millis(),
+                    0,
+                    progress_status(frames_decoded),
+                )
+            };
+            let _ = window.emit(event, frame);
+
+            chunks_since_reset += 1;
+            if chunks_since_reset >= WHISPER_STATE_RESET_CHUNKS {
+                chunks_since_reset = 0;
+                state = ctx
+                    .create_state()
+                    .map_err(|e| anyhow!("state recycle: {e}"))?;
+            }
+        }
+    }
+
+    // Tail: transcribe the final partial chunk if it's long enough to be
+    // worth running whisper on. Anything shorter is whisper-grade noise.
+    if !cancel.load(Ordering::SeqCst) && buf.len() >= tail_min_src {
+        let resampled = resample_linear(&buf, src_rate, TARGET_SR);
+        let rms = chunk_rms(&resampled);
+        if rms >= SILENCE_RMS_THRESHOLD {
+            let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+            params.set_translate(false);
+            params.set_print_progress(false);
+            params.set_print_realtime(false);
+            params.set_print_special(false);
+            params.set_print_timestamps(false);
+            params.set_no_context(false);
+            params.set_single_segment(true);
+            let abort_cancel = cancel.clone();
+            params.set_abort_callback_safe(move || abort_cancel.load(Ordering::Relaxed));
+            if state.full(params, &resampled).is_ok() {
+                let n = state.full_n_segments().unwrap_or(0);
+                let mut text = String::new();
+                for i in 0..n {
+                    if let Ok(seg) = state.full_get_segment_text(i) {
+                        text.push_str(&seg);
+                    }
+                }
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    let _ = window.emit(
+                        event,
+                        TranscribeFrame {
+                            delta: format!("{trimmed} "),
+                            elapsed_ms: started.elapsed().as_millis(),
+                            is_final: false,
+                            pending_chunks: 0,
+                            status: None,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 

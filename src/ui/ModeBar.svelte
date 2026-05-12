@@ -89,9 +89,11 @@
     transcribeUi.active
       ? transcribeUi.paused
         ? "paused"
-        : transcribeUi.drainOnly
-          ? "drain"
-          : "running"
+        : transcribeUi.uploadOnly
+          ? "upload"
+          : transcribeUi.drainOnly
+            ? "drain"
+            : "running"
       : "idle",
   );
 
@@ -116,7 +118,7 @@
         class:active={m.id === current}
         class:running={slotStatus === "running"}
         class:paused={slotStatus === "paused"}
-        class:drain={slotStatus === "drain"}
+        class:drain={slotStatus === "drain" || slotStatus === "upload"}
         class:unsupported={!ok}
         class:locked={lockedOut}
       >
@@ -140,6 +142,8 @@
                 <span class="status-text">{textLabel}</span>
               {:else if slotStatus === "drain"}
                 <span class="status-text">Recovering…</span>
+              {:else if slotStatus === "upload"}
+                <span class="status-text">Transcribing…</span>
               {:else}
                 <span class="status-text">{slotStatus === "paused" ? "Paused" : "Rec"}</span>
                 <span class="status-time">{fmtElapsed(transcribeUi.elapsed)}</span>
@@ -179,7 +183,7 @@
                 </svg>
               </button>
             {:else}
-              {#if slotStatus !== "drain"}
+              {#if slotStatus !== "drain" && slotStatus !== "upload"}
                 {#if slotStatus === "paused"}
                   <button class="ctrl" onclick={() => resumeRecording()} title="Resume mic">
                     <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
