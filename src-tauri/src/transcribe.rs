@@ -59,6 +59,13 @@ const SILENCE_RMS_THRESHOLD: f32 = 0.005;
 /// boundaries that are already 5 s apart. The model `ctx` is preserved
 /// across the recycle, so we don't re-pay the model load cost.
 const WHISPER_STATE_RESET_CHUNKS: u64 = 24;
+/// Give up after this many `state.full()` failures in a row. On Windows the
+/// whisper.cpp backend occasionally returns `GenericError(-6)` from a KV-cache
+/// / decode hiccup mid-session; we recreate the state and retry, but if every
+/// retry still fails the underlying problem isn't transient (model file
+/// corruption, OOM, driver-level wedge) and silently chewing through the
+/// backlog deleting chunks is worse than surfacing a clear error to the user.
+const WHISPER_CONSECUTIVE_ERROR_LIMIT: u32 = 3;
 
 /// Build a cpal `err_fn` closure that latches the first error into the
 /// shared slot. Used per-branch in the sample-format match so each cpal
@@ -902,6 +909,7 @@ fn run_session(
     let mut next_seq: u64 = 1;
     // Sliding-window counter for state recycling — see WHISPER_STATE_RESET_CHUNKS.
     let mut chunks_since_reset: u64 = 0;
+    let mut consecutive_errors: u32 = 0;
     // The status surfaced to the UI is the LAST noteworthy thing that
     // happened. A normal text frame clears it, so the user only sees a
     // status line when something is actually idle (loading, waiting for
@@ -1014,6 +1022,12 @@ fn run_session(
             eprintln!("whisper full failed: {e}");
             let _ = std::fs::remove_file(&next_path);
             next_seq += 1;
+            consecutive_errors += 1;
+            if consecutive_errors >= WHISPER_CONSECUTIVE_ERROR_LIMIT {
+                return Err(anyhow!(
+                    "whisper inference failed {consecutive_errors} chunks in a row: {e}"
+                ));
+            }
             let _ = window.emit(
                 event,
                 TranscribeFrame::heartbeat(
@@ -1022,8 +1036,20 @@ fn run_session(
                     Some(format!("Whisper inference error: {e}")),
                 ),
             );
+            // whisper.cpp can leave the state partially mutated when
+            // `whisper_full_with_state` bails (e.g. the `GenericError(-6)` we
+            // see on Windows from a KV-cache / decode hiccup). Without this
+            // recreate, every subsequent chunk inherits the corrupted state
+            // and fails identically until the buffer drains and the session
+            // looks dead. `ctx` is preserved so this is the same cheap
+            // allocator churn as the WHISPER_STATE_RESET_CHUNKS recycle.
+            state = ctx
+                .create_state()
+                .map_err(|err| anyhow!("state recreate after error: {err}"))?;
+            chunks_since_reset = 0;
             continue;
         }
+        consecutive_errors = 0;
         let n = state.full_n_segments().unwrap_or(0);
         let mut text = String::new();
         for i in 0..n {
@@ -1114,6 +1140,7 @@ fn run_drain(
     let mut next_seq: u64 = lowest_pending_seq(&buffer_dir).unwrap_or(1);
     // Sliding-window counter for state recycling — see WHISPER_STATE_RESET_CHUNKS.
     let mut chunks_since_reset: u64 = 0;
+    let mut consecutive_errors: u32 = 0;
     let initial_pending = count_pending_chunks(&buffer_dir);
     let _ = window.emit(
         event,
@@ -1207,6 +1234,12 @@ fn run_drain(
             eprintln!("whisper full failed: {e}");
             let _ = std::fs::remove_file(&next_path);
             next_seq += 1;
+            consecutive_errors += 1;
+            if consecutive_errors >= WHISPER_CONSECUTIVE_ERROR_LIMIT {
+                return Err(anyhow!(
+                    "whisper inference failed {consecutive_errors} chunks in a row: {e}"
+                ));
+            }
             let _ = window.emit(
                 event,
                 TranscribeFrame::heartbeat(
@@ -1215,8 +1248,15 @@ fn run_drain(
                     Some(format!("Whisper inference error: {e}")),
                 ),
             );
+            // See run_session — recreate the state so a corrupted KV-cache
+            // doesn't cascade into every subsequent chunk failing.
+            state = ctx
+                .create_state()
+                .map_err(|err| anyhow!("state recreate after error: {err}"))?;
+            chunks_since_reset = 0;
             continue;
         }
+        consecutive_errors = 0;
         let n = state.full_n_segments().unwrap_or(0);
         let mut text = String::new();
         for i in 0..n {
@@ -1341,6 +1381,7 @@ fn run_upload(
     let mut buf: Vec<f32> = Vec::with_capacity(chunk_at_src_rate * 2);
     let mut frames_decoded: u64 = 0;
     let mut chunks_since_reset: u64 = 0;
+    let mut consecutive_errors: u32 = 0;
     // Reused across packets so we don't reallocate per packet. Symphonia
     // requires the spec to match; on the rare cross-track spec change we
     // toss it and rebuild on the next packet.
@@ -1443,6 +1484,12 @@ fn run_upload(
                     break 'outer;
                 }
                 eprintln!("whisper full failed: {e}");
+                consecutive_errors += 1;
+                if consecutive_errors >= WHISPER_CONSECUTIVE_ERROR_LIMIT {
+                    return Err(anyhow!(
+                        "whisper inference failed {consecutive_errors} chunks in a row: {e}"
+                    ));
+                }
                 let _ = window.emit(
                     event,
                     TranscribeFrame::heartbeat(
@@ -1451,8 +1498,15 @@ fn run_upload(
                         Some(format!("Whisper inference error: {e}")),
                     ),
                 );
+                // See run_session — recreate the state so a corrupted KV-cache
+                // doesn't cascade into every subsequent chunk failing.
+                state = ctx
+                    .create_state()
+                    .map_err(|err| anyhow!("state recreate after error: {err}"))?;
+                chunks_since_reset = 0;
                 continue;
             }
+            consecutive_errors = 0;
             let n = state.full_n_segments().unwrap_or(0);
             let mut text = String::new();
             for i in 0..n {
