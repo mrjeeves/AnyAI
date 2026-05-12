@@ -135,7 +135,7 @@ These resolve at request-time to whatever tag your manifest currently selects fo
 | `myownllm-text`        | `qwen2.5:14b`         |
 | `myownllm-vision`      | `qwen2.5vl:7b`        |
 | `myownllm-code`        | `qwen2.5-coder:14b`   |
-| `myownllm-transcribe`  | `whisper:large`       |
+| `myownllm-transcribe`  | `parakeet:parakeet-tdt-0.6b-v3-int8` |
 
 Every response includes `X-MyOwnLLM-Resolved-Model` so a client (or a log) can see what tag actually served the request.
 
@@ -401,7 +401,7 @@ myownllm                          # open GUI (no args = launch window)
 myownllm run                      # chat in the terminal
 myownllm run --mode vision        # use a vision-capable model
 myownllm run --mode code          # use a code-optimized model
-myownllm run --mode transcribe    # mic → text via Whisper
+myownllm run --mode transcribe    # mic → text via Moonshine / Parakeet (auto-picked by tier)
 myownllm run --model qwen2.5:7b   # force a specific model
 myownllm run --profile https://example.com/manifest.json   # one-off manifest URL
 ```
@@ -413,7 +413,8 @@ myownllm run --profile https://example.com/manifest.json   # one-off manifest UR
 | `text` | General-purpose LLM | Default |
 | `vision` | Multimodal LLM | Accepts image paths in chat |
 | `code` | Code-optimized LLM | Same chat interface |
-| `transcribe` | Whisper | Activates mic; outputs transcribed text |
+| `transcribe` | Moonshine / Parakeet (per tier) | Activates mic; outputs transcribed text. Pi 5 → Moonshine (English only); capable hardware → Parakeet TDT 0.6B v3 (25 languages). |
+| `diarize`    | pyannote pipeline | Sub-feature of transcribe (opt-in via the transcribe pane's "Identify speakers" toggle). Tags each segment with a speaker ID; click the pill to rename. |
 
 Exit chat: `Ctrl+C` or type `exit`.
 
@@ -682,21 +683,37 @@ A single manifest can expose multiple families — that's how you ship "use our 
                                  // Importing file wins on family-key collision.
 
   "headroom_gb": {               // optional: RAM (GB) reserved for OS / WebView / ollama overhead
-    "apple": 5,                  //   alongside large-v3-turbo (~2 GB resident). Apple holds back
-    "none":  2,                  //   the most because macOS + browser tabs share the LLM pool;
-    "nvidia": 1,                 //   discrete-GPU hosts only need a sliver of system RAM because
-    "amd": 1                     //   the LLM lives on the GPU. Missing keys inherit the compiled-in
-  },                             //   defaults shown.
+    "apple": 5,                  //   alongside the paired ASR model (Moonshine ~150 MB on Pi-class,
+    "none":  2,                  //   Parakeet ~700 MB on capable). Apple holds back the most because
+    "nvidia": 1,                 //   macOS + browser tabs share the LLM pool; discrete-GPU hosts only
+    "amd": 1                     //   need a sliver of system RAM because the LLM lives on the GPU.
+  },                             //   Missing keys inherit the compiled-in defaults shown.
 
   "shared_modes": {
     "transcribe": {              // Every family inherits this unless it overrides `modes.transcribe`.
-      "runtime": "whisper",
-      "tiers": [                 // The default manifest collapses whisper to a single rung — the
-                                 // smaller ggml models (tiny/base/small/medium) are too slow to be
-                                 // realistic in practice. Override per-family if your audience needs
-                                 // a non-turbo variant.
+      "tiers": [                 // v13: per-tier `runtime` lets one ladder promote capable hardware
+                                 // to Parakeet (25 langs) while the bottom rung stays on Moonshine
+                                 // (English, edge-class). Fall-through order:
+                                 //   tier.runtime → mode.runtime → default_runtime_for(mode).
+        { "min_vram_gb": 4, "min_ram_gb": 8, "min_unified_ram_gb": 16,
+          "runtime": "parakeet",  "model": "parakeet-tdt-0.6b-v3-int8",
+          "fallback": "moonshine-small-q8" },
         { "min_vram_gb": 0, "min_ram_gb": 0, "min_unified_ram_gb": 0,
-          "model": "large-v3-turbo", "fallback": "large-v3-turbo" }
+          "runtime": "moonshine", "model": "moonshine-small-q8",
+          "fallback": "moonshine-small-q8" }
+      ]
+    },
+    "diarize": {                 // Opt-in speaker diarization via the transcribe pane toggle.
+      "tiers": [                 // Same pipeline (pyannote-seg + embedder + online clusterer),
+                                 // smaller embedder on Pi-class to keep latency in budget.
+        { "min_vram_gb": 0, "min_ram_gb": 6, "min_unified_ram_gb": 12,
+          "runtime": "pyannote-diarize",
+          "model": "pyannote-seg-3.0+wespeaker-r34",
+          "fallback": "pyannote-seg-3.0+campp-small" },
+        { "min_vram_gb": 0, "min_ram_gb": 0, "min_unified_ram_gb": 0,
+          "runtime": "pyannote-diarize",
+          "model": "pyannote-seg-3.0+campp-small",
+          "fallback": "pyannote-seg-3.0+campp-small" }
       ]
     }
   },
@@ -729,19 +746,21 @@ A single manifest can expose multiple families — that's how you ship "use our 
 }
 ```
 
-**Default tier ladder, sized to actual gemma3 / gemma3n resident memory + large-v3-turbo:**
+**Default tier ladder, sized to actual gemma4 resident memory + per-tier ASR model:**
 
-| Hardware (unified)        | Pick                          | Runtime peak |
-|---------------------------|-------------------------------|--------------|
-| Pi 5 4 GB                 | `gemma4:270m` + turbo         | ~3.6 GB      |
-| Pi 5 8 GB / Orin Nano 8   | `gemma4:e2b`  + turbo         | ~4 GB        |
-| 8 GB Mac                  | `gemma4:e2b`  + turbo         | ~8 GB (tight)|
-| 16 GB Mac (M1/M2/M3)      | `gemma4:e4b`  + turbo         | ~10 GB       |
-| 24 GB Mac (M-Pro)         | `gemma4:12b`  + turbo         | ~16 GB       |
-| 36 GB Mac (M-Pro/Max)     | `gemma4:26b`  + turbo         | ~27 GB       |
-| 48+ GB Mac (M-Max/Ultra)  | `gemma4:31b`  + turbo         | ~29 GB       |
+| Hardware (unified)        | Pick                                  | Runtime peak |
+|---------------------------|---------------------------------------|--------------|
+| Pi 5 4 GB                 | `gemma4:270m` + Moonshine Small       | ~1.8 GB      |
+| Pi 5 8 GB / Orin Nano 8   | `gemma4:e2b`  + Moonshine Small       | ~2.2 GB      |
+| 8 GB Mac                  | `gemma4:e2b`  + Moonshine Small       | ~6 GB        |
+| 16 GB Mac (M1/M2/M3)      | `gemma4:e4b`  + Parakeet TDT 0.6B v3  | ~9 GB        |
+| 24 GB Mac (M-Pro)         | `gemma4:12b`  + Parakeet TDT 0.6B v3  | ~15 GB       |
+| 36 GB Mac (M-Pro/Max)     | `gemma4:26b`  + Parakeet TDT 0.6B v3  | ~26 GB       |
+| 48+ GB Mac (M-Max/Ultra)  | `gemma4:31b`  + Parakeet TDT 0.6B v3  | ~28 GB       |
 
-Discrete GPUs use `min_vram_gb` for the GPU-resident path (model lives on the card, system RAM only hosts whisper + the ollama client), with a CPU-fallback path through `min_ram_gb`.
+**Pi 5 caveat:** Moonshine Small is English-only. If non-English transcription on Pi-class hardware is a hard requirement, override via `mode_overrides.transcribe` or wait for a future multilingual streaming model on the Pi tier.
+
+Discrete GPUs use `min_vram_gb` for the GPU-resident path (model lives on the card, system RAM only hosts the ASR worker + the ollama client), with a CPU-fallback path through `min_ram_gb`.
 
 **Rules:**
 - A family **must** define `default_mode` and at least one entry under `modes`.
@@ -753,8 +772,12 @@ Discrete GPUs use `min_vram_gb` for the GPU-resident path (model lives on the ca
 - If the user's saved `active_family` doesn't exist in the manifest, the resolver falls back to `default_family`, then to the first family in document order.
 - Unknown fields are ignored — manifests are forward-compatible within the schema version.
 - `ttl_minutes` controls how long MyOwnLLM caches **this file** before re-fetching (default 360). It is the publisher's rate-limit signal; MyOwnLLM honours it.
-- `headroom_gb` is optional. Missing keys inherit the compiled-in defaults (`apple: 5`, `none: 2`, `nvidia: 1`, `amd: 1`). Sized to cover the OS, WebView, and ollama daemon alongside `large-v3-turbo` (~2 GB resident) so the text pick has room to share memory with transcribe.
-- The default `shared_modes.transcribe` ladder collapses to a single rung: `large-v3-turbo`. The smaller whisper variants (`tiny.en`, `base.en`, `small.en`, `medium.en`) are still in `KNOWN_MODELS` and can be selected via `mode_overrides.transcribe`, but their decode path is too slow for realistic interactive use — typically 5–10× slower per minute of audio than turbo.
+- `headroom_gb` is optional. Missing keys inherit the compiled-in defaults (`apple: 5`, `none: 2`, `nvidia: 1`, `amd: 1`). Sized to cover the OS, WebView, and ollama daemon alongside the paired ASR worker (Moonshine ~150 MB resident, Parakeet ~700 MB) so the text pick has room to share memory with transcribe. When diarization is enabled, the resolver subtracts an additional ~500 MB for the pyannote pipeline.
+- The default `shared_modes.transcribe` ladder has two rungs, **picked by per-tier `runtime`**:
+   - `parakeet` on Apple Silicon ≥ 16 GB / x86 ≥ 8 GB RAM / any GPU ≥ 4 GB VRAM — Parakeet TDT 0.6B v3, 25 languages, ~80–200 ms inference latency.
+   - `moonshine` on everything below that — Moonshine Small, English-only, ~500 ms latency, runs at real-time on a Pi 5.
+   Both backends are streaming-native and emit one segment per chunk (no 5 s minimum). Override per-family via the family's own `modes.transcribe` block.
+- `shared_modes.diarize` is opt-in via the transcribe pane's "Identify speakers" toggle. The composite model name (`pyannote-seg-3.0+wespeaker-r34` or `pyannote-seg-3.0+campp-small`) is split into a segmenter and a speaker embedder; the Rust side runs online agglomerative clustering on the embeddings to assign stable cluster IDs across a conversation. Models are pulled lazily on first toggle-on.
 - `imports` lets a manifest pull families from other manifests; each imported file obeys its own TTL and is cached separately. Family-key collisions favour the importing file.
 
 Model tags are standard Ollama tags (e.g. `gemma4:e4b`, `qwen3.5:9b`). Anything in the [Ollama library](https://ollama.com/library) works.
@@ -1032,15 +1055,14 @@ The `manifests/` cache stores one entry per URL. When a manifest reached via an 
 - [Node.js](https://nodejs.org) 18+
 - [pnpm](https://pnpm.io) 8+
 - [Tauri CLI v2](https://tauri.app): `cargo install tauri-cli`
-- `cmake` — whisper-rs builds whisper.cpp from source for local transcription
+- A copy of `onnxruntime` for ASR + diarization (bundled with the binary in the release builds; for local `cargo run`, install via your package manager or download from <https://github.com/microsoft/onnxruntime/releases>)
 
-**Linux:** `sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev libasound2-dev cmake`
+**Linux:** `sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev libasound2-dev`
 (`libasound2-dev` is the ALSA dev headers cpal links against for mic capture.)
 
-**macOS:** Xcode Command Line Tools (`xcode-select --install`) and `brew install cmake`
+**macOS:** Xcode Command Line Tools (`xcode-select --install`)
 
-**Windows:** WebView2 (auto-installed by `bootstrap.ps1`) and CMake
-(`winget install Kitware.CMake`)
+**Windows:** WebView2 (auto-installed by `bootstrap.ps1`)
 
 ### Build
 

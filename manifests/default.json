@@ -1,6 +1,6 @@
 {
   "name": "MyOwnLLM Default",
-  "version": "12",
+  "version": "13",
   "ttl_minutes": 360,
   "default_family": "gemma4",
   "headroom_gb": {
@@ -13,16 +13,24 @@
     "transcribe": {
       "label": "Transcribe",
       "input": "audio",
-      "runtime": "whisper",
       "tiers": [
-        { "min_vram_gb": 0, "min_ram_gb": 0, "min_unified_ram_gb": 0, "disk_mb": 1550, "model": "large-v3-turbo", "fallback": "large-v3-turbo" }
+        { "min_vram_gb": 4,  "min_ram_gb": 8,  "min_unified_ram_gb": 16, "disk_mb": 700, "runtime": "parakeet",  "model": "parakeet-tdt-0.6b-v3-int8", "fallback": "moonshine-small-q8" },
+        { "min_vram_gb": 0,  "min_ram_gb": 0,  "min_unified_ram_gb": 0,  "disk_mb": 130, "runtime": "moonshine", "model": "moonshine-small-q8",        "fallback": "moonshine-small-q8" }
+      ]
+    },
+    "diarize": {
+      "label": "Diarize",
+      "input": "audio",
+      "tiers": [
+        { "min_vram_gb": 0, "min_ram_gb": 6, "min_unified_ram_gb": 12, "disk_mb": 32, "runtime": "pyannote-diarize", "model": "pyannote-seg-3.0+wespeaker-r34", "fallback": "pyannote-seg-3.0+campp-small" },
+        { "min_vram_gb": 0, "min_ram_gb": 0, "min_unified_ram_gb": 0,  "disk_mb": 13, "runtime": "pyannote-diarize", "model": "pyannote-seg-3.0+campp-small",  "fallback": "pyannote-seg-3.0+campp-small" }
       ]
     }
   },
   "families": {
     "gemma4": {
       "label": "Gemma 4",
-      "description": "Google Gemma 4 (Apache-2.0) — multimodal open models with agentic skills, multi-step planning, and audio-visual processing. The e2b/e4b edge variants use per-layer activations: ~2 GB / ~3 GB resident at runtime despite a larger on-disk footprint, which keeps Pi 5, NVIDIA Jetson Orin Nano, and 8 GB Macs comfortably inside their memory budget alongside whisper. The 26B MoE and 31B dense tiers scale up for workstation-class hardware. Every tier pairs with large-v3-turbo so the same machine can run text + audio together.",
+      "description": "Google Gemma 4 (Apache-2.0) — multimodal open models with agentic skills, multi-step planning, and audio-visual processing. The e2b/e4b edge variants use per-layer activations: ~2 GB / ~3 GB resident at runtime despite a larger on-disk footprint, which keeps Pi 5, NVIDIA Jetson Orin Nano, and 8 GB Macs comfortably inside their memory budget alongside the ASR worker. The 26B MoE and 31B dense tiers scale up for workstation-class hardware. Every tier pairs with Moonshine on Pi-class hardware and Parakeet TDT on capable hardware so the same machine can run text + audio together.",
       "default_mode": "text",
       "modes": {
         "text": {
@@ -41,7 +49,7 @@
     },
     "qwen3.6": {
       "label": "Qwen 3.6",
-      "description": "Alibaba Qwen 3.6 — strong multilingual + reasoning. The 3.6 release ships at 14B / 27B / 35B; smaller hardware tiers fall back to Qwen 3.5 (0.6B / 1.7B / 4B / 8B). Every tier pairs with large-v3-turbo so the same machine can run text + audio together.",
+      "description": "Alibaba Qwen 3.6 — strong multilingual + reasoning. The 3.6 release ships at 14B / 27B / 35B; smaller hardware tiers fall back to Qwen 3.5 (0.6B / 1.7B / 4B / 8B). Every tier pairs with Moonshine on Pi-class hardware and Parakeet TDT on capable hardware so the same machine can run text + audio together.",
       "default_mode": "text",
       "modes": {
         "text": {

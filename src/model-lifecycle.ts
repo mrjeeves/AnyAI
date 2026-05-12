@@ -228,21 +228,29 @@ export interface ModelMeta {
   override_for: Mode[];
   /** Which engine runs this model. Drives the runtime badge in the
    *  models list and decides whether `pin` / `delete` route through
-   *  Ollama or the whisper helpers. */
-  runtime: "ollama" | "whisper";
+   *  Ollama or the local-model helpers. `"ollama"` covers LLM tags;
+   *  every other value is a local-runtime ONNX model living under
+   *  `~/.myownllm/models/{asr,diarize}/`. */
+  runtime: string;
 }
 
-interface WhisperModelInfo {
+/** Mirror of `models::ModelInfo` in src-tauri/src/models.rs. Used for
+ *  both the ASR and diarize Tauri command responses; the `kind` field
+ *  tells callers apart when listing both kinds in one table. */
+interface ModelInfo {
   name: string;
+  kind: string;
   approx_size_bytes: number;
   installed: boolean;
   installed_size_bytes: number | null;
+  artifact_count: number;
 }
 
 export async function getModelStatusWithMeta(): Promise<ModelMeta[]> {
-  const [pulled, whisperList, status, config] = await Promise.all([
+  const [pulled, asrList, diarizeList, status, config] = await Promise.all([
     invoke<OllamaModel[]>("ollama_list_models").catch(() => [] as OllamaModel[]),
-    invoke<WhisperModelInfo[]>("whisper_models_list").catch(() => [] as WhisperModelInfo[]),
+    invoke<ModelInfo[]>("asr_models_list").catch(() => [] as ModelInfo[]),
+    invoke<ModelInfo[]>("diarize_models_list").catch(() => [] as ModelInfo[]),
     readStatusCache(),
     loadConfig(),
   ]);
@@ -267,21 +275,24 @@ export async function getModelStatusWithMeta(): Promise<ModelMeta[]> {
     runtime: "ollama",
   }));
 
-  // Whisper models live under ~/.myownllm/whisper/. They're treated like
-  // any other model in the unified Models list — the dual-download
-  // behaviour means they're already part of the active family's pick
-  // set, and users shouldn't need a separate page to see them.
-  const whisper: ModelMeta[] = whisperList
-    .filter((w) => w.installed)
-    .map((w) => ({
-      name: w.name,
-      size: w.installed_size_bytes ?? 0,
-      recommended_by: status[w.name]?.recommended_by ?? [],
-      last_recommended: status[w.name]?.last_recommended ?? new Date().toISOString(),
-      kept: keepSet.has(w.name),
-      override_for: overrideMap.get(w.name) ?? [],
-      runtime: "whisper",
-    }));
+  // Local-runtime ASR models live under ~/.myownllm/models/asr/. They're
+  // treated like any other model in the unified Models list — the
+  // dual-download behaviour means they're already part of the active
+  // family's pick set, and users shouldn't need a separate page to see
+  // them. Diarize artifacts are also surfaced so users can see what's
+  // on disk after toggling speaker identification on.
+  const asInstalled = (list: ModelInfo[]): ModelMeta[] =>
+    list
+      .filter((m) => m.installed)
+      .map((m) => ({
+        name: m.name,
+        size: m.installed_size_bytes ?? 0,
+        recommended_by: status[m.name]?.recommended_by ?? [],
+        last_recommended: status[m.name]?.last_recommended ?? new Date().toISOString(),
+        kept: keepSet.has(m.name),
+        override_for: overrideMap.get(m.name) ?? [],
+        runtime: m.kind, // "asr" / "diarize"
+      }));
 
-  return [...ollama, ...whisper];
+  return [...ollama, ...asInstalled(asrList), ...asInstalled(diarizeList)];
 }

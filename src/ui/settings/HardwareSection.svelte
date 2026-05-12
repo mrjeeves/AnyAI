@@ -68,7 +68,7 @@
             config.mode_overrides,
             config.active_family,
           );
-          transcribeTag = r.runtime === "whisper" ? r.model : "";
+          transcribeTag = r.runtime !== "ollama" ? r.model : "";
         } catch {}
       }
     } catch (e) {

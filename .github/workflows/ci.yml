@@ -29,35 +29,13 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             libssl-dev \
-            libasound2-dev \
-            cmake
-
-      # Whisper Vulkan backend needs the LunarG SDK at build time:
-      #   - Linux: apt's libvulkan-dev is missing glslc, which whisper.cpp's
-      #     FindVulkan.cmake demands. Install the full SDK from LunarG's
-      #     official apt repo on x86_64; arm64 stays CPU-only (Cargo.toml
-      #     gates the feature off there).
-      #   - Windows: whisper-rs-sys panics outright if VULKAN_SDK isn't
-      #     set; use the humbletim action which exports it.
-      #   - macOS: uses Metal, nothing to do here.
-      - name: Install Vulkan SDK (Linux x86_64)
-        if: runner.os == 'Linux' && runner.arch == 'X64'
-        run: |
-          sudo mkdir -p /etc/apt/keyrings
-          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc \
-            | sudo tee /etc/apt/keyrings/lunarg-vulkan.asc > /dev/null
-          UBU_CODENAME=$(. /etc/os-release && echo "$UBUNTU_CODENAME")
-          echo "deb [signed-by=/etc/apt/keyrings/lunarg-vulkan.asc] https://packages.lunarg.com/vulkan ${UBU_CODENAME} main" \
-            | sudo tee /etc/apt/sources.list.d/lunarg-vulkan.list > /dev/null
-          sudo apt-get update
-          sudo apt-get install -y vulkan-sdk
-
-      - name: Install Vulkan SDK (Windows)
-        if: runner.os == 'Windows'
-        uses: humbletim/install-vulkan-sdk@v1.2
-        with:
-          version: 1.3.290.0
-          cache: true
+            libasound2-dev
+        # `cmake` is no longer in the dep list — whisper-rs was the only
+        # consumer (it built whisper.cpp from source) and the new ASR
+        # stack uses the `ort` crate with a dynamically-loaded
+        # onnxruntime instead. The LunarG Vulkan SDK install steps
+        # (Linux x86_64 + Windows) that used to live here are gone for
+        # the same reason: only whisper-rs's Vulkan feature wanted them.
 
       - uses: dtolnay/rust-toolchain@1.88.0
         with:

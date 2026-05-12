@@ -11,8 +11,9 @@
     startRecording,
     startUpload,
     stopRecording,
-    clearLiveDelta,
+    takeLiveSegments,
     clearAfterPersist,
+    type EmittedSegment,
   } from "./transcribe-state.svelte";
   import { chatSlot } from "./chat-slot.svelte";
   import { loadConfig } from "../config";
@@ -21,6 +22,7 @@
     saveConversation,
     newConversation,
     type Conversation,
+    type TranscriptSegment,
   } from "../conversations";
   import type { HardwareProfile, Mode } from "../types";
 
@@ -56,35 +58,53 @@
     onConversationChanged: (id: string) => void;
     onNewSession: () => void;
     onRequestStopTranscribe: () => void;
-    /** Stop the chat-slot occupant (chat or Talking Points). Routed to App
-     *  so the conflict-modal flow lives in one place. */
+    /** Stop the chat-slot occupant (chat or Talking Points). Routed
+     *  to App so the conflict-modal flow lives in one place. */
     onRequestStopChat: () => void;
-    /** Ask App to start a recording — App handles the singleton check
-     *  against any other in-flight session and shows a conflict modal. */
+    /** Ask App to start a recording — App handles the singleton
+     *  check against any other in-flight session and shows a
+     *  conflict modal. */
     onRequestStartRecording: (start: () => Promise<void>) => void;
-    /** Ask App to activate Talking Points — App owns the singleton check
-     *  against the chat slot and forwards to the chat-slot store. */
+    /** Ask App to activate Talking Points — App owns the singleton
+     *  check against the chat slot and forwards to the chat-slot
+     *  store. */
     onRequestActivateTalkingPoints: () => void;
   }>();
 
-  interface WhisperModelInfo {
+  /** Mirror of `models::ModelInfo` in src-tauri. */
+  interface ModelInfo {
     name: string;
+    kind: string;
     approx_size_bytes: number;
     installed: boolean;
     installed_size_bytes: number | null;
+    artifact_count: number;
   }
 
   let activeConversation = $state<Conversation | null>(null);
-  let transcript = $state("");
+  let transcript = $state<TranscriptSegment[]>([]);
+  let speakerLabels = $state<Record<number, string>>({});
+  let diarizeEnabled = $state(false);
+  /** Set while we're pulling the diarize composite on first toggle-on.
+   *  Drives the inline progress text on the toggle itself. */
+  let diarizePullStatus = $state("");
   let talkingPoints = $state<string[]>([]);
   let sessionName = $state("");
   let settingsTab = $state<SettingsTab | null>(null);
   let transcribeError = $state("");
+  /** Inline-edit state for renaming a speaker. `null` means no pill is
+   *  currently being edited. */
+  let renameTarget = $state<{ id: number; value: string } | null>(null);
 
-  /** Debounced live-transcript flush. Without this, the on-disk transcript
-   *  only updates on start/stop/title-edit, so anything reading the
-   *  conversation file during a session (notably the Talking Points loop in
-   *  chat-slot.svelte.ts) sees a stale snapshot and never re-summarises. */
+  /** Default diarize composite the manifest's diarize ladder picks for
+   *  this machine. Captured at load + used when the toggle flips on. */
+  let defaultDiarizeModel = $state("pyannote-seg-3.0+wespeaker-r34");
+
+  /** Debounced live-transcript flush. Without this, the on-disk
+   *  transcript only updates on start/stop/title-edit, so anything
+   *  reading the conversation file during a session (notably the
+   *  Talking Points loop in chat-slot.svelte.ts) sees a stale snapshot
+   *  and never re-summarises. */
   let liveSaveTimer: ReturnType<typeof setTimeout> | null = null;
   function scheduleLiveSave() {
     if (liveSaveTimer) return;
@@ -99,7 +119,9 @@
     const id = conversationId;
     if (!id) {
       activeConversation = null;
-      transcript = "";
+      transcript = [];
+      speakerLabels = {};
+      diarizeEnabled = false;
       talkingPoints = [];
       sessionName = "";
       return;
@@ -108,7 +130,9 @@
     loadConversation(id).then((c) => {
       if (cancelled || !c) return;
       activeConversation = c;
-      transcript = c.transcript ?? "";
+      transcript = c.transcript ?? [];
+      speakerLabels = c.speaker_labels ?? {};
+      diarizeEnabled = c.diarize_enabled ?? false;
       talkingPoints = c.talking_points ?? [];
       sessionName = c.title === "New chat" ? "" : c.title;
     });
@@ -126,36 +150,36 @@
       return;
     }
     activeConversation = null;
-    transcript = "";
+    transcript = [];
+    speakerLabels = {};
+    diarizeEnabled = false;
     talkingPoints = [];
     sessionName = "";
     if (transcribeUi.active && transcribeUi.conversationId === conversationId) {
-      // Cancelling the active recording on "+ New" matches the previous
-      // single-view behaviour. The store's stopRecording awaits the
-      // final frame before resolving so the live delta fully lands first.
       stopRecording().then(() => {
-        flushLiveDelta();
+        flushLiveSegments();
         clearAfterPersist();
       });
     }
   });
 
   // Watch the global store: when a frame arrives for our conversation,
-  // append the delta to our visible transcript and clear it from the
-  // store so we don't double-append. Untrack on `liveDelta` itself —
-  // we drive off `framePulse` to avoid resubscription churn.
+  // drain its segments into our visible transcript. Untrack inside the
+  // effect — we drive off `framePulse` to avoid resubscription churn.
   $effect(() => {
     void transcribeUi.framePulse;
-    untrack(flushLiveDelta);
+    untrack(flushLiveSegments);
   });
 
-  function flushLiveDelta() {
+  function flushLiveSegments() {
     const myConv = transcribeUi.conversationId;
-    if (!transcribeUi.liveDelta) return;
-    if (myConv && myConv !== conversationId) return; // belongs to another conv
-    transcript = transcript + transcribeUi.liveDelta;
-    clearLiveDelta();
-    scheduleLiveSave();
+    if (transcribeUi.liveSegments.length === 0) return;
+    if (myConv && myConv !== conversationId) return;
+    const incoming = takeLiveSegments();
+    if (incoming.length > 0) {
+      transcript = transcript.concat(incoming);
+      scheduleLiveSave();
+    }
   }
 
   onDestroy(() => {
@@ -167,17 +191,15 @@
       clearTimeout(liveSaveTimer);
       liveSaveTimer = null;
     }
-    flushLiveDelta();
+    flushLiveSegments();
     if (transcribeUi.active && transcribeUi.conversationId === conversationId) {
-      // Best-effort save of the current transcript so a crash later
-      // doesn't lose the in-flight text. The active recording keeps
-      // appending to the conversation file via stopRecording's flush.
       persist().catch(() => {});
     }
   });
 
   async function persist(opts: { force?: boolean } = {}): Promise<Conversation | null> {
-    const hasContent = sessionName.trim() || transcript.trim() || talkingPoints.length > 0;
+    const hasContent =
+      sessionName.trim() || transcript.length > 0 || talkingPoints.length > 0;
     if (!opts.force && !activeConversation && !hasContent) return null;
     let conv = activeConversation;
     if (!conv) {
@@ -190,6 +212,8 @@
     const trimmed = sessionName.trim();
     if (trimmed) conv.title = trimmed.slice(0, 80);
     conv.transcript = transcript;
+    conv.speaker_labels = speakerLabels;
+    conv.diarize_enabled = diarizeEnabled;
     conv.talking_points = talkingPoints;
     conv.messages = [];
     await saveConversation(conv);
@@ -210,14 +234,42 @@
     persist().catch((e) => console.warn("save title failed:", e));
   }
 
-  /** Pre-flight: confirm the configured whisper model is downloaded. */
-  async function modelInstalled(name: string): Promise<boolean> {
+  /** Pre-flight: confirm the configured ASR model is downloaded. */
+  async function asrModelInstalled(name: string): Promise<boolean> {
     try {
-      const all = await invoke<WhisperModelInfo[]>("whisper_models_list");
+      const all = await invoke<ModelInfo[]>("asr_models_list");
       return all.find((m) => m.name === name)?.installed ?? false;
     } catch {
       return false;
     }
+  }
+
+  /** Split a `runtime:model` display tag into its two halves. The
+   *  resolver in App.svelte prefixes non-Ollama picks (`moonshine:…`,
+   *  `parakeet:…`); the colon is unambiguous because legal runtime
+   *  names don't contain one. */
+  function splitRuntimeModel(tag: string): { runtime: string; model: string } {
+    const i = tag.indexOf(":");
+    if (i > 0) {
+      const runtime = tag.slice(0, i);
+      // Tags like `gemma4:e2b` are ollama models, not local-runtime
+      // ones — the displayModelFor() helper only prepends a runtime
+      // when the resolver picked something non-Ollama, so we'd never
+      // confuse the two. Defensive check: if the first half doesn't
+      // match a known local runtime, treat the whole thing as the
+      // model name.
+      if (
+        runtime === "moonshine" ||
+        runtime === "parakeet" ||
+        runtime === "pyannote-diarize" ||
+        runtime === "sortformer"
+      ) {
+        return { runtime, model: tag.slice(i + 1) };
+      }
+    }
+    // Fall back to the default ASR runtime for legacy/unprefixed
+    // tags. Empty runtime tells the caller to surface an error.
+    return { runtime: "", model: tag };
   }
 
   async function startRec() {
@@ -229,25 +281,39 @@
     if (transcribeUi.active) return;
     const cfg = await loadConfig();
     const mic = cfg.mic;
-    const model = activeModel.startsWith("whisper:")
-      ? activeModel.slice("whisper:".length)
-      : activeModel || "tiny.en";
+    const { runtime, model } = splitRuntimeModel(activeModel);
 
-    if (!(await modelInstalled(model))) {
+    if (!runtime || !model) {
       transcribeError =
-        `The whisper '${model}' model isn't downloaded yet. Switch family ` +
-        `or relaunch to trigger the auto-pull, or check Settings → Models.`;
+        `Couldn't determine the ASR runtime for '${activeModel}'. ` +
+        `Switch family in Settings to one with a transcribe ladder.`;
+      return;
+    }
+    if (!(await asrModelInstalled(model))) {
+      transcribeError =
+        `The ${runtime} model '${model}' isn't downloaded yet. Switch ` +
+        `family or relaunch to trigger the auto-pull, or check ` +
+        `Settings → Models.`;
       return;
     }
 
-    // Snapshot the conversation before starting so deltas land on it
-    // even if the user navigates away mid-recording.
+    let diarizeModel: string | null = null;
+    if (diarizeEnabled) {
+      if (!(await ensureDiarizeReady())) {
+        // ensureDiarizeReady set diarizeError / status; abort start.
+        return;
+      }
+      diarizeModel = defaultDiarizeModel;
+    }
+
     const conv = await persist({ force: true });
     try {
       await startRecording({
+        runtime,
         model,
         device: mic.device_name || null,
         conversationId: conv?.id ?? null,
+        diarizeModel,
       });
     } catch (e) {
       transcribeError = String(e);
@@ -256,13 +322,14 @@
 
   async function stopRec() {
     await stopRecording();
-    flushLiveDelta();
+    flushLiveSegments();
     clearAfterPersist();
     persist().catch((e) => console.warn("save after stop failed:", e));
   }
 
-  /** Pick an audio file and transcribe it. Goes through the same conflict
-   *  check as Record so we don't start an upload over a live recording. */
+  /** Pick an audio file and transcribe it. Goes through the same
+   *  conflict check as Record so we don't start an upload over a live
+   *  recording. */
   async function pickAndUpload() {
     transcribeError = "";
     let picked: string | string[] | null;
@@ -289,33 +356,73 @@
 
   async function doUpload(filePath: string): Promise<void> {
     if (transcribeUi.active) return;
-    const model = activeModel.startsWith("whisper:")
-      ? activeModel.slice("whisper:".length)
-      : activeModel || "tiny.en";
-    if (!(await modelInstalled(model))) {
+    const { runtime, model } = splitRuntimeModel(activeModel);
+    if (!runtime || !model) {
       transcribeError =
-        `The whisper '${model}' model isn't downloaded yet. Switch family ` +
-        `or relaunch to trigger the auto-pull, or check Settings → Models.`;
+        `Couldn't determine the ASR runtime for '${activeModel}'. ` +
+        `Switch family in Settings to one with a transcribe ladder.`;
       return;
     }
-    // Persist a conversation so deltas have somewhere to land — same
-    // snapshot-before-start pattern as live recording.
+    if (!(await asrModelInstalled(model))) {
+      transcribeError =
+        `The ${runtime} model '${model}' isn't downloaded yet. Switch ` +
+        `family or relaunch to trigger the auto-pull, or check ` +
+        `Settings → Models.`;
+      return;
+    }
+    let diarizeModel: string | null = null;
+    if (diarizeEnabled) {
+      if (!(await ensureDiarizeReady())) return;
+      diarizeModel = defaultDiarizeModel;
+    }
     const conv = await persist({ force: true });
     try {
       await startUpload({
+        runtime,
         model,
         filePath,
         conversationId: conv?.id ?? null,
+        diarizeModel,
       });
     } catch (e) {
       transcribeError = String(e);
     }
   }
 
+  /** Make sure the diarize composite is on disk before the session
+   *  starts. Pulls it lazily on first toggle-on; surfaces progress
+   *  inline on the toggle. Returns `false` (with an error message in
+   *  `transcribeError`) if the user should retry instead. */
+  async function ensureDiarizeReady(): Promise<boolean> {
+    diarizePullStatus = "";
+    try {
+      const present = await invoke<boolean>("diarize_model_present", {
+        name: defaultDiarizeModel,
+      });
+      if (present) return true;
+      diarizePullStatus = "Downloading speaker models…";
+      await invoke("diarize_model_pull", { name: defaultDiarizeModel });
+      diarizePullStatus = "";
+      return true;
+    } catch (e) {
+      diarizePullStatus = "";
+      transcribeError = `Diarize model pull failed: ${e}`;
+      return false;
+    }
+  }
+
+  async function toggleDiarize() {
+    diarizeEnabled = !diarizeEnabled;
+    // Persist the toggle state so a reload remembers it. Don't pull
+    // the model here — wait until the user actually starts a session
+    // so a user who toggles + thinks better of it doesn't pay the
+    // download cost.
+    if (activeConversation) {
+      persist().catch(() => {});
+    }
+  }
+
   async function handleModeChange(mode: Mode) {
-    // No longer auto-stop on mode switch — that's the whole point of the
-    // global store. The recording keeps capturing in the background and
-    // the StatusBar shows progress from any mode.
     await onModeChange(mode);
   }
 
@@ -330,25 +437,104 @@
     return `${m}:${s}`;
   }
 
+  /** Deterministic HSL color per speaker ID. Cheap, no palette to
+   *  manage, stable across reloads. */
+  function speakerColor(id: number | undefined): string {
+    if (id === undefined) return "transparent";
+    const hue = (id * 37) % 360;
+    return `hsl(${hue}, 60%, 50%)`;
+  }
+
+  function speakerLabel(id: number): string {
+    return speakerLabels[id] ?? `Speaker ${id + 1}`;
+  }
+
+  function startRename(id: number) {
+    renameTarget = { id, value: speakerLabel(id) };
+  }
+
+  async function commitRename() {
+    if (!renameTarget) return;
+    const { id, value } = renameTarget;
+    const trimmed = value.trim().slice(0, 40);
+    renameTarget = null;
+    if (!trimmed) {
+      // Empty input clears any override and falls back to "Speaker N".
+      const next = { ...speakerLabels };
+      delete next[id];
+      speakerLabels = next;
+    } else {
+      speakerLabels = { ...speakerLabels, [id]: trimmed };
+    }
+    persist().catch((e) => console.warn("save speaker label failed:", e));
+  }
+
+  function onRenameKey(e: KeyboardEvent) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commitRename();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      renameTarget = null;
+    }
+  }
+
+  /** Programmatic focus on mount — replaces the deprecated `autofocus`
+   *  attribute. svelte-check (a11y rule) and most screen-reader
+   *  guidance discourage autofocus on standalone fields, but for an
+   *  explicit click-to-rename input the focus shift is the whole
+   *  point of the interaction. The `use:` action makes the intent
+   *  explicit + scoped. */
+  function focusOnMount(node: HTMLInputElement) {
+    queueMicrotask(() => {
+      node.focus();
+      node.select();
+    });
+  }
+
+  /** Group consecutive same-speaker segments into one rendered turn.
+   *  Speaker `undefined` (no diarization) collapses every segment
+   *  into a single flat run for the legacy/diarize-off rendering. */
+  interface Turn {
+    speaker: number | undefined;
+    overlap: boolean;
+    text: string;
+  }
+
+  function turnsFor(segs: TranscriptSegment[]): Turn[] {
+    const out: Turn[] = [];
+    for (const s of segs) {
+      const last = out[out.length - 1];
+      if (last && last.speaker === s.speaker) {
+        const sep = last.text.endsWith(" ") ? "" : " ";
+        last.text = last.text + sep + s.text;
+        if (s.overlap) last.overlap = true;
+      } else {
+        out.push({
+          speaker: s.speaker,
+          overlap: s.overlap ?? false,
+          text: s.text,
+        });
+      }
+    }
+    return out;
+  }
+
+  let renderedTurns = $derived(turnsFor(transcript));
+
   // True iff this view is the one tied to the active recording — used
   // to draw the rec dot in the local pane chrome.
   let isMyRecording = $derived(
     transcribeUi.active && transcribeUi.conversationId === conversationId,
   );
 
-  // True iff Talking Points is the chat-slot occupant for this very
-  // conversation — controls the "Activate" button vs. the running
-  // panel content in the right pane.
   let isMyTalkingPoints = $derived(
     chatSlot.kind === "tp" && chatSlot.conversationId === conversationId,
   );
 
-  /** Read the talking_points file off disk when our TP loop persists.
-   *  Watching `chatSlot` for cycles isn't enough — the loop writes
-   *  through `saveConversation` and we want to reflect that here. */
   $effect(() => {
     if (!isMyTalkingPoints) return;
-    void chatSlot.elapsed; // tick on each elapsed update so we re-read
+    void chatSlot.elapsed;
     const id = conversationId;
     if (!id) return;
     let cancelled = false;
@@ -384,10 +570,68 @@
         {:else if isMyRecording && transcribeUi.paused}
           <span class="rec-paused">paused</span>
         {/if}
+        <label class="diarize-toggle" title="Identify speakers in the transcript">
+          <input
+            type="checkbox"
+            checked={diarizeEnabled}
+            onchange={toggleDiarize}
+          />
+          <span class="diarize-label">
+            {#if diarizePullStatus}
+              {diarizePullStatus}
+            {:else}
+              Identify speakers
+            {/if}
+          </span>
+        </label>
       </header>
       <div class="pane-body">
-        {#if transcript}
-          <pre class="transcript">{transcript}</pre>
+        {#if renderedTurns.length > 0}
+          <div class="transcript">
+            {#each renderedTurns as turn, i (i)}
+              <div class="turn" class:overlap={turn.overlap}>
+                {#if turn.speaker !== undefined}
+                  <div
+                    class="speaker-rule"
+                    style="background: {speakerColor(turn.speaker)}"
+                    aria-hidden="true"
+                  ></div>
+                  <div class="turn-body">
+                    <div class="speaker-row">
+                      {#if renameTarget && renameTarget.id === turn.speaker}
+                        <input
+                          class="speaker-rename"
+                          type="text"
+                          bind:value={renameTarget.value}
+                          onkeydown={onRenameKey}
+                          onblur={commitRename}
+                          maxlength="40"
+                          use:focusOnMount
+                        />
+                      {:else}
+                        <button
+                          class="speaker-pill"
+                          style="border-color: {speakerColor(turn.speaker)}; color: {speakerColor(turn.speaker)}"
+                          onclick={() => turn.speaker !== undefined && startRename(turn.speaker)}
+                          title="Click to rename this speaker"
+                        >
+                          {speakerLabel(turn.speaker)}
+                        </button>
+                      {/if}
+                      {#if turn.overlap}
+                        <span class="overlap-tag" title="Multiple speakers spoke during this turn — the text may be garbled.">
+                          overlap
+                        </span>
+                      {/if}
+                    </div>
+                    <p class="turn-text">{turn.text}</p>
+                  </div>
+                {:else}
+                  <p class="turn-text flat">{turn.text}</p>
+                {/if}
+              </div>
+            {/each}
+          </div>
         {:else}
           <div class="placeholder">
             {#if isMyRecording}
@@ -400,14 +644,13 @@
           </div>
         {/if}
         {#if isMyRecording && transcribeUi.status}
-          <!--
-            Subtitle that surfaces phases ("Loading whisper model…"), low
-            mic level, whisper errors, etc. Empty when normal text is
-            flowing — the transcript itself is evidence in that case.
-            Rendered at pane bottom so it doesn't push the transcript
-            around while it appears and disappears.
-          -->
           <p class="transcribe-status">{transcribeUi.status}</p>
+        {/if}
+        {#if isMyRecording && transcribeUi.pendingChunks > 0}
+          <p class="transcribe-backlog">
+            {(transcribeUi.pendingChunks * transcribeUi.chunkSeconds).toFixed(0)} s
+            behind realtime
+          </p>
         {/if}
       </div>
     </section>
@@ -432,8 +675,8 @@
             </ul>
           {:else}
             <div class="placeholder">
-              Listening… the first summary will arrive once whisper has a
-              chunk or two of transcript to work with.
+              Listening… the first summary will arrive once the ASR
+              backend has a chunk or two of transcript to work with.
             </div>
           {/if}
         {:else if talkingPoints.length > 0}
@@ -456,15 +699,15 @@
               Activate Talking Points
             </button>
             <p class="tp-help">
-              Continuously summarises the transcript into a live bullet
-              list. Uses the chat model — the Text slot will be held until
-              you stop it.
+              Continuously summarises the transcript into a live
+              bullet list. Uses the chat model — the Text slot will be
+              held until you stop it.
             </p>
           </div>
         {:else if isMyRecording && chatSlot.kind && chatSlot.conversationId !== conversationId}
           <div class="placeholder">
-            The chat slot is busy with another conversation. Stop it from
-            the Text mode button to free up Talking Points here.
+            The chat slot is busy with another conversation. Stop it
+            from the Text mode button to free up Talking Points here.
           </div>
         {:else}
           <div class="placeholder">
@@ -573,6 +816,18 @@
     letter-spacing: .06em;
     font-weight: 600;
   }
+  .diarize-toggle {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: .35rem;
+    font-size: .72rem;
+    color: #aaa;
+    cursor: pointer;
+    user-select: none;
+  }
+  .diarize-toggle input { accent-color: #6e6ef7; }
+  .diarize-label { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
   .rec-dot {
     width: 8px;
     height: 8px;
@@ -604,13 +859,79 @@
     padding: 1rem 1.15rem;
   }
   .transcript {
+    display: flex;
+    flex-direction: column;
+    gap: .85rem;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: .9rem;
     line-height: 1.6;
     color: #e8e8e8;
-    white-space: pre-wrap;
-    margin: 0;
   }
+  .turn {
+    display: flex;
+    gap: .65rem;
+    align-items: stretch;
+  }
+  .speaker-rule {
+    flex: 0 0 3px;
+    border-radius: 2px;
+    align-self: stretch;
+  }
+  .turn-body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: .3rem;
+  }
+  .speaker-row {
+    display: flex;
+    align-items: center;
+    gap: .55rem;
+    flex-wrap: wrap;
+  }
+  .speaker-pill {
+    background: transparent;
+    border: 1px solid;
+    border-radius: 12px;
+    padding: 0 .55rem;
+    font-size: .7rem;
+    font-weight: 600;
+    line-height: 1.5;
+    cursor: pointer;
+    font-family: inherit;
+    transition: background .12s;
+  }
+  .speaker-pill:hover { background: #1a1a22; }
+  .speaker-rename {
+    background: #1a1a22;
+    border: 1px solid #3a3a55;
+    border-radius: 12px;
+    padding: 0 .55rem;
+    font-size: .7rem;
+    font-family: inherit;
+    color: #e8e8e8;
+    width: 12ch;
+  }
+  .speaker-rename:focus { outline: none; border-color: #6e6ef7; }
+  .overlap-tag {
+    font-size: .62rem;
+    color: #d4a64a;
+    background: #1f1812;
+    border: 1px solid #4a3a1a;
+    border-radius: 4px;
+    padding: 0 .35rem;
+    text-transform: lowercase;
+    letter-spacing: .04em;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .turn-text {
+    margin: 0;
+    white-space: pre-wrap;
+    color: #e8e8e8;
+  }
+  .turn-text.flat { color: #e8e8e8; }
+  .turn.overlap .turn-text { color: #d4d4d4; font-style: italic; }
   .bullets {
     list-style: disc;
     padding-left: 1.25rem;
@@ -696,6 +1017,17 @@
     border: 1px solid #25252e;
     border-radius: 6px;
     line-height: 1.45;
+  }
+  .transcribe-backlog {
+    margin-top: 0.4rem;
+    padding: 0.3rem 0.55rem;
+    font-size: 0.72rem;
+    color: #d4a64a;
+    background: #1f1812;
+    border: 1px solid #4a3a1a;
+    border-radius: 6px;
+    line-height: 1.3;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
   }
 
   .mic-error {

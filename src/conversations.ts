@@ -24,6 +24,27 @@ export interface StoredMessage {
   thinking?: string;
 }
 
+/** One unit of transcribed speech. Mirrors `transcribe::EmittedSegment`
+ *  in `src-tauri/src/transcribe.rs`. Speaker IDs are local to the
+ *  conversation — they're stable within one session (assigned by the
+ *  online clusterer as voices come in) and renameable via
+ *  `speaker_labels`, but they don't carry across conversations. */
+export interface TranscriptSegment {
+  start_ms: number;
+  end_ms: number;
+  text: string;
+  /** Cluster ID from the diarize worker. `undefined` when diarization
+   *  is off or when the segment fell outside any reported turn. */
+  speaker?: number;
+  /** `true` when pyannote reported overlapping speakers in this
+   *  segment's timing window — the text is usually garbled and the UI
+   *  flags it visually but doesn't try to split. */
+  overlap?: boolean;
+  /** `true` while the segment's speaker assignment is still
+   *  provisional (cold-start cluster warm-up window). */
+  provisional?: boolean;
+}
+
 /** A whole conversation as it lives on disk (one JSON file per conversation).
  *  The folder it lives in is the source of truth for its grouping — we don't
  *  store a `folder` field, the directory it sits under IS the folder. */
@@ -39,8 +60,18 @@ export interface Conversation {
   created_at: string;
   updated_at: string;
   messages: StoredMessage[];
-  /** Transcribe-mode artifacts. Empty / absent for text-mode conversations. */
-  transcript?: string;
+  /** Transcribe-mode artifacts. Empty / absent for text-mode
+   *  conversations. Each segment carries timing + optional speaker
+   *  ID; the UI renders them grouped by consecutive same-speaker
+   *  runs. */
+  transcript?: TranscriptSegment[];
+  /** User-renamed display names for cluster IDs the diarize worker
+   *  emitted. Sparse — only contains IDs the user has explicitly
+   *  renamed; the renderer falls back to "Speaker N" otherwise. */
+  speaker_labels?: Record<number, string>;
+  /** Whether diarization was enabled for this conversation. Persisted
+   *  so a re-open resumes with the toggle in the right state. */
+  diarize_enabled?: boolean;
   talking_points?: string[];
 }
 
@@ -266,10 +297,33 @@ export async function loadConversation(id: string): Promise<Conversation | null>
   try {
     const path = await findConversationPath(id);
     if (!path) return null;
-    return JSON.parse(await readTextFile(path)) as Conversation;
+    const c = JSON.parse(await readTextFile(path)) as Conversation;
+    return migrateConversationInPlace(c);
   } catch {
     return null;
   }
+}
+
+/** v13 migration: pre-diarize transcripts were stored as a single
+ *  `transcript: string`; the new shape is `TranscriptSegment[]`. We
+ *  wrap legacy strings as a single zero-timestamped segment on load
+ *  so old conversations keep showing their text. The migration is
+ *  in-place and lazy: the next `saveConversation` writes the new
+ *  shape, but unedited legacy files are never rewritten unnecessarily. */
+function migrateConversationInPlace(c: Conversation): Conversation {
+  // svelte-check infers `transcript` as `TranscriptSegment[] | undefined`
+  // from the interface; the legacy disk form sneaks in as `string` and
+  // we explicitly cast to a wider type to detect it.
+  const raw = (c as unknown as { transcript?: TranscriptSegment[] | string })
+    .transcript;
+  if (typeof raw === "string") {
+    if (raw.trim().length > 0) {
+      c.transcript = [{ start_ms: 0, end_ms: 0, text: raw }];
+    } else {
+      c.transcript = [];
+    }
+  }
+  return c;
 }
 
 /** Persist `c` under its current folder, falling back to `targetFolder` (or

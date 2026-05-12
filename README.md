@@ -45,7 +45,8 @@ Run `myownllm` to open the GUI. That's it for setup.
 **Desktop GUI** (Tauri + Svelte 5)
 - Two singleton slots: one chat-model, one transcription — pause/stop controls live on the mode buttons themselves
 - Conversation sidebar with folders, drag-to-organise, rename in place
-- Live transcription with whisper.cpp, mic-pause-keeps-draining-the-backlog
+- Live transcription with Moonshine (Pi 5, English) and Parakeet TDT 0.6B v3 (16+ GB Mac / x86, 25 langs) — ~1 s end-to-end, mic-pause keeps draining the backlog
+- **Speaker diarization** — opt-in "Identify speakers" toggle on the transcribe pane; pyannote-segmentation-3.0 + speaker embeddings + online clustering. English-only on Pi 5 today; everything else multilingual.
 - **Talking Points** — continuously summarises a live transcript into a bullet list, claims the chat-model slot while running
 - Auto-titled conversations, persistent across sessions, recoverable after a crash
 - LAN remote: open the GUI from your phone on the same network, single-user lock with kick-and-hide
@@ -54,7 +55,7 @@ Run `myownllm` to open the GUI. That's it for setup.
 - Self-updating binary — checks GitHub on launch, stages quietly, applies on next start
 - `myownllm status` shows provider, hardware tier, ollama state, update status in one screen
 - Graceful degradation: no network, no problem — last good manifest is cached and kept
-- Crash-resilient transcription buffer — chunks land on disk before whisper sees them, so a force-quit can be drained on next launch
+- Crash-resilient transcription buffer — chunks land on disk before the ASR backend sees them, so a force-quit can be drained on next launch
 - Scriptable end to end — every CLI subcommand returns parseable text or `--json`
 
 **Providers & Families**

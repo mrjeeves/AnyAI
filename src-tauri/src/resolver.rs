@@ -3,16 +3,19 @@
 //! Mirrors the TypeScript `src/manifest.ts` so the headless CLI / API server can resolve
 //! models without booting the JS runtime. Reads the same on-disk caches the GUI writes.
 //!
-//! Schema (v12): a manifest exposes named **families** (e.g. `gemma4`, `qwen3.6`); each
+//! Schema (v13): a manifest exposes named **families** (e.g. `gemma4`, `qwen3.6`); each
 //! family owns its own per-mode tier table. The resolver picks
 //! `families[active_family].modes[mode].tiers` and walks them against current hardware.
 //! Tiers carry separate thresholds for discrete-GPU hosts (`min_vram_gb` /
 //! `min_ram_gb`, the latter taken after the manifest's `headroom_gb`) and for
 //! unified-memory hosts (`min_unified_ram_gb`, raw RAM that already reserves OS
-//! headroom + the paired transcribe model). The shared transcribe ladder
-//! collapses to a single rung — `large-v3-turbo` is the only whisper variant
-//! fast enough to be usable in practice; smaller ggml models exist in
-//! `KNOWN_MODELS` but are not recommended by the default manifest.
+//! headroom + the paired transcribe model).
+//!
+//! v13 adds an optional **per-tier `runtime` field** to `ManifestTier`. This lets
+//! a single ladder promote capable hardware to a different backend — the
+//! default `transcribe` ladder uses Moonshine at the bottom rung and Parakeet
+//! TDT at the top. Resolution falls through: `tier.runtime` → `mode.runtime` →
+//! `default_runtime_for(mode)`.
 
 use anyhow::{anyhow, Result};
 use serde_json::{Map, Value};
@@ -23,7 +26,7 @@ use tokio::time::Duration;
 use crate::hardware::HardwareProfile;
 
 pub const VIRTUAL_PREFIX: &str = "myownllm-";
-pub const KNOWN_MODES: &[&str] = &["text", "vision", "code", "transcribe"];
+pub const KNOWN_MODES: &[&str] = &["text", "vision", "code", "transcribe", "diarize"];
 const DEFAULT_TTL_MIN: f64 = 360.0;
 const FALLBACK_MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/manifests/default.json";
@@ -90,17 +93,48 @@ pub fn resolve_in_manifest(
     Ok(resolve_full(manifest, hw, mode, active_family)?.0)
 }
 
-/// Default runtime for a mode when the manifest doesn't declare one.
-/// Mirror of `defaultRuntimeFor` on the TS side. Transcribe always uses
-/// whisper-rs in this app; everything else routes through Ollama. Used
-/// so a stale cached manifest from before the `runtime` field landed
-/// can't trick the resolver into handing whisper-shaped names to
-/// `ollama pull`.
+/// Default runtime for a mode when neither tier nor mode block declares
+/// one. Mirror of `defaultRuntimeFor` on the TS side. Centralised so
+/// the frontend, Rust resolver, and Rust preload loop stay in sync.
 pub fn default_runtime_for(mode: &str) -> &'static str {
-    if mode == "transcribe" {
-        "whisper"
-    } else {
-        "ollama"
+    match mode {
+        // Bottom of the transcribe tier ladder; capable hardware
+        // promotes to parakeet via the per-tier `runtime` override.
+        "transcribe" => "moonshine",
+        "diarize" => "pyannote-diarize",
+        _ => "ollama",
+    }
+}
+
+/// Effective runtime for a tier under a given mode: per-tier override
+/// wins, then the mode-level runtime, then the compiled default.
+fn tier_runtime(
+    tier: Option<&Value>,
+    mode_spec: Option<&Map<String, Value>>,
+    mode: &str,
+) -> String {
+    if let Some(rt) = tier.and_then(|t| t.get("runtime")).and_then(|v| v.as_str()) {
+        return rt.to_string();
+    }
+    if let Some(rt) = mode_spec
+        .and_then(|s| s.get("runtime"))
+        .and_then(|v| v.as_str())
+    {
+        return rt.to_string();
+    }
+    default_runtime_for(mode).to_string()
+}
+
+/// Safe fallback model name when a non-Ollama mode has no tier block to
+/// walk. Keeps the resolver from handing a text-model tag to an ASR
+/// backend on stale cached manifests.
+fn safe_fallback_for(runtime: &str) -> &'static str {
+    match runtime {
+        "moonshine" => "moonshine-small-q8",
+        "parakeet" => "parakeet-tdt-0.6b-v3-int8",
+        "pyannote-diarize" => "pyannote-seg-3.0+campp-small",
+        "sortformer" => "sortformer-streaming",
+        _ => "tinyllama",
     }
 }
 
@@ -108,7 +142,8 @@ pub fn default_runtime_for(mode: &str) -> &'static str {
 /// table. Runtime is read **strictly from the requested mode's spec** —
 /// never inherited from a fallback default mode — so a transcribe
 /// request whose mode is missing from the manifest still routes through
-/// whisper-rs instead of inheriting `text`'s `ollama` runtime.
+/// the correct ASR backend instead of inheriting `text`'s `ollama`
+/// runtime. Per-tier `runtime` overrides win over mode-level runtime.
 pub fn resolve_full(
     manifest: &Value,
     hw: &HardwareProfile,
@@ -119,8 +154,8 @@ pub fn resolve_full(
         .ok_or_else(|| anyhow!("manifest exposes no families"))?;
 
     // Look up the mode in the family first, then the manifest's
-    // shared_modes block (the canonical whisper transcribe ladder
-    // lives there). The family's own declaration always wins so a
+    // shared_modes block (the canonical transcribe / diarize ladders
+    // live there). The family's own declaration always wins so a
     // family can override a shared mode without forking the schema.
     let exact_spec = family
         .get("modes")
@@ -133,21 +168,17 @@ pub fn resolve_full(
                 .and_then(|v| v.as_object())
         });
 
-    // Runtime is bound to the requested mode, not the fallback. If the
-    // requested mode isn't declared we use the well-known default for
-    // that mode (transcribe → whisper, everything else → ollama).
-    let runtime = exact_spec
-        .and_then(|s| s.get("runtime"))
-        .and_then(|v| v.as_str())
-        .unwrap_or_else(|| default_runtime_for(mode))
-        .to_string();
+    let mode_level_runtime = tier_runtime(None, exact_spec, mode);
 
     // No explicit block AND we're on a non-ollama runtime — return a
-    // safe whisper default rather than crossing tier ladders with text
-    // mode (which would surface nonsense like the text model + whisper
-    // runtime, then trip whisper-rs at load time).
-    if exact_spec.is_none() && runtime == "whisper" {
-        return Ok(("tiny.en".to_string(), runtime));
+    // safe well-known model rather than crossing tier ladders with text
+    // mode (which would surface nonsense and trip the wrong backend at
+    // load time).
+    if exact_spec.is_none() && mode_level_runtime != "ollama" {
+        return Ok((
+            safe_fallback_for(&mode_level_runtime).to_string(),
+            mode_level_runtime,
+        ));
     }
 
     let default_mode = family
@@ -175,43 +206,76 @@ pub fn resolve_full(
     for tier in tiers {
         if tier_matches(tier, hw, unified, headroom) {
             if let Some(model) = tier["model"].as_str() {
-                return Ok((model.to_string(), runtime));
+                return Ok((
+                    model.to_string(),
+                    tier_runtime(Some(tier), exact_spec, mode),
+                ));
             }
         }
     }
 
     let last = tiers
         .last()
-        .and_then(|t| t["model"].as_str())
-        .map(str::to_string)
         .ok_or_else(|| anyhow!("no model found in active family tiers"))?;
-    Ok((last, runtime))
+    let last_model = last["model"]
+        .as_str()
+        .ok_or_else(|| anyhow!("no model found in active family tiers"))?;
+    Ok((
+        last_model.to_string(),
+        tier_runtime(Some(last), exact_spec, mode),
+    ))
 }
 
-/// Look up the effective runtime for `mode` under the active family.
-/// Reads the manifest's declared runtime when present, otherwise falls
-/// back to `default_runtime_for(mode)` so the preload loop skips
-/// `ollama pull` for whisper modes even when the cached manifest
-/// predates the `runtime` field.
+/// Look up the effective runtime for `mode` under the active family,
+/// **hardware-aware**. Walks the same tiers the resolver would and
+/// reads the matched tier's runtime, falling back to the mode-level
+/// runtime and finally to `default_runtime_for(mode)`. Used by the
+/// preload loop and cleanup paths to know whether to call `ollama pull`
+/// or pull an ONNX file via the central model registry.
 pub fn mode_runtime(manifest: &Value, mode: &str, active_family: &str) -> Option<String> {
+    let hw = crate::hardware::detect().ok()?;
+    mode_runtime_with_hw(manifest, mode, active_family, &hw)
+}
+
+/// `mode_runtime` with an explicit hardware profile (testing seam, and
+/// used by callers that already have a profile in hand to avoid
+/// re-probing).
+pub fn mode_runtime_with_hw(
+    manifest: &Value,
+    mode: &str,
+    active_family: &str,
+    hw: &HardwareProfile,
+) -> Option<String> {
     let (_, family) = pick_family(manifest, active_family)?;
-    let declared = family
+    let mode_spec = family
         .get("modes")
         .and_then(|m| m.get(mode))
-        .and_then(|v| v.get("runtime"))
-        .and_then(|v| v.as_str())
+        .and_then(|v| v.as_object())
         .or_else(|| {
             manifest
                 .get("shared_modes")
                 .and_then(|m| m.get(mode))
-                .and_then(|v| v.get("runtime"))
-                .and_then(|v| v.as_str())
+                .and_then(|v| v.as_object())
         });
-    Some(
-        declared
-            .unwrap_or_else(|| default_runtime_for(mode))
-            .to_string(),
-    )
+    let tiers = mode_spec
+        .and_then(|s| s.get("tiers"))
+        .and_then(|t| t.as_array());
+
+    if let Some(tiers) = tiers {
+        let unified = is_unified_memory(hw);
+        let headroom = headroom_gb(manifest, &hw.gpu_type);
+        for tier in tiers {
+            if tier_matches(tier, hw, unified, headroom) {
+                return Some(tier_runtime(Some(tier), mode_spec, mode));
+            }
+        }
+        // No tier matched — runtime of the last rung (fallback target).
+        if let Some(last) = tiers.last() {
+            return Some(tier_runtime(Some(last), mode_spec, mode));
+        }
+    }
+
+    Some(tier_runtime(None, mode_spec, mode))
 }
 
 /// Compiled-in headroom defaults when a manifest omits `headroom_gb`. Mirror
@@ -285,28 +349,35 @@ fn tier_matches(tier: &Value, hw: &HardwareProfile, unified: bool, headroom: f64
     cpu_budget >= min_ram
 }
 
-/// All model tags recommended by a manifest across every family/mode/tier.
+/// All Ollama-runtime model tags recommended by a manifest across every
+/// family/mode/tier. Skips tiers whose `runtime` is anything other than
+/// `ollama` (ASR / diarize tiers live under `~/.myownllm/asr/` and
+/// `~/.myownllm/diarize/` and aren't reachable from `ollama list`).
 pub fn tags_in_manifest(manifest: &Value) -> Vec<String> {
     let mut out = Vec::new();
     let mut push_mode = |mode_spec: &Value| {
-        // Cleanup is Ollama-only: skip non-Ollama runtimes (whisper
-        // models live under ~/.myownllm/whisper/ and aren't reachable
-        // from `ollama list` anyway).
-        let runtime = mode_spec
+        let mode_level_runtime = mode_spec
             .get("runtime")
             .and_then(|v| v.as_str())
             .unwrap_or("ollama");
-        if runtime != "ollama" {
+        let Some(tiers) = mode_spec["tiers"].as_array() else {
             return;
-        }
-        if let Some(tiers) = mode_spec["tiers"].as_array() {
-            for tier in tiers {
-                if let Some(t) = tier["model"].as_str() {
-                    out.push(t.to_string());
-                }
-                if let Some(t) = tier["fallback"].as_str() {
-                    out.push(t.to_string());
-                }
+        };
+        for tier in tiers {
+            // Per-tier runtime wins over mode-level. Cleanup is
+            // Ollama-only.
+            let tier_runtime = tier
+                .get("runtime")
+                .and_then(|v| v.as_str())
+                .unwrap_or(mode_level_runtime);
+            if tier_runtime != "ollama" {
+                continue;
+            }
+            if let Some(t) = tier["model"].as_str() {
+                out.push(t.to_string());
+            }
+            if let Some(t) = tier["fallback"].as_str() {
+                out.push(t.to_string());
             }
         }
     };
@@ -920,17 +991,18 @@ mod tests {
     }
 
     #[test]
-    fn whisper_ladder_returns_turbo_everywhere() {
-        // The default manifest's transcribe ladder collapses to a single
-        // rung at threshold 0: any hardware running text gets turbo
-        // because smaller whisper variants are unusably slow in practice.
-        let turbo = serde_json::json!({
+    fn transcribe_ladder_per_tier_runtime_promotes_capable_hardware() {
+        // The v13 default manifest puts Moonshine on the bottom rung and
+        // Parakeet on the capable rung. A 4 GB Pi should land on
+        // Moonshine; a 32 GB Mac should land on Parakeet — same ladder,
+        // different per-tier `runtime`.
+        let ladder = serde_json::json!({
             "default_family": "f",
             "shared_modes": {
                 "transcribe": {
-                    "runtime": "whisper",
                     "tiers": [
-                        { "min_vram_gb": 0, "min_ram_gb": 0, "min_unified_ram_gb": 0, "model": "large-v3-turbo", "fallback": "large-v3-turbo" }
+                        { "min_vram_gb": 4, "min_ram_gb": 8, "min_unified_ram_gb": 16, "runtime": "parakeet",  "model": "parakeet-tdt-0.6b-v3-int8", "fallback": "moonshine-small-q8" },
+                        { "min_vram_gb": 0, "min_ram_gb": 0, "min_unified_ram_gb": 0,  "runtime": "moonshine", "model": "moonshine-small-q8",        "fallback": "moonshine-small-q8" }
                     ]
                 }
             },
@@ -941,14 +1013,39 @@ mod tests {
             }
         });
         let pi = hw(GpuType::None, None, 4.0);
-        let mac = hw(GpuType::Apple, Some(64.0), 64.0);
-        assert_eq!(
-            resolve_in_manifest(&turbo, &pi, "transcribe", "f").unwrap(),
-            "large-v3-turbo"
-        );
-        assert_eq!(
-            resolve_in_manifest(&turbo, &mac, "transcribe", "f").unwrap(),
-            "large-v3-turbo"
-        );
+        let mac = hw(GpuType::Apple, Some(32.0), 32.0);
+
+        let (pi_model, pi_rt) = resolve_full(&ladder, &pi, "transcribe", "f").unwrap();
+        assert_eq!(pi_model, "moonshine-small-q8");
+        assert_eq!(pi_rt, "moonshine");
+
+        let (mac_model, mac_rt) = resolve_full(&ladder, &mac, "transcribe", "f").unwrap();
+        assert_eq!(mac_model, "parakeet-tdt-0.6b-v3-int8");
+        assert_eq!(mac_rt, "parakeet");
+    }
+
+    #[test]
+    fn diarize_mode_defaults_to_pyannote_runtime() {
+        // Even without a tier-level `runtime` field, the resolver maps
+        // the `diarize` mode to pyannote-diarize via
+        // `default_runtime_for`.
+        let m = serde_json::json!({
+            "default_family": "f",
+            "shared_modes": {
+                "diarize": {
+                    "tiers": [
+                        { "min_vram_gb": 0, "min_ram_gb": 0, "min_unified_ram_gb": 0, "model": "pyannote-seg-3.0+campp-small", "fallback": "pyannote-seg-3.0+campp-small" }
+                    ]
+                }
+            },
+            "families": {
+                "f": { "default_mode": "text", "modes": { "text": { "tiers": [
+                    { "min_vram_gb": 0, "min_ram_gb": 0, "min_unified_ram_gb": 0, "model": "x" }
+                ]}}}
+            }
+        });
+        let pi = hw(GpuType::None, None, 4.0);
+        let (_, rt) = resolve_full(&m, &pi, "diarize", "f").unwrap();
+        assert_eq!(rt, "pyannote-diarize");
     }
 }

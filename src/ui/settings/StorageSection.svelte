@@ -5,8 +5,12 @@
   import { loadConfig, saveConfig } from "../../config";
   import type { HardwareProfile, OllamaModel } from "../../types";
 
-  interface WhisperInfo {
+  /** Mirror of `models::ModelInfo` in src-tauri/src/models.rs.
+   *  Storage tab sums installed sizes across ASR + diarize alongside
+   *  the Ollama total. */
+  interface ModelInfo {
     name: string;
+    kind: string;
     installed: boolean;
     installed_size_bytes: number | null;
   }
@@ -25,36 +29,38 @@
   let diskFreeGb = $state<number | null>(null);
   let dirExists = $state<boolean | null>(null);
   let loading = $state(true);
-  /** Bytes parked under `~/.myownllm/transcribe-buffer/`. > 0 when whisper
-   *  fell behind realtime and audio is spilling to disk; the inference
-   *  loop drains the dir as it catches up. The card stays hidden when
-   *  there's nothing pending — there's no useful "0 GB" reading. */
+  /** Bytes parked under `~/.myownllm/transcribe-buffer/`. > 0 when the
+   *  ASR backend fell behind realtime and audio is spilling to disk;
+   *  the inference loop drains the dir as it catches up. The card
+   *  stays hidden when there's nothing pending. */
   let transcribeBacklogBytes = $state(0);
 
   onMount(async () => {
     try {
-      const [pulled, whisper, hw, config, backlog] = await Promise.all([
+      const [pulled, asr, diarize, hw, config, backlog] = await Promise.all([
         invoke<OllamaModel[]>("ollama_list_models").catch(() => [] as OllamaModel[]),
-        invoke<WhisperInfo[]>("whisper_models_list").catch(() => [] as WhisperInfo[]),
+        invoke<ModelInfo[]>("asr_models_list").catch(() => [] as ModelInfo[]),
+        invoke<ModelInfo[]>("diarize_models_list").catch(() => [] as ModelInfo[]),
         invoke<HardwareProfile>("detect_hardware").catch(() => null),
         loadConfig(),
         invoke<number>("transcribe_buffer_size_bytes").catch(() => 0),
       ]);
-      // Whisper models live under ~/.myownllm/whisper/, not in Ollama's library,
-      // so the on-disk total has to sum both backends or it under-reports
-      // every transcribe install. Only count installed entries with a known
-      // size — pending downloads and unknown-size rows would inflate the
+      // Local-runtime models live under ~/.myownllm/models/, not in
+      // Ollama's library, so the on-disk total has to sum every
+      // backend or it under-reports every transcribe / diarize
+      // install. Only count installed entries with a known size —
+      // pending downloads and unknown-size rows would inflate the
       // total without representing real bytes on disk.
       const ollamaBytes = pulled.reduce((acc, m) => acc + m.size, 0);
-      const whisperInstalled = whisper.filter(
-        (w) => w.installed && (w.installed_size_bytes ?? 0) > 0,
+      const localInstalled = [...asr, ...diarize].filter(
+        (m) => m.installed && (m.installed_size_bytes ?? 0) > 0,
       );
-      const whisperBytes = whisperInstalled.reduce(
-        (acc, w) => acc + (w.installed_size_bytes ?? 0),
+      const localBytes = localInstalled.reduce(
+        (acc, m) => acc + (m.installed_size_bytes ?? 0),
         0,
       );
-      totalBytes = ollamaBytes + whisperBytes;
-      modelCount = pulled.length + whisperInstalled.length;
+      totalBytes = ollamaBytes + localBytes;
+      modelCount = pulled.length + localInstalled.length;
       diskFreeGb = hw?.disk_free_gb ?? null;
       transcribeBacklogBytes = backlog;
       conversationDir = config.conversation_dir ?? "";

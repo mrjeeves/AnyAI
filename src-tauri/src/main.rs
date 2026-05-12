@@ -3,9 +3,12 @@
 
 mod api;
 mod api_models;
+mod asr;
 mod cli;
 mod conversations;
+mod diarize;
 mod hardware;
+mod models;
 mod ollama;
 mod preload;
 mod process;
@@ -271,19 +274,23 @@ async fn remote_ui_kick(disable: bool) -> Result<RemoteUiStatus, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Local-only transcription pipeline. Audio capture + whisper-rs both run
-// in-process; nothing is sent over the network at runtime. Models live
-// under `~/.myownllm/whisper/` and are downloaded on demand.
+// Local-only transcription pipeline. Audio capture (cpal) + ASR (ONNX via
+// `ort`) + optional speaker diarization (pyannote pipeline) all run
+// in-process. Models live under `~/.myownllm/models/asr/` and
+// `~/.myownllm/models/diarize/` and are downloaded on demand.
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
 fn transcribe_start(
     stream_id: String,
+    runtime: String,
     model: String,
     device: Option<String>,
+    diarize_model: Option<String>,
     window: tauri::WebviewWindow,
 ) -> Result<(), String> {
-    transcribe::start(stream_id, model, device, window).map_err(|e| e.to_string())
+    transcribe::start(stream_id, runtime, model, device, diarize_model, window)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -314,43 +321,74 @@ fn transcribe_pending_streams() -> Vec<transcribe::PendingStream> {
 #[tauri::command]
 fn transcribe_drain_start(
     stream_id: String,
+    runtime: String,
     model: String,
+    diarize_model: Option<String>,
     window: tauri::WebviewWindow,
 ) -> Result<(), String> {
-    transcribe::start_drain(stream_id, model, window).map_err(|e| e.to_string())
+    transcribe::start_drain(stream_id, runtime, model, diarize_model, window)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn transcribe_upload_start(
     stream_id: String,
+    runtime: String,
     model: String,
     file_path: String,
+    diarize_model: Option<String>,
     window: tauri::WebviewWindow,
 ) -> Result<(), String> {
     transcribe::start_upload(
         stream_id,
+        runtime,
         model,
         std::path::PathBuf::from(file_path),
+        diarize_model,
         window,
     )
     .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn whisper_models_list() -> Result<Vec<transcribe::WhisperModelInfo>, String> {
-    transcribe::list_models().map_err(|e| e.to_string())
+fn asr_models_list() -> Vec<models::ModelInfo> {
+    models::list(models::ModelKind::Asr)
 }
 
 #[tauri::command]
-async fn whisper_model_pull(name: String, window: tauri::WebviewWindow) -> Result<(), String> {
-    transcribe::pull_model(name, window)
+async fn asr_model_pull(name: String, window: tauri::WebviewWindow) -> Result<(), String> {
+    models::pull_model(name, models::ModelKind::Asr, window)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn asr_model_remove(name: String) -> Result<(), String> {
+    match models::find(&name, models::ModelKind::Asr) {
+        Some(spec) => models::remove(spec).map_err(|e| e.to_string()),
+        None => Err(format!("unknown ASR model: {name}")),
+    }
+}
+
+#[tauri::command]
+fn diarize_models_list() -> Vec<models::ModelInfo> {
+    models::list(models::ModelKind::Diarize)
+}
+
+/// Pull every component of a composite diarize name
+/// (e.g. `"pyannote-seg-3.0+wespeaker-r34"`). Used by the "Identify
+/// speakers" toggle in the transcribe pane.
+#[tauri::command]
+async fn diarize_model_pull(name: String, window: tauri::WebviewWindow) -> Result<(), String> {
+    models::pull_composite(name, models::ModelKind::Diarize, window)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn whisper_model_remove(name: String) -> Result<(), String> {
-    transcribe::remove_model(&name).map_err(|e| e.to_string())
+fn diarize_model_present(name: String) -> bool {
+    models::composite_installed(&name, models::ModelKind::Diarize)
 }
 
 #[tauri::command]
@@ -501,9 +539,12 @@ fn main() {
             transcribe_pending_streams,
             transcribe_drain_start,
             transcribe_upload_start,
-            whisper_models_list,
-            whisper_model_pull,
-            whisper_model_remove,
+            asr_models_list,
+            asr_model_pull,
+            asr_model_remove,
+            diarize_models_list,
+            diarize_model_pull,
+            diarize_model_present,
             audio_input_devices,
         ])
         .setup(|app| {
