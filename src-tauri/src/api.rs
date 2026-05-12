@@ -1,7 +1,7 @@
 //! OpenAI-compatible HTTP server.
 //!
 //! Listens on a configurable host:port (default 127.0.0.1:1473), translates virtual
-//! model IDs (e.g. `myownllm-text`) to the currently-resolved underlying tag, and proxies
+//! model IDs (`myownllm`, `myownllm-transcribe`) to the currently-resolved underlying tag, and proxies
 //! to Ollama at 127.0.0.1:11434. Streaming requests are forwarded byte-for-byte; the
 //! `model` field in each chunk is rewritten back to the requested virtual ID so clients
 //! see what they asked for.
@@ -215,12 +215,13 @@ async fn healthz() -> impl IntoResponse {
 async fn list_models(State(_state): State<AppState>) -> impl IntoResponse {
     let mut data: Vec<ModelObject> = Vec::new();
 
-    // Virtual models for each known mode.
-    for mode in crate::resolver::KNOWN_MODES {
-        let id = format!("{}{}", crate::resolver::VIRTUAL_PREFIX, mode);
+    // Public virtual models. Narrow on purpose: bare `myownllm` (chat) and
+    // `myownllm-transcribe` (ASR). Internal modes like `diarize` aren't
+    // advertised.
+    for (id, mode) in crate::resolver::PUBLIC_VIRTUAL_IDS {
         let resolved = crate::resolver::resolve(mode).await.ok();
         data.push(ModelObject {
-            id,
+            id: (*id).to_string(),
             object: "model",
             owned_by: "myownllm".to_string(),
             created: None,

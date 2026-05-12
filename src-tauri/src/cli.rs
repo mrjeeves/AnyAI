@@ -55,7 +55,7 @@ COMMANDS:
                 Subcommands: status | check | apply | enable | disable
 
 FLAGS (run):
-  --mode <text|vision|code|transcribe>
+  --mode <text|transcribe>
   --model <name>        Override model
   --profile <url>       One-off manifest URL
 
@@ -67,7 +67,7 @@ FLAGS (serve):
   --no-ollama           Don't start ollama (assume it's already running)
 
 FLAGS (preload):
-  <mode...>             One or more of text, vision, code, transcribe
+  <mode...>             One or more of text, transcribe
   --track               Persist to config.tracked_modes
   --no-warm             Skip the post-pull warm-up call
   --json                Newline-delimited JSON event output
@@ -819,7 +819,7 @@ async fn cmd_preload(args: &[String]) -> Result<()> {
     for m in &modes {
         if !crate::resolver::KNOWN_MODES.contains(&m.as_str()) {
             return Err(anyhow!(
-                "unknown mode '{m}' (expected one of: text, vision, code, transcribe)"
+                "unknown mode '{m}' (expected one of: text, transcribe)"
             ));
         }
     }

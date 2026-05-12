@@ -65,7 +65,7 @@ A first-class capture pipeline, not a sidebar feature. Mic in, segmented transcr
 - **Crash-resilient by design.** Audio chunks land on disk before the ASR backend sees them, so a force-quit can be drained on next launch. Transcripts, speaker labels, diarize state, and the talking-points list are all part of the conversation record.
 - **One binary.** No second daemon, no Python venv, no cloud round-trip. The same `myownllm` process hosts ASR, diarization, and the chat model used to summarise — coordinated through two singleton slots on the GUI's mode bar.
 
-The current GUI keeps audio capture local to the host machine; the LAN remote view is text-first today and a streaming-mic remote path is on the roadmap.
+Both paths — chat and transcription — are designed to be available on the GUI, the headless `serve` API, and the LAN remote view. The desktop GUI is the most complete today; full audio capture over `serve` / remote is on the near-term roadmap.
 
 ## Highlights
 
