@@ -2,7 +2,7 @@
 
 # MyOwnLLM
 
-### A local API surface for local AI.<br>Self-host the JSON, set it, forget it.
+### Local LLMs and real-time transcription, on your machine, in one binary.<br>The thing &ldquo;bring your own LLM&rdquo; and &ldquo;transcription is solved&rdquo; quietly assume already exists.
 
 [**myownllm.net**](https://myownllm.net) — installers, screenshots, the pitch
 
@@ -18,7 +18,19 @@
 
 ---
 
-A single binary turns whatever machine it lands on — a Pi 5, a laptop, a workstation — into a local OpenAI-compatible endpoint. A JSON manifest (yours, your team's, or one you trust) decides which model runs where. Clients keep speaking OpenAI; the hardware-shaped substitution happens underneath.
+## Why this exists
+
+> **&ldquo;Bring your own LLM.&rdquo;** &nbsp;To whom?<br>
+> **&ldquo;Transcription is a solved problem.&rdquo;** &nbsp;For whom?
+
+Twenty years writing AI software, and getting either one *actually working* — locally, reliably, on whatever machine I happened to be holding — was still a week of yak-shaving. If it's that scary for me, nobody else stands a chance. So I built the thing I wished existed.
+
+**MyOwnLLM is two solved paths in one binary:**
+
+|   |   |
+|---|---|
+| **A local LLM endpoint that just works** | OpenAI-compatible HTTP on `127.0.0.1:1473` (also Ollama, also Anthropic), served by whichever model fits the machine, chosen by a JSON manifest you — or your team, or someone you trust — control. Drop it into Cursor, Continue, Aider, Cline, Zed, Open WebUI, opencode, OpenClaw, OpenClaude, or your own scripts and stop thinking about it. |
+| **Real-time transcription that just works** | Mic-to-text in ~1 s on a Pi 5 (English) or 80–200 ms on capable hardware (25 languages), with optional speaker diarization that stays stable across the whole session and a Talking-Points summary that grows alongside the live transcript. No second daemon, no Python venv, no cloud round-trip. |
 
 ## Install
 
