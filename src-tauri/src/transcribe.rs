@@ -63,6 +63,17 @@ const SILENCE_RMS_THRESHOLD: f32 = 0.005;
 /// even on a Pi 5.
 const MAX_BACKLOG_SECONDS: f32 = 300.0;
 
+/// Give up after this many `AsrBackend::process_chunk` failures in a
+/// row. Ports the spirit of the whisper-era PR #100 fix to the new
+/// pipeline: if every retry still fails, the underlying problem isn't
+/// transient (model file corruption, OOM, ONNX runtime wedge) and
+/// silently chewing through the backlog deleting chunks as we go is
+/// worse than surfacing a clear error to the user. On transient
+/// errors the worker also calls `backend.reset_state()` before
+/// retrying so a recoverable failure doesn't poison every subsequent
+/// chunk.
+const ASR_CONSECUTIVE_ERROR_LIMIT: u32 = 3;
+
 /// Build a cpal `err_fn` closure that latches the first error into the
 /// shared slot. Used per-branch in the sample-format match so each cpal
 /// `build_input_stream` call gets its own owned closure (the closures
@@ -746,6 +757,7 @@ fn run_session(
     let mut next_seq: u64 = 1;
     let mut chunks_since_reset: u64 = 0;
     let mut chunk_t0_ms: u64 = 0;
+    let mut consecutive_errors: u32 = 0;
 
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -800,12 +812,31 @@ fn run_session(
         }
 
         let asr_out = match asr.process_chunk(&samples, chunk_t0_ms, &cancel) {
-            Ok(o) => o,
+            Ok(o) => {
+                consecutive_errors = 0;
+                o
+            }
             Err(e) => {
                 if cancel.load(Ordering::SeqCst) {
                     break;
                 }
-                eprintln!("ASR inference failed: {e}");
+                consecutive_errors += 1;
+                eprintln!(
+                    "ASR inference failed (consecutive={consecutive_errors}): {e}"
+                );
+                if consecutive_errors >= ASR_CONSECUTIVE_ERROR_LIMIT {
+                    return Err(anyhow!(
+                        "ASR backend failed {consecutive_errors} times in a row: {e}. \
+                         Stopping the session — the underlying problem looks non-transient \
+                         (model corruption, OOM, runtime wedge)."
+                    ));
+                }
+                // Recoverable: try resetting the backend's internal
+                // state so a wedged decoder doesn't poison the next
+                // chunk too. Cheap for the stateless backends we
+                // ship; the trait contract makes it a no-op when
+                // there's no state to drop.
+                asr.reset_state();
                 let _ = std::fs::remove_file(&next_path);
                 next_seq += 1;
                 chunk_t0_ms += chunk_ms;
@@ -815,7 +846,10 @@ fn run_session(
                         started.elapsed().as_millis(),
                         count_pending_chunks(&buffer_dir),
                         None,
-                        Some(format!("ASR inference error: {e}")),
+                        Some(format!(
+                            "ASR inference error ({}/{}): {e}",
+                            consecutive_errors, ASR_CONSECUTIVE_ERROR_LIMIT
+                        )),
                     ),
                 );
                 continue;
@@ -907,6 +941,7 @@ fn run_drain(
     let mut next_seq: u64 = lowest_pending_seq(&buffer_dir).unwrap_or(1);
     let mut chunks_since_reset: u64 = 0;
     let mut chunk_t0_ms: u64 = 0;
+    let mut consecutive_errors: u32 = 0;
     let initial_pending = count_pending_chunks(&buffer_dir);
     let _ = window.emit(
         event,
@@ -956,12 +991,25 @@ fn run_drain(
         }
 
         let asr_out = match asr.process_chunk(&samples, chunk_t0_ms, &cancel) {
-            Ok(o) => o,
+            Ok(o) => {
+                consecutive_errors = 0;
+                o
+            }
             Err(e) => {
                 if cancel.load(Ordering::SeqCst) {
                     break;
                 }
-                eprintln!("ASR inference failed: {e}");
+                consecutive_errors += 1;
+                eprintln!(
+                    "ASR inference failed (consecutive={consecutive_errors}): {e}"
+                );
+                if consecutive_errors >= ASR_CONSECUTIVE_ERROR_LIMIT {
+                    return Err(anyhow!(
+                        "ASR backend failed {consecutive_errors} times in a row \
+                         while draining recovered chunks: {e}"
+                    ));
+                }
+                asr.reset_state();
                 let _ = std::fs::remove_file(&next_path);
                 next_seq += 1;
                 chunk_t0_ms += chunk_ms;
@@ -1077,6 +1125,7 @@ fn run_upload(
     let mut sb: Option<SampleBuffer<f32>> = None;
     let mut chunk_t0_ms: u64 = 0;
     let mut chunks_since_reset: u64 = 0;
+    let mut consecutive_errors: u32 = 0;
 
     'outer: loop {
         if cancel.load(Ordering::SeqCst) {
@@ -1141,12 +1190,25 @@ fn run_upload(
                 continue;
             }
             let asr_out = match asr.process_chunk(&resampled, chunk_t0_ms, &cancel) {
-                Ok(o) => o,
+                Ok(o) => {
+                    consecutive_errors = 0;
+                    o
+                }
                 Err(e) => {
                     if cancel.load(Ordering::SeqCst) {
                         break 'outer;
                     }
-                    eprintln!("ASR inference failed: {e}");
+                    consecutive_errors += 1;
+                    eprintln!(
+                        "ASR inference failed (consecutive={consecutive_errors}): {e}"
+                    );
+                    if consecutive_errors >= ASR_CONSECUTIVE_ERROR_LIMIT {
+                        return Err(anyhow!(
+                            "ASR backend failed {consecutive_errors} times in a row \
+                             while transcribing the uploaded file: {e}"
+                        ));
+                    }
+                    asr.reset_state();
                     chunk_t0_ms += chunk_ms;
                     continue;
                 }

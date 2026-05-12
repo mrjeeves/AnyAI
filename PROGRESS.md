@@ -92,6 +92,12 @@ cd src-tauri && cargo test --bins    # 86 passing
 pnpm install && pnpm check           # passes
 ```
 
+## Merged from `main`
+
+- Picked up the `0.2.5` version bump (package.json + Cargo.toml).
+- PR #100's spirit ported into the new pipeline: `ASR_CONSECUTIVE_ERROR_LIMIT` (3) in `transcribe.rs`. On a backend error the worker bumps a per-loop counter, calls `backend.reset_state()`, and continues; after 3 consecutive failures the session aborts with a clear error so a non-transient problem (model corruption, OOM, ONNX runtime wedge) surfaces instead of silently chewing through chunks. Applied to all three run loops (`run_session` / `run_drain` / `run_upload`).
+- The whisper-state-recreate code from PR #100 itself doesn't apply — that logic was tied to whisper-rs's stateful KV cache, which the new `AsrBackend` trait replaces with per-backend `reset_state()`. Moonshine/Parakeet are stateless across chunks today (`state_reset_chunks: 0`), so the reset is currently a no-op; once their ONNX inference is wired up they can opt in by maintaining a session-mutable state and dropping it on reset.
+
 ## What's left for the next session
 
 Only one item, and it's the **load-bearing** one: **wire ort 2.x in the four stub bodies** (Moonshine encoder→decoder, Parakeet merged graph, pyannote-seg powerset, embedder forward) against the real ONNX models pulled by `models::pull_model`. Test against a golden audio fixture.
