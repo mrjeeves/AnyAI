@@ -73,6 +73,11 @@ export interface Conversation {
    *  so a re-open resumes with the toggle in the right state. */
   diarize_enabled?: boolean;
   talking_points?: string[];
+  /** One-step undo buffer for talking points. Populated when the user
+   *  regenerates: the prior `talking_points` array is stashed here so the
+   *  Undo button can swap it back. Cleared after undo (single-level
+   *  undo — discard, not stack). */
+  talking_points_prev?: string[];
 }
 
 /** Lightweight projection used by the sidebar list — avoids reading every
@@ -326,6 +331,50 @@ function migrateConversationInPlace(c: Conversation): Conversation {
   return c;
 }
 
+/** Sibling-file paths for a conversation's talking-points artifacts. The
+ *  `.md` is a human-readable rendering kept in sync with `talking_points`;
+ *  the `.prev.md` mirrors the one-step undo buffer (`talking_points_prev`).
+ *  Both live in the same folder as the `.json` so a folder move or rename
+ *  takes them along for free. */
+function tpMdPath(jsonPath: string): string {
+  return jsonPath.replace(/\.json$/, ".talking-points.md");
+}
+
+function tpPrevMdPath(jsonPath: string): string {
+  return jsonPath.replace(/\.json$/, ".talking-points.prev.md");
+}
+
+/** Render a bullet list to markdown. Includes the session title and the
+ *  generation timestamp at the top so a downloaded file is self-describing
+ *  without needing the surrounding session JSON. */
+function renderTalkingPointsMd(
+  c: Conversation,
+  points: string[],
+  label: string,
+): string {
+  const title = c.title || "Untitled session";
+  const ts = c.updated_at || new Date().toISOString();
+  const body = points.map((p) => `- ${p}`).join("\n");
+  return `# ${title}\n\n_${label} · ${ts}_\n\n${body}\n`;
+}
+
+/** Write or remove a sidecar `.md` so disk state matches `points`.
+ *  Removing on empty keeps `pruneEmptyDirs` honest — a folder containing
+ *  only stale .md files would otherwise look "non-empty" after the parent
+ *  conversation was deleted. */
+async function syncMdSidecar(
+  mdPath: string,
+  c: Conversation,
+  points: string[] | undefined,
+  label: string,
+): Promise<void> {
+  if (points && points.length > 0) {
+    await writeTextFile(mdPath, renderTalkingPointsMd(c, points, label));
+    return;
+  }
+  if (await exists(mdPath)) await remove(mdPath);
+}
+
 /** Persist `c` under its current folder, falling back to `targetFolder` (or
  *  the root) if no existing file is found. Existing files keep their folder
  *  unless the caller explicitly moves them via `moveConversation`. */
@@ -343,12 +392,26 @@ export async function saveConversation(
   }
   // Pretty-printed: these files are small and users may want to grep them.
   await writeTextFile(path, JSON.stringify(c, null, 2));
+  await syncMdSidecar(tpMdPath(path), c, c.talking_points, "Talking points");
+  await syncMdSidecar(
+    tpPrevMdPath(path),
+    c,
+    c.talking_points_prev,
+    "Talking points (previous)",
+  );
 }
 
 export async function deleteConversation(id: string): Promise<void> {
   try {
     const path = await findConversationPath(id);
     if (!path) return;
+    // Remove the .md sidecars first so the parent dir is genuinely empty by
+    // the time pruneEmptyDirs gets there — otherwise leftover .md files
+    // would block the prune and leave a phantom folder in the sidebar.
+    const md = tpMdPath(path);
+    if (await exists(md)) await remove(md);
+    const prevMd = tpPrevMdPath(path);
+    if (await exists(prevMd)) await remove(prevMd);
     if (await exists(path)) await remove(path);
     await pruneEmptyDirs(parentDir(path));
   } catch {
@@ -374,6 +437,21 @@ export async function moveConversation(id: string, targetFolder: string): Promis
   if (current === targetPath) return;
   const prevParent = parentDir(current);
   await rename(current, targetPath);
+  // Drag the talking-points sidecars along with the JSON. Without this they'd
+  // be stranded in the old folder, the sidebar's pruneEmptyDirs would skip
+  // that folder (it'd still contain .md files), and `findConversationPath`
+  // could never reunite them with the moved JSON.
+  for (const sidecar of [tpMdPath, tpPrevMdPath]) {
+    const oldMd = sidecar(current);
+    const newMd = sidecar(targetPath);
+    if (await exists(oldMd)) {
+      try {
+        await rename(oldMd, newMd);
+      } catch {
+        // Best-effort: a missing sidecar shouldn't fail the move.
+      }
+    }
+  }
   await pruneEmptyDirs(prevParent);
 }
 
@@ -423,6 +501,59 @@ export async function deleteFolder(path: string): Promise<void> {
     return;
   }
   await pruneEmptyDirs(prevParent);
+}
+
+/** Swap `talking_points` with `talking_points_prev` (single-level undo).
+ *  No-op if there's no previous version. Returns the updated conversation
+ *  so the caller can refresh its local mirror in one round-trip. */
+export async function undoTalkingPoints(id: string): Promise<Conversation | null> {
+  const c = await loadConversation(id);
+  if (!c) return null;
+  const prev = c.talking_points_prev;
+  if (!prev || prev.length === 0) return c;
+  // Swap rather than discard: this lets the same button toggle back and
+  // forth between the two versions until the user is happy, instead of
+  // losing whichever side they're not currently looking at.
+  const cur = c.talking_points ?? [];
+  c.talking_points = prev;
+  c.talking_points_prev = cur.length > 0 ? cur : undefined;
+  await saveConversation(c);
+  return c;
+}
+
+/** Persist `nextPoints` as the new current TP set, archiving whatever was
+ *  there before into `talking_points_prev` so Undo restores it. Used by
+ *  the regenerate flow — the caller already has the new bullets in hand,
+ *  this just handles the version bookkeeping + save in one place. */
+export async function commitTalkingPointsRegeneration(
+  id: string,
+  nextPoints: string[],
+): Promise<Conversation | null> {
+  const c = await loadConversation(id);
+  if (!c) return null;
+  const cur = c.talking_points ?? [];
+  c.talking_points_prev = cur.length > 0 ? cur : undefined;
+  c.talking_points = nextPoints;
+  await saveConversation(c);
+  return c;
+}
+
+/** Write the current talking-points .md to `destPath` (a user-chosen
+ *  filesystem location from the save dialog). The fs plugin is scoped to
+ *  ~/.myownllm/** so the destination lives outside its allowlist — we
+ *  route through a Rust command that takes the dialog-confirmed path. */
+export async function downloadTalkingPoints(
+  id: string,
+  destPath: string,
+): Promise<void> {
+  const path = await findConversationPath(id);
+  if (!path) throw new Error("Session not found");
+  const mdPath = tpMdPath(path);
+  if (!(await exists(mdPath))) {
+    throw new Error("No talking points to download yet");
+  }
+  const md = await readTextFile(mdPath);
+  await invoke("write_text_to_path", { path: destPath, contents: md });
 }
 
 /**

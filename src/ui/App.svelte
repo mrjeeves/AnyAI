@@ -40,6 +40,7 @@
     startTalkingPoints,
     stopTalkingPoints,
     forceStopChat,
+    regenerateTalkingPoints,
   } from "./chat-slot.svelte";
   import ConflictModal from "./ConflictModal.svelte";
   import { newConversation, saveConversation } from "../conversations";
@@ -716,6 +717,38 @@
     };
   }
 
+  /** Run a one-shot Talking Points regenerate against the named session.
+   *  Mirrors `requestActivateTalkingPoints` for the slot-resolution side
+   *  but doesn't need a conflict modal — the regenerate button is only
+   *  enabled while the chat slot is free, so we surface the failure as a
+   *  return value the caller can show inline instead of stopping live
+   *  inference on the user's behalf. Returns `null` on success or an
+   *  error string for the caller to surface. */
+  async function requestRegenerateTalkingPoints(
+    conversationId: string,
+  ): Promise<string | null> {
+    if (!hardware) return "Hardware not detected yet — try again in a moment.";
+    if (chatSlot.kind !== null) {
+      return "The chat model is busy. Stop the current chat or Talking Points first.";
+    }
+    const [config, manifest] = await Promise.all([loadConfig(), getActiveManifest()]);
+    const resolved = resolveModelEx(
+      hardware,
+      manifest,
+      "text",
+      config.mode_overrides,
+      activeFamilyName,
+    );
+    if (resolved.runtime !== "ollama" || !resolved.model) {
+      return "No chat model configured — pick a text family in Settings.";
+    }
+    const result = await regenerateTalkingPoints({
+      model: resolved.model,
+      conversationId,
+    });
+    return result.ok ? null : result.error;
+  }
+
   /** Stop whichever chat is currently using the chat slot. */
   async function stopActiveChat(): Promise<void> {
     if (chatSlot.kind === "tp") {
@@ -866,6 +899,7 @@
           onRequestStopChat={requestStopChat}
           onRequestStartRecording={requestStartRecording}
           onRequestActivateTalkingPoints={requestActivateTalkingPoints}
+          onRequestRegenerateTalkingPoints={requestRegenerateTalkingPoints}
         />
       {:else}
         <Chat

@@ -1,7 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { transcribeUi } from "./transcribe-state.svelte";
-import { loadConversation, saveConversation } from "../conversations";
+import {
+  loadConversation,
+  saveConversation,
+  commitTalkingPointsRegeneration,
+} from "../conversations";
 
 /** Chat-model slot. Exactly one occupant — a streaming chat (`kind: "chat"`)
  *  or a Talking Points loop (`kind: "tp"`) — at any given time. The Text
@@ -364,4 +368,70 @@ function parseBullets(raw: string): string[] {
     .map((line) => line.replace(/^\d+[.)]\s*/, ""))
     .filter((line) => line.length > 0)
     .slice(0, 12);
+}
+
+/** One-shot regenerate: distil the *whole* transcript into a fresh bullet
+ *  list and archive whatever was there before so Undo can swap it back.
+ *
+ *  Unlike the live loop, which condenses one ~10 s slice at a time, this
+ *  pass sees the entire transcript so the resulting bullets cover the
+ *  meeting end-to-end rather than echoing the local-loop's last batch.
+ *  Holds the chat slot for its lifetime so the singleton check in App
+ *  blocks a live chat or live TP from starting on top of it. */
+export async function regenerateTalkingPoints(args: {
+  model: string;
+  conversationId: string;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (chatSlot.kind !== null) {
+    return { ok: false, error: "The chat model is busy with another task" };
+  }
+  const { model, conversationId } = args;
+  const conv = await loadConversation(conversationId);
+  if (!conv) return { ok: false, error: "Session not found" };
+  const transcript = (conv.transcript ?? [])
+    .map((s) => s.text)
+    .join(" ")
+    .trim();
+  if (!transcript) {
+    return { ok: false, error: "No transcript to summarise yet" };
+  }
+
+  chatSlot.kind = "tp";
+  chatSlot.conversationId = conversationId;
+  chatSlot.conversationTitle = "Regenerating Talking Points";
+  chatSlot.status = "running";
+  startTimer();
+
+  try {
+    const reply = await invoke<string>("ollama_chat", {
+      model,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You distil meeting transcripts into bullet-point notes. " +
+            "Reply with 6-15 bullets covering the whole transcript, " +
+            "one per line, prefixed with '- '. Each bullet < 18 words. " +
+            "No preamble, no commentary, just the bullets.",
+        },
+        {
+          role: "user",
+          content: "Summarise this transcript into bullet notes:\n\n" + transcript,
+        },
+      ],
+      // Bullets don't need reasoning; same trade-off the live loop makes —
+      // see the `think: false` comment in runTpCycle for the memory rationale.
+      options: { num_predict: 800, temperature: 0.4 },
+    });
+    const bullets = parseBullets(reply).slice(0, TP_MAX_BULLETS);
+    if (bullets.length === 0) {
+      return { ok: false, error: "Model returned no bullets — try again" };
+    }
+    await commitTalkingPointsRegeneration(conversationId, bullets);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  } finally {
+    resetSlot();
+  }
 }
