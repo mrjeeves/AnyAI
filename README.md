@@ -42,6 +42,18 @@ myownllm serve    # headless API on :1473
 myownllm run      # terminal chat
 ```
 
+## Live transcription, on your machine
+
+A first-class capture pipeline, not a sidebar feature. Mic in, segmented transcript out, with speakers attributed and a live summary growing alongside it — all on the same binary, all on-device.
+
+- **Streaming ASR.** Moonshine Small on a Pi 5 (English, ~500 ms), Parakeet TDT 0.6B v3 on capable hardware (25 languages, 80–200 ms). Streaming-native: one segment per audio chunk, no 5-second minimum.
+- **Speaker diarization.** Opt-in toggle. `pyannote-segmentation-3.0` plus a speaker embedder (`wespeaker-r34` on capable hardware, `campp-small` on the lower rung), with online agglomerative clustering on the Rust side — speaker IDs stay stable across the entire conversation, not just a single window. Click a speaker pill to rename them; the labels persist with the session.
+- **Talking Points.** A continuous LLM loop summarises the live transcript into a growing bullet list while you talk. The list updates as the conversation evolves, is persisted with the session, and can be paused, resumed, or stopped from the mode bar. It claims the chat-model slot while running so it can use whichever local model your hardware tier picked for text.
+- **Crash-resilient by design.** Audio chunks land on disk before the ASR backend sees them, so a force-quit can be drained on next launch. Transcripts, speaker labels, diarize state, and the talking-points list are all part of the conversation record.
+- **One binary.** No second daemon, no Python venv, no cloud round-trip. The same `myownllm` process hosts ASR, diarization, and the chat model used to summarise — coordinated through two singleton slots on the GUI's mode bar.
+
+The current GUI keeps audio capture local to the host machine; the LAN remote view is text-first today and a streaming-mic remote path is on the roadmap.
+
 ## Highlights
 
 |   |   |
@@ -50,8 +62,6 @@ myownllm run      # terminal chat
 | **Virtual model IDs** | `myownllm-text`, `myownllm-vision`, `myownllm-code`, `myownllm-transcribe`. Stable names; the right tag for your hardware auto-resolves. |
 | **Manifests, not config** | A JSON file at a URL is the source of truth. `imports` compose merged catalogs across publishers — no coordination required. |
 | **Runs on a Pi 5** | Default manifest ships Gemma 4 edge variants (`e2b` / `e4b`), Apache-2.0, ~7.6 tok/s on a Pi 5. Same manifest gives a 4090 the 4090 tag. |
-| **Live transcription** | Moonshine on Pi 5, Parakeet TDT 0.6B v3 elsewhere, ~1 s end-to-end. Opt-in speaker diarization via pyannote-seg-3.0. |
-| **Talking Points** | Continuously summarises a live transcript into a bullet list while you talk. |
 | **Desktop GUI** | Tauri + Svelte 5. Two singleton slots (chat-model, transcription) with conversation folders, in-place rename, crash-recoverable state. |
 | **LAN remote** | Open the GUI from your phone on the same network. Single-user lock with kick-and-hide. |
 | **Self-updating** | Stages quietly on launch, applies on next start. Last good manifest stays cached for offline runs. |
