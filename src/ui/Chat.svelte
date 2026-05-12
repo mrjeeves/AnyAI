@@ -20,6 +20,7 @@
     releaseChat,
   } from "./chat-slot.svelte";
   import { transcribeUi } from "./transcribe-state.svelte";
+  import { stickToBottom } from "./stick-to-bottom";
 
   let {
     activeModel,
@@ -438,7 +439,7 @@
           Open session →
         </button>
       </header>
-      <div class="tp-body">
+      <div class="tp-body" use:stickToBottom={tpPoints}>
         {#if tpPoints.length > 0}
           <ul class="tp-bullets">
             {#each tpPoints as point, i (i)}

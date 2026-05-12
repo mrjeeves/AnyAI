@@ -19,6 +19,7 @@
     type EmittedSegment,
   } from "./transcribe-state.svelte";
   import { chatSlot } from "./chat-slot.svelte";
+  import { stickToBottom } from "./stick-to-bottom";
   import { loadConfig } from "../config";
   import {
     loadConversation,
@@ -707,7 +708,7 @@
           </span>
         </label>
       </header>
-      <div class="pane-body">
+      <div class="pane-body" use:stickToBottom={transcript}>
         {#if renderedTurns.length > 0}
           <div class="transcript">
             {#each renderedTurns as turn, i (i)}
@@ -787,7 +788,7 @@
           </span>
         {/if}
       </header>
-      <div class="pane-body">
+      <div class="pane-body" use:stickToBottom={talkingPoints}>
         {#if isMyTalkingPoints}
           {#if talkingPoints.length > 0}
             <ul class="bullets">
