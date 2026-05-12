@@ -16,6 +16,8 @@
     check_interval_hours: number;
     last_check_unix: number | null;
     pending: PendingUpdate | null;
+    release_url: string;
+    release_url_overridden: boolean;
   }
 
   type CheckOutcome =
@@ -28,6 +30,7 @@
   let status = $state<UpdateStatus | null>(null);
   let loading = $state(true);
   let checking = $state(false);
+  let togglingEnabled = $state(false);
   let outcome = $state<CheckOutcome | null>(null);
   let error = $state<string>("");
 
@@ -64,6 +67,22 @@
       await invoke("update_apply_now");
     } catch (e) {
       error = String(e);
+    }
+  }
+
+  async function setEnabled(enabled: boolean) {
+    togglingEnabled = true;
+    error = "";
+    try {
+      status = await invoke<UpdateStatus>("update_set_enabled", { enabled });
+      // Outcomes from a prior check can become stale once the toggle flips
+      // — e.g. an "up-to-date" message shouldn't linger after the user
+      // disables updates.
+      outcome = null;
+    } catch (e) {
+      error = String(e);
+    } finally {
+      togglingEnabled = false;
     }
   }
 
@@ -112,12 +131,25 @@
         </button>
       </div>
 
-      {#if !status.enabled}
-        <div class="notice warn">
-          Auto-update is disabled in <code>~/.myownllm/config.json</code>
-          (<code>auto_update.enabled = false</code>). Re-enable it to use this tab.
+      <div class="toggle-row">
+        <div class="toggle-text">
+          <div class="toggle-label">Automatic updates</div>
+          <div class="toggle-sub">
+            {status.enabled
+              ? "Background checks run every " + status.check_interval_hours + "h."
+              : "Background checks are paused. You can still check manually."}
+          </div>
         </div>
-      {/if}
+        <label class="switch" class:on={status.enabled} class:busy={togglingEnabled}>
+          <input
+            type="checkbox"
+            checked={status.enabled}
+            disabled={togglingEnabled}
+            onchange={(e) => setEnabled((e.currentTarget as HTMLInputElement).checked)}
+          />
+          <span class="slider"></span>
+        </label>
+      </div>
 
       {#if status.install_kind === "package_manager"}
         <div class="notice warn">
@@ -140,6 +172,22 @@
           <dd>{status.check_interval_hours}h</dd>
         </div>
       </dl>
+
+      <div class="release-feed">
+        <div class="release-feed-label">
+          Release feed
+          {#if status.release_url_overridden}
+            <span class="badge alt">custom</span>
+          {/if}
+        </div>
+        <code class="release-feed-url">{status.release_url}</code>
+        <div class="release-feed-hint">
+          Override per-machine via <code>auto_update.stable_url</code> /
+          <code>auto_update.beta_url</code> in <code>~/.myownllm/config.json</code>, or bake a
+          default in at build time with <code>MYOWNLLM_RELEASE_URL_STABLE</code> /
+          <code>MYOWNLLM_RELEASE_URL_BETA</code>.
+        </div>
+      </div>
 
       {#if status.pending}
         <div class="pending">
@@ -216,7 +264,6 @@
     line-height: 1.45;
   }
   .notice.warn { background: #2a220e; color: #d6b25a; border: 1px solid #3a2e0e; }
-  .notice code { font-family: monospace; font-size: .76rem; color: inherit; }
   .info {
     margin: 0;
     display: grid;
@@ -269,4 +316,58 @@
   }
   .outcome strong { color: #e8e8e8; font-family: monospace; }
   .outcome code { font-family: monospace; font-size: .76rem; color: #d6b25a; }
+  .toggle-row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 1rem;
+    padding: .65rem .85rem;
+    background: #131313;
+    border: 1px solid #1e1e1e;
+    border-radius: 7px;
+  }
+  .toggle-text { display: flex; flex-direction: column; gap: .15rem; min-width: 0; }
+  .toggle-label { font-size: .85rem; color: #e8e8e8; font-weight: 500; }
+  .toggle-sub { font-size: .73rem; color: #777; }
+  .switch { position: relative; width: 38px; height: 22px; flex-shrink: 0; cursor: pointer; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch .slider {
+    position: absolute; inset: 0;
+    background: #2a2a2a;
+    border-radius: 22px;
+    transition: background .15s ease;
+  }
+  .switch .slider::before {
+    content: "";
+    position: absolute;
+    left: 3px; top: 3px;
+    width: 16px; height: 16px;
+    background: #cfcfcf;
+    border-radius: 50%;
+    transition: transform .15s ease, background .15s ease;
+  }
+  .switch.on .slider { background: #2c5135; }
+  .switch.on .slider::before { transform: translateX(16px); background: #cfeacf; }
+  .switch.busy { opacity: .55; cursor: progress; }
+  .release-feed {
+    padding: .65rem .85rem;
+    background: #131313;
+    border: 1px solid #1e1e1e;
+    border-radius: 7px;
+    display: flex; flex-direction: column; gap: .35rem;
+  }
+  .release-feed-label {
+    font-size: .68rem; color: #666; text-transform: uppercase; letter-spacing: .03em;
+    display: flex; align-items: center; gap: .45rem;
+  }
+  .release-feed-url {
+    font-family: monospace; font-size: .76rem; color: #9bbfe0;
+    word-break: break-all;
+  }
+  .release-feed-hint { font-size: .7rem; color: #666; line-height: 1.45; }
+  .release-feed-hint code { font-family: monospace; font-size: .68rem; color: #888; }
+  .badge.alt {
+    background: #2a220e; color: #d6b25a;
+    font-size: .62rem;
+    padding: .1rem .4rem; border-radius: 4px;
+    text-transform: uppercase; letter-spacing: .04em;
+  }
 </style>
