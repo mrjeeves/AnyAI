@@ -634,17 +634,23 @@ type Backends = (
 );
 
 /// Build + warm up the ASR + (optional) diarize backends. Returns
-/// `(asr, diarize_opt, caps)` ready for the chunk loop.
+/// `(asr, diarize_opt, caps)` ready for the chunk loop. `on_stage`
+/// fires before each warm-up step so the caller can surface "Loading
+/// X…" to the UI — otherwise a stall in the diarize half would look
+/// like the ASR is hanging.
 fn build_backends(
     runtime: &str,
     model_name: &str,
     diarize_composite: Option<&str>,
+    on_stage: &dyn Fn(&str),
 ) -> Result<Backends> {
+    on_stage(&format!("Loading {} model…", runtime));
     let mut asr = asr::make_backend(runtime, model_name)?;
     asr.warm_up()?;
     let caps = asr.caps();
 
     let diarize = if let Some(name) = diarize_composite {
+        on_stage("Loading speaker models…");
         let mut d = diarize::make_backend("pyannote-diarize", name)?;
         d.warm_up()?;
         Some(d)
@@ -668,12 +674,14 @@ fn run_session(
     window: &std::sync::Arc<dyn FrameSink>,
 ) -> Result<()> {
     let started = std::time::Instant::now();
-    window.emit_frame(
-        event,
-        TranscribeFrame::heartbeat(0, 0, None, Some(format!("Loading {} model…", runtime))),
-    );
-
-    let (mut asr, mut diarize, caps) = build_backends(runtime, model_name, diarize_composite)?;
+    let stage = |msg: &str| {
+        window.emit_frame(
+            event,
+            TranscribeFrame::heartbeat(0, 0, None, Some(msg.to_string())),
+        );
+    };
+    let (mut asr, mut diarize, caps) =
+        build_backends(runtime, model_name, diarize_composite, &stage)?;
 
     let buffer_dir = chunk_buffer_dir(stream_id)?;
     if let Ok(entries) = std::fs::read_dir(&buffer_dir) {
@@ -977,11 +985,14 @@ fn run_drain(
     window: &std::sync::Arc<dyn FrameSink>,
 ) -> Result<()> {
     let started = std::time::Instant::now();
-    window.emit_frame(
-        event,
-        TranscribeFrame::heartbeat(0, 0, None, Some(format!("Loading {} model…", runtime))),
-    );
-    let (mut asr, mut diarize, caps) = build_backends(runtime, model_name, diarize_composite)?;
+    let stage = |msg: &str| {
+        window.emit_frame(
+            event,
+            TranscribeFrame::heartbeat(0, 0, None, Some(msg.to_string())),
+        );
+    };
+    let (mut asr, mut diarize, caps) =
+        build_backends(runtime, model_name, diarize_composite, &stage)?;
     let buffer_dir = chunk_buffer_dir(stream_id)?;
 
     let mut next_seq: u64 = lowest_pending_seq(&buffer_dir).unwrap_or(1);
@@ -1134,11 +1145,14 @@ fn run_upload(
     use symphonia::core::probe::Hint;
 
     let started = std::time::Instant::now();
-    window.emit_frame(
-        event,
-        TranscribeFrame::heartbeat(0, 0, None, Some(format!("Loading {} model…", runtime))),
-    );
-    let (mut asr, mut diarize, caps) = build_backends(runtime, model_name, diarize_composite)?;
+    let stage = |msg: &str| {
+        window.emit_frame(
+            event,
+            TranscribeFrame::heartbeat(0, 0, None, Some(msg.to_string())),
+        );
+    };
+    let (mut asr, mut diarize, caps) =
+        build_backends(runtime, model_name, diarize_composite, &stage)?;
 
     let file = File::open(file_path).map_err(|e| anyhow!("open audio file: {e}"))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
