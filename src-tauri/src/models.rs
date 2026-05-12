@@ -122,30 +122,34 @@ pub struct ModelSpec {
 /// commit in the URL.
 pub const REGISTRY: &[ModelSpec] = &[
     // ---- ASR ----------------------------------------------------------
-    // Moonshine Small INT8 — encoder + decoder ONNX pair, English,
-    // ~123 MB total. Streaming-native (ergodic encoder), built for edge.
-    // Used as the Pi 5 / low-end tier.
+    // Moonshine INT8 — encoder + decoder ONNX pair, English, ~80 MB
+    // total. Streaming-native (ergodic encoder), built for edge. Used
+    // as the Pi 5 / low-end tier. UsefulSensors only ships `tiny` and
+    // `base` ONNX exports (no `small`), so we pull from the
+    // onnx-community mirror of the `base` build; the registry id keeps
+    // the historical `-small-q8` label to avoid migration churn on
+    // existing installs.
     ModelSpec {
         name: "moonshine-small-q8",
         kind: ModelKind::Asr,
         artifacts: &[
             Artifact {
                 filename: "encoder.onnx",
-                url: "https://huggingface.co/UsefulSensors/moonshine/resolve/main/onnx/merged/small/quantized/encoder_model.quantized.onnx",
-                approx_bytes: 26_000_000,
-                min_bytes: 18_000_000,
+                url: "https://huggingface.co/onnx-community/moonshine-base-ONNX/resolve/main/onnx/encoder_model_quantized.onnx",
+                approx_bytes: 30_000_000,
+                min_bytes: 15_000_000,
             },
             Artifact {
                 filename: "decoder.onnx",
-                url: "https://huggingface.co/UsefulSensors/moonshine/resolve/main/onnx/merged/small/quantized/decoder_model_merged.quantized.onnx",
-                approx_bytes: 97_000_000,
-                min_bytes: 70_000_000,
+                url: "https://huggingface.co/onnx-community/moonshine-base-ONNX/resolve/main/onnx/decoder_model_merged_quantized.onnx",
+                approx_bytes: 45_000_000,
+                min_bytes: 20_000_000,
             },
             Artifact {
                 filename: "tokenizer.json",
-                url: "https://huggingface.co/UsefulSensors/moonshine/resolve/main/onnx/merged/small/tokenizer.json",
-                approx_bytes: 1_400_000,
-                min_bytes: 700_000,
+                url: "https://huggingface.co/onnx-community/moonshine-base-ONNX/resolve/main/tokenizer.json",
+                approx_bytes: 2_000_000,
+                min_bytes: 500_000,
             },
         ],
     },
