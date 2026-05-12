@@ -62,9 +62,15 @@ crossbeam-channel = "0.5"
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "load-dynamic", "ndarray", "api-22"] }
 ndarray = "0.16"
 # HuggingFace `tokenizers` for Moonshine's BPE tokenizer (ships a
-# tokenizer.json). Pure Rust, no Python required. Parakeet uses a
-# simple SentencePiece-style `tokens.txt` we parse ourselves.
-tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+# tokenizer.json). The `unstable_wasm` feature name is misleading — what
+# it actually does is swap Oniguruma (a C regex library that needs cmake
+# + perl on Windows and has periodic Windows build flakes) for
+# `fancy-regex`, a pure-Rust regex engine that works everywhere. Despite
+# the feature name, it's safe on native targets too; the `getrandom/js`
+# bit it pulls in is gated to wasm32 builds. Parakeet uses a simple
+# SentencePiece-style `tokens.txt` we parse ourselves so it doesn't
+# touch this.
+tokenizers = { version = "0.20", default-features = false, features = ["unstable_wasm"] }
 # Audio file decoding for the "Upload audio" flow. symphonia is pure Rust
 # (no extra system deps) and handles wav / flac / mp3 / aac / ogg-vorbis /
 # m4a out of the box — enough for the realistic set of files a user is
