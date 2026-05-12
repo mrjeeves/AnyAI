@@ -62,11 +62,20 @@ crossbeam-channel = "0.5"
 # likely to drop in.
 symphonia = { version = "0.5", default-features = false, features = ["wav", "flac", "mp3", "aac", "isomp4", "ogg", "vorbis"] }
 
+# GPU pick by platform:
+#  - macOS:                  Metal (any arch).
+#  - x86_64 Linux / Windows: Vulkan, via the LunarG SDK installed in CI.
+#  - aarch64 Linux:          CPU-only — the LunarG SDK action only ships
+#    x86_64 binaries (the previous CI failure was exit 126), and Pi-class
+#    arm64 hardware doesn't have a Vulkan path worth shipping anyway.
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { version = "0.13", default-features = false, features = ["metal"] }
 
-[target.'cfg(not(target_os = "macos"))'.dependencies]
+[target.'cfg(all(not(target_os = "macos"), target_arch = "x86_64"))'.dependencies]
 whisper-rs = { version = "0.13", default-features = false, features = ["vulkan"] }
+
+[target.'cfg(all(not(target_os = "macos"), not(target_arch = "x86_64")))'.dependencies]
+whisper-rs = { version = "0.13", default-features = false }
 
 [profile.release]
 panic = "abort"
