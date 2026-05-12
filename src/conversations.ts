@@ -248,56 +248,6 @@ async function pathFor(folder: string, id: string): Promise<string> {
   return `${folderAbs}/${id}.json`;
 }
 
-/** Walk upward from `absDir` toward the conversations root, removing each
- *  directory that is empty. Stops at the first non-empty directory or at
- *  the root itself (the root is never removed). The folder structure IS
- *  the database, so leaving phantom empty parents behind after a delete or
- *  move would mean stale rows in the sidebar's folder list.
- *
- *  Strict-empty + non-recursive: if anything at all is present (a sibling
- *  conversation's .json, a stashed dotfile, a subfolder still in use), we
- *  bail. That guarantees this helper can never wipe an unrelated
- *  conversation that happens to share the parent directory. */
-async function pruneEmptyDirs(absDir: string): Promise<void> {
-  let root: string;
-  try {
-    root = await conversationsDir();
-  } catch {
-    return;
-  }
-  // Normalise trailing slashes so the equality check below is reliable.
-  const trim = (p: string) => (p.endsWith("/") ? p.slice(0, -1) : p);
-  const rootNorm = trim(root);
-  let cur = trim(absDir);
-  // Refuse to walk outside the conversations root.
-  if (!cur.startsWith(`${rootNorm}/`)) return;
-  while (cur !== rootNorm && cur.startsWith(`${rootNorm}/`)) {
-    let entries: DirEntry[];
-    try {
-      entries = await readDir(cur);
-    } catch {
-      return;
-    }
-    if (entries.length > 0) return;
-    try {
-      // Non-recursive on purpose: if a race re-populates the dir between
-      // the readDir above and this call, the remove will fail and we
-      // bail rather than nuking newly-arrived content.
-      await remove(cur);
-    } catch {
-      return;
-    }
-    const slash = cur.lastIndexOf("/");
-    if (slash <= rootNorm.length) return;
-    cur = cur.slice(0, slash);
-  }
-}
-
-function parentDir(absPath: string): string {
-  const slash = absPath.lastIndexOf("/");
-  return slash > 0 ? absPath.slice(0, slash) : absPath;
-}
-
 export async function loadConversation(id: string): Promise<Conversation | null> {
   try {
     const path = await findConversationPath(id);
@@ -359,9 +309,8 @@ function renderTalkingPointsMd(
 }
 
 /** Write or remove a sidecar `.md` so disk state matches `points`.
- *  Removing on empty keeps `pruneEmptyDirs` honest — a folder containing
- *  only stale .md files would otherwise look "non-empty" after the parent
- *  conversation was deleted. */
+ *  Removing on empty keeps the folder tidy — a session that bottoms out
+ *  to zero bullets shouldn't leave a stale .md sitting next to the JSON. */
 async function syncMdSidecar(
   mdPath: string,
   c: Conversation,
@@ -405,15 +354,16 @@ export async function deleteConversation(id: string): Promise<void> {
   try {
     const path = await findConversationPath(id);
     if (!path) return;
-    // Remove the .md sidecars first so the parent dir is genuinely empty by
-    // the time pruneEmptyDirs gets there — otherwise leftover .md files
-    // would block the prune and leave a phantom folder in the sidebar.
+    // Talking-points sidecars travel with the session — clear them out
+    // alongside the JSON so a delete doesn't leave orphaned .md files
+    // behind in whatever folder the session lived in.
     const md = tpMdPath(path);
     if (await exists(md)) await remove(md);
     const prevMd = tpPrevMdPath(path);
     if (await exists(prevMd)) await remove(prevMd);
     if (await exists(path)) await remove(path);
-    await pruneEmptyDirs(parentDir(path));
+    // Folders are independent entities — deleting the last chat in a
+    // folder leaves the folder in place. Only `deleteFolder` removes them.
   } catch {
     // Silent — caller already removed the row from the sidebar.
   }
@@ -428,19 +378,17 @@ export async function renameConversation(id: string, title: string): Promise<voi
 
 /** Move a conversation file into the target folder (POSIX path from root,
  *  empty string for root). Creates the folder if needed; no-ops when the
- *  file is already there. Prunes any source folders left empty by the
- *  move so the sidebar tree doesn't accumulate phantom rows. */
+ *  file is already there. The source folder is left in place even if the
+ *  move empties it — folders are independent of their contents. */
 export async function moveConversation(id: string, targetFolder: string): Promise<void> {
   const current = await findConversationPath(id);
   if (!current) return;
   const targetPath = await pathFor(targetFolder, id);
   if (current === targetPath) return;
-  const prevParent = parentDir(current);
   await rename(current, targetPath);
-  // Drag the talking-points sidecars along with the JSON. Without this they'd
-  // be stranded in the old folder, the sidebar's pruneEmptyDirs would skip
-  // that folder (it'd still contain .md files), and `findConversationPath`
-  // could never reunite them with the moved JSON.
+  // Drag the talking-points sidecars along with the JSON. Without this
+  // they'd be stranded in the old folder and `findConversationPath` could
+  // never reunite them with the moved session.
   for (const sidecar of [tpMdPath, tpPrevMdPath]) {
     const oldMd = sidecar(current);
     const newMd = sidecar(targetPath);
@@ -452,7 +400,6 @@ export async function moveConversation(id: string, targetFolder: string): Promis
       }
     }
   }
-  await pruneEmptyDirs(prevParent);
 }
 
 /** Create an empty folder at `path` (POSIX, from root). Components are
@@ -465,8 +412,8 @@ export async function createFolder(path: string): Promise<void> {
 }
 
 /** Rename / move a folder. Children move along with it because they live
- *  under the directory inode. Any old-parent directories left empty by the
- *  move are pruned so the sidebar doesn't keep showing them. */
+ *  under the directory inode. Any old-parent folders left behind are kept
+ *  in place — they're independent entities the user created. */
 export async function renameFolder(oldPath: string, newPath: string): Promise<void> {
   const root = await ensureDir();
   const oldParts = splitPath(oldPath);
@@ -479,28 +426,23 @@ export async function renameFolder(oldPath: string, newPath: string): Promise<vo
   if (newParts.length > 1) {
     await mkdir(`${root}/${joinPath(newParts.slice(0, -1))}`, { recursive: true });
   }
-  const prevParent = parentDir(oldAbs);
   await rename(oldAbs, newAbs);
-  await pruneEmptyDirs(prevParent);
 }
 
 /** Delete a folder and everything under it. Use with caution — there's no
- *  trash; the sidebar gates this behind a confirm dialog. Walks back up
- *  to clean any now-empty parents — the folder tree IS the database, so
- *  empty rungs would otherwise stick around in the sidebar forever. */
+ *  trash; the sidebar gates this behind a confirm dialog. Only the named
+ *  folder is removed; parent folders are left alone even if this empties
+ *  them, since folders are independent entities. */
 export async function deleteFolder(path: string): Promise<void> {
   const root = await ensureDir();
   const parts = splitPath(path);
   if (parts.length === 0) return; // Refuse to delete the root itself.
   const abs = `${root}/${joinPath(parts)}`;
-  const prevParent = parentDir(abs);
   try {
     await remove(abs, { recursive: true });
   } catch {
     // Best-effort: caller already updated the UI.
-    return;
   }
-  await pruneEmptyDirs(prevParent);
 }
 
 /** Swap `talking_points` with `talking_points_prev` (single-level undo).
