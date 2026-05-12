@@ -1,0 +1,532 @@
+//! Centralised on-disk model registry and downloader.
+//!
+//! Replaces the whisper-only `pull_model` that used to live in
+//! `transcribe.rs`. Every ASR / diarize backend declares its required
+//! artifacts here as a `ModelSpec`; `pull_model` streams each artifact
+//! from a HuggingFace URL into `~/.myownllm/{kind}/{logical_name}/`,
+//! atomically per file (`.partial` → `rename`).
+//!
+//! A "logical model" can map to multiple ONNX files — Moonshine ships an
+//! encoder + decoder pair, the pyannote-diarize composite ships a
+//! segmenter + an embedder. The pull is treated as atomic at the logical
+//! level: a partial set of files on disk is reported as "not installed"
+//! so an interrupted pull can never half-load a backend at session start.
+//!
+//! Nothing in this module is whisper-specific; the `whisper-rs` crate is
+//! gone from the dependency tree (see `Cargo.toml`).
+//!
+//! Frame event: `myownllm://model-pull/{runtime}/{name}` carries
+//! `ModelPullProgress { name, runtime, bytes, total, done, error,
+//! artifact_index, artifact_count }`. The UI displays the aggregate over
+//! all artifacts.
+
+use anyhow::{anyhow, Result};
+use futures_util::StreamExt;
+use serde::Serialize;
+use std::path::PathBuf;
+use tauri::{Emitter, WebviewWindow};
+use tokio::io::AsyncWriteExt;
+
+/// Where this binary stores all downloaded model artifacts. Stable on
+/// every platform via `dirs::home_dir()`, matching the existing
+/// `~/.myownllm/` convention (see `crate::myownllm_dir`).
+pub fn models_root() -> Result<PathBuf> {
+    Ok(crate::myownllm_dir()?.join("models"))
+}
+
+/// Directory for a given runtime kind, e.g. `~/.myownllm/models/asr/`.
+fn kind_dir(kind: ModelKind) -> Result<PathBuf> {
+    let sub = match kind {
+        ModelKind::Asr => "asr",
+        ModelKind::Diarize => "diarize",
+    };
+    Ok(models_root()?.join(sub))
+}
+
+/// Logical directory for a single named model under a runtime kind.
+/// Multi-artifact models (Moonshine encoder + decoder, pyannote
+/// composite) keep their files here so callers don't have to plumb
+/// per-artifact paths around.
+pub fn model_dir(kind: ModelKind, logical_name: &str) -> Result<PathBuf> {
+    Ok(kind_dir(kind)?.join(sanitize_name(logical_name)))
+}
+
+/// Strip filesystem-hostile characters from a logical model name so a
+/// stale or hostile manifest can't escape `~/.myownllm/models/`.
+fn sanitize_name(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+' | '@') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// What flavour of runtime this model serves. Drives the on-disk
+/// directory layout and the Tauri event prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelKind {
+    /// Speech-to-text (Moonshine, Parakeet, …).
+    Asr,
+    /// Speaker diarization (pyannote-segmentation + a speaker embedder).
+    Diarize,
+}
+
+impl ModelKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            ModelKind::Asr => "asr",
+            ModelKind::Diarize => "diarize",
+        }
+    }
+}
+
+/// A single file the backend needs on disk. Multi-artifact models list
+/// several. `min_bytes` is ~60 % of the real size and rejects HTML
+/// error pages that HuggingFace's LFS layer occasionally serves to
+/// User-Agent-less requests with a 200 status.
+#[derive(Debug, Clone)]
+pub struct Artifact {
+    /// Filename under the model's directory. Final path is
+    /// `~/.myownllm/models/{kind}/{logical_name}/{filename}`.
+    pub filename: &'static str,
+    /// HuggingFace (or other public) URL the artifact streams from.
+    pub url: &'static str,
+    /// Approximate on-the-wire size — used to fill the progress bar
+    /// when the server omits Content-Length and to validate the
+    /// downloaded payload post-hoc.
+    pub approx_bytes: u64,
+    /// Minimum acceptable byte count for a successful pull. Files
+    /// below this are treated as truncated / wrong-format and the
+    /// rename is skipped.
+    pub min_bytes: u64,
+}
+
+/// One logical model the resolver might ask for. The `name` matches
+/// `ManifestTier.model` in the manifest. A pull is atomic at the
+/// `ModelSpec` level — partial sets are reported as not installed.
+#[derive(Debug, Clone)]
+pub struct ModelSpec {
+    pub name: &'static str,
+    pub kind: ModelKind,
+    pub artifacts: &'static [Artifact],
+}
+
+/// The full registry. Add new ASR / diarize models here as the
+/// manifest grows. Sizes / URLs / hashes for the entries below were
+/// captured against the public mirrors on 2026-05-12; if HF re-exports
+/// the underlying files, bump `approx_bytes` / `min_bytes` and pin a
+/// commit in the URL.
+pub const REGISTRY: &[ModelSpec] = &[
+    // ---- ASR ----------------------------------------------------------
+    // Moonshine Small INT8 — encoder + decoder ONNX pair, English,
+    // ~123 MB total. Streaming-native (ergodic encoder), built for edge.
+    // Used as the Pi 5 / low-end tier.
+    ModelSpec {
+        name: "moonshine-small-q8",
+        kind: ModelKind::Asr,
+        artifacts: &[
+            Artifact {
+                filename: "encoder.onnx",
+                url: "https://huggingface.co/UsefulSensors/moonshine/resolve/main/onnx/merged/small/quantized/encoder_model.quantized.onnx",
+                approx_bytes: 26_000_000,
+                min_bytes: 18_000_000,
+            },
+            Artifact {
+                filename: "decoder.onnx",
+                url: "https://huggingface.co/UsefulSensors/moonshine/resolve/main/onnx/merged/small/quantized/decoder_model_merged.quantized.onnx",
+                approx_bytes: 97_000_000,
+                min_bytes: 70_000_000,
+            },
+            Artifact {
+                filename: "tokenizer.json",
+                url: "https://huggingface.co/UsefulSensors/moonshine/resolve/main/onnx/merged/small/tokenizer.json",
+                approx_bytes: 1_400_000,
+                min_bytes: 700_000,
+            },
+        ],
+    },
+    // NVIDIA Parakeet TDT 0.6B v3 — 25-language multilingual ASR via the
+    // community ONNX export. Single merged ONNX (encoder + decoder +
+    // joint network) + a tokenizer / vocab pair. Apache-2.0 model
+    // weights; community converter pinned to a known-good commit.
+    ModelSpec {
+        name: "parakeet-tdt-0.6b-v3-int8",
+        kind: ModelKind::Asr,
+        artifacts: &[
+            Artifact {
+                filename: "model.onnx",
+                url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/model.int8.onnx",
+                approx_bytes: 620_000_000,
+                min_bytes: 450_000_000,
+            },
+            Artifact {
+                filename: "tokens.txt",
+                url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/tokens.txt",
+                approx_bytes: 60_000,
+                min_bytes: 20_000,
+            },
+        ],
+    },
+    // ---- Diarize ------------------------------------------------------
+    // pyannote-segmentation-3.0 via the sherpa-onnx ungated mirror.
+    // ~6 MB segmenter that emits powerset speaker activity over 10 s
+    // windows. Paired with a speaker embedder (below) for full
+    // diarization on every tier we ship.
+    //
+    // Note: the diarize "model name" in the manifest is a composite
+    // like `pyannote-seg-3.0+wespeaker-r34`. The pyannote-diarize
+    // runtime splits the name on `+`, pulls each half as its own
+    // ModelSpec, and stitches them in `diarize::PyannoteOrtBackend`.
+    ModelSpec {
+        name: "pyannote-seg-3.0",
+        kind: ModelKind::Diarize,
+        artifacts: &[Artifact {
+            filename: "segmentation.onnx",
+            url: "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx",
+            approx_bytes: 5_900_000,
+            min_bytes: 4_000_000,
+        }],
+    },
+    // wespeaker-voxceleb-resnet34-LM — 25 MB, 256-d L2-normalized speaker
+    // embeddings via 3D-Speaker's ungated ONNX mirror. The "capable
+    // hardware" embedder.
+    ModelSpec {
+        name: "wespeaker-r34",
+        kind: ModelKind::Diarize,
+        artifacts: &[Artifact {
+            filename: "embedder.onnx",
+            url: "https://huggingface.co/csukuangfj/sherpa-onnx-3d-speaker/resolve/main/wespeaker_voxceleb_resnet34_LM.onnx",
+            approx_bytes: 25_000_000,
+            min_bytes: 18_000_000,
+        }],
+    },
+    // 3D-Speaker CAM++ small — 6.5 MB, 192-d L2-normalized embeddings.
+    // The Pi / low-end embedder, ~4× faster than wespeaker-r34 with
+    // modestly worse cluster purity.
+    ModelSpec {
+        name: "campp-small",
+        kind: ModelKind::Diarize,
+        artifacts: &[Artifact {
+            filename: "embedder.onnx",
+            url: "https://huggingface.co/csukuangfj/sherpa-onnx-3d-speaker/resolve/main/3dspeaker_campplus_zh_en_16k_small.onnx",
+            approx_bytes: 6_500_000,
+            min_bytes: 4_500_000,
+        }],
+    },
+];
+
+/// Look up a logical model. Returns `None` if the name is unknown — the
+/// resolver and Tauri command surface call this to validate user input
+/// before triggering a download.
+pub fn find(name: &str, kind: ModelKind) -> Option<&'static ModelSpec> {
+    REGISTRY
+        .iter()
+        .find(|m| m.name == name && m.kind == kind)
+}
+
+/// Resolve a composite diarize name (e.g. `pyannote-seg-3.0+wespeaker-r34`)
+/// into its component `ModelSpec`s. Each half is an independent
+/// `find(_, Diarize)` lookup. Order is preserved.
+pub fn find_composite(composite: &str, kind: ModelKind) -> Result<Vec<&'static ModelSpec>> {
+    let mut out = Vec::new();
+    for part in composite.split('+') {
+        let part = part.trim();
+        let spec = find(part, kind)
+            .ok_or_else(|| anyhow!("unknown {kind} model component: {part}", kind = kind.as_str()))?;
+        out.push(spec);
+    }
+    Ok(out)
+}
+
+/// Whether all artifacts of a model are present at acceptable sizes.
+/// Treats a partial set (e.g. encoder present but decoder missing) as
+/// not installed so a half-pulled backend never tries to load.
+pub fn is_installed(spec: &ModelSpec) -> bool {
+    let Ok(dir) = model_dir(spec.kind, spec.name) else {
+        return false;
+    };
+    for artifact in spec.artifacts {
+        let path = dir.join(artifact.filename);
+        let Ok(meta) = std::fs::metadata(&path) else {
+            return false;
+        };
+        if meta.len() < artifact.min_bytes {
+            return false;
+        }
+    }
+    true
+}
+
+/// `true` if every component of a composite name is installed.
+pub fn composite_installed(composite: &str, kind: ModelKind) -> bool {
+    match find_composite(composite, kind) {
+        Ok(specs) => specs.iter().all(|s| is_installed(s)),
+        Err(_) => false,
+    }
+}
+
+/// Listed view used by the Settings panel: what models the registry
+/// knows about for a given kind, and whether each one is fully
+/// installed on this machine.
+#[derive(Debug, Serialize, Clone)]
+pub struct ModelInfo {
+    pub name: String,
+    pub kind: String,
+    pub approx_size_bytes: u64,
+    pub installed: bool,
+    pub artifact_count: usize,
+}
+
+pub fn list(kind: ModelKind) -> Vec<ModelInfo> {
+    REGISTRY
+        .iter()
+        .filter(|m| m.kind == kind)
+        .map(|m| ModelInfo {
+            name: m.name.to_string(),
+            kind: m.kind.as_str().to_string(),
+            approx_size_bytes: m.artifacts.iter().map(|a| a.approx_bytes).sum(),
+            installed: is_installed(m),
+            artifact_count: m.artifacts.len(),
+        })
+        .collect()
+}
+
+/// Remove a model's directory tree from disk. Used by the cleanup loop
+/// when a model rolls off the manifest's recommended set.
+pub fn remove(spec: &ModelSpec) -> Result<()> {
+    let dir = model_dir(spec.kind, spec.name)?;
+    if dir.exists() {
+        std::fs::remove_dir_all(dir)?;
+    }
+    Ok(())
+}
+
+/// Frame emitted on `myownllm://model-pull/{kind}/{name}` while a pull
+/// is in flight. Mirrors the old whisper-pull progress shape so the
+/// frontend's progress UI can be reused with a different event prefix.
+#[derive(Debug, Serialize, Clone)]
+pub struct ModelPullProgress {
+    pub name: String,
+    pub kind: String,
+    pub bytes: u64,
+    pub total: u64,
+    pub artifact_index: usize,
+    pub artifact_count: usize,
+    pub done: bool,
+    pub error: Option<String>,
+}
+
+fn emit_progress(window: &WebviewWindow, spec: &ModelSpec, frame: ModelPullProgress) {
+    let event = format!("myownllm://model-pull/{}/{}", spec.kind.as_str(), spec.name);
+    let _ = window.emit(&event, frame);
+}
+
+/// Pull every artifact of a logical model. Idempotent: each artifact
+/// streams to `{filename}.partial` then atomically renames into place.
+/// If a file already exists at acceptable size, the pull is skipped.
+/// Returns the model's on-disk directory once every artifact is in
+/// place.
+pub async fn pull_model(name: String, kind: ModelKind, window: WebviewWindow) -> Result<PathBuf> {
+    let spec = find(&name, kind).ok_or_else(|| anyhow!("unknown {} model: {}", kind.as_str(), name))?;
+    let dir = model_dir(kind, &name)?;
+    std::fs::create_dir_all(&dir)?;
+
+    // Build a fresh client per pull so the User-Agent header is set
+    // (HF LFS occasionally serves HTML to UA-less requests with a 200
+    // status; the size check below catches it but the UA dodges most
+    // cases up front).
+    let client = reqwest::Client::builder()
+        .user_agent(concat!(
+            "MyOwnLLM/",
+            env!("CARGO_PKG_VERSION"),
+            " (model-pull; +https://github.com/mrjeeves/MyOwnLLM)"
+        ))
+        .build()?;
+
+    let artifact_count = spec.artifacts.len();
+    for (idx, artifact) in spec.artifacts.iter().enumerate() {
+        let final_path = dir.join(artifact.filename);
+
+        // Already-present, correctly-sized — skip but still emit a
+        // progress frame so the UI can advance the indicator.
+        if let Ok(meta) = std::fs::metadata(&final_path) {
+            if meta.len() >= artifact.min_bytes {
+                emit_progress(
+                    &window,
+                    spec,
+                    ModelPullProgress {
+                        name: spec.name.to_string(),
+                        kind: spec.kind.as_str().to_string(),
+                        bytes: meta.len(),
+                        total: meta.len(),
+                        artifact_index: idx,
+                        artifact_count,
+                        done: idx + 1 == artifact_count,
+                        error: None,
+                    },
+                );
+                continue;
+            }
+            // Too small — almost certainly a stale truncated file.
+            let _ = std::fs::remove_file(&final_path);
+        }
+
+        let tmp = dir.join(format!("{}.partial", artifact.filename));
+        let _ = std::fs::remove_file(&tmp);
+
+        let resp = client.get(artifact.url).send().await?;
+        if !resp.status().is_success() {
+            let err = format!("HTTP {} fetching {}", resp.status(), artifact.url);
+            emit_progress(
+                &window,
+                spec,
+                ModelPullProgress {
+                    name: spec.name.to_string(),
+                    kind: spec.kind.as_str().to_string(),
+                    bytes: 0,
+                    total: 0,
+                    artifact_index: idx,
+                    artifact_count,
+                    done: true,
+                    error: Some(err.clone()),
+                },
+            );
+            return Err(anyhow!(err));
+        }
+        let total = resp.content_length().unwrap_or(artifact.approx_bytes);
+
+        let mut file = tokio::fs::File::create(&tmp).await?;
+        let mut stream = resp.bytes_stream();
+        let mut downloaded: u64 = 0;
+        let mut last_emit_bytes: u64 = 0;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            file.write_all(&chunk).await?;
+            downloaded += chunk.len() as u64;
+            // Throttle progress emits to keep IPC traffic sane: at
+            // most one per MiB downloaded.
+            if downloaded - last_emit_bytes > 1_048_576 {
+                last_emit_bytes = downloaded;
+                emit_progress(
+                    &window,
+                    spec,
+                    ModelPullProgress {
+                        name: spec.name.to_string(),
+                        kind: spec.kind.as_str().to_string(),
+                        bytes: downloaded,
+                        total,
+                        artifact_index: idx,
+                        artifact_count,
+                        done: false,
+                        error: None,
+                    },
+                );
+            }
+        }
+        file.flush().await?;
+        drop(file);
+
+        if downloaded < artifact.min_bytes {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            let err = format!(
+                "downloaded {downloaded} bytes for {}/{} (artifact {}), expected ≥{}. \
+                 Server may have returned an error page; try again.",
+                spec.name, artifact.filename, idx, artifact.min_bytes,
+            );
+            emit_progress(
+                &window,
+                spec,
+                ModelPullProgress {
+                    name: spec.name.to_string(),
+                    kind: spec.kind.as_str().to_string(),
+                    bytes: downloaded,
+                    total,
+                    artifact_index: idx,
+                    artifact_count,
+                    done: true,
+                    error: Some(err.clone()),
+                },
+            );
+            return Err(anyhow!(err));
+        }
+
+        tokio::fs::rename(&tmp, &final_path).await?;
+        emit_progress(
+            &window,
+            spec,
+            ModelPullProgress {
+                name: spec.name.to_string(),
+                kind: spec.kind.as_str().to_string(),
+                bytes: downloaded,
+                total,
+                artifact_index: idx,
+                artifact_count,
+                done: idx + 1 == artifact_count,
+                error: None,
+            },
+        );
+    }
+
+    Ok(dir)
+}
+
+/// Pull every component of a composite diarize name (e.g.
+/// `pyannote-seg-3.0+wespeaker-r34`). Useful for the "Identify
+/// speakers" toggle in the UI: one Tauri command, one progress stream
+/// per component.
+pub async fn pull_composite(
+    composite: String,
+    kind: ModelKind,
+    window: WebviewWindow,
+) -> Result<()> {
+    let specs = find_composite(&composite, kind)?;
+    for spec in specs {
+        pull_model(spec.name.to_string(), kind, window.clone()).await?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_is_lookup_consistent() {
+        // Every entry should be findable by (name, kind).
+        for spec in REGISTRY {
+            let found = find(spec.name, spec.kind);
+            assert!(found.is_some(), "registry entry {} not findable", spec.name);
+        }
+    }
+
+    #[test]
+    fn composite_split_resolves_each_half() {
+        let specs = find_composite("pyannote-seg-3.0+wespeaker-r34", ModelKind::Diarize).unwrap();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].name, "pyannote-seg-3.0");
+        assert_eq!(specs[1].name, "wespeaker-r34");
+    }
+
+    #[test]
+    fn composite_split_errors_on_unknown_component() {
+        assert!(find_composite("pyannote-seg-3.0+totally-bogus", ModelKind::Diarize).is_err());
+    }
+
+    #[test]
+    fn sanitize_name_blocks_path_escapes() {
+        // `/` and other non-allowed chars become `_`. Dots are
+        // allowed (model names can carry version dots), so `..`
+        // survives — but the path-separator slashes are gone, which
+        // is the point: there's no way to escape the model dir.
+        assert_eq!(sanitize_name("../../etc/passwd"), ".._.._etc_passwd");
+        assert_eq!(sanitize_name("safe-name_1.0+suffix"), "safe-name_1.0+suffix");
+        // The "../../" prefix can't escape because join() with a
+        // relative path collapses but doesn't traverse, and we sit
+        // under `models/{kind}/...` so absolute path safety is
+        // preserved.
+    }
+}

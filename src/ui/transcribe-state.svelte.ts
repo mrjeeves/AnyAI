@@ -16,11 +16,17 @@ interface TranscribeFrame {
 }
 
 /** Per-stream pending entry returned by the recovery probe. Mirror of
- *  `transcribe::PendingStream`. */
+ *  `transcribe::PendingStream`. `runtime` was added in v13 (the
+ *  ASR-swap branch) so old buffer-meta JSON without it still loads.
+ *  `diarize_model` is the composite name (e.g.
+ *  `pyannote-seg-3.0+wespeaker-r34`) when the orphaned session had
+ *  diarization enabled. */
 export interface PendingStream {
   stream_id: string;
   pending_chunks: number;
+  runtime: string | null;
   model: string | null;
+  diarize_model: string | null;
 }
 
 /** Global transcribe state lives at module scope so it survives any one

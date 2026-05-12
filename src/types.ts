@@ -11,9 +11,29 @@ export interface HardwareProfile {
   soc?: string | null;
 }
 
-export type Mode = "text" | "vision" | "code" | "transcribe";
+export type Mode = "text" | "vision" | "code" | "transcribe" | "diarize";
 
-export type ModelRuntime = "ollama" | "whisper";
+/** Runtimes the resolver knows how to dispatch to.
+ *
+ *  - `ollama`            — the LLM stack (text/vision/code).
+ *  - `moonshine`         — Moonshine ASR via ONNX runtime. Streaming, edge-class.
+ *                          English-only at the Small variant we ship today.
+ *  - `parakeet`          — NVIDIA Parakeet TDT 0.6B v3 ASR via ONNX runtime.
+ *                          25-language, mid-/high-tier CPU + GPU.
+ *  - `pyannote-diarize`  — pyannote-segmentation-3.0 + speaker embedder +
+ *                          online agglomerative clustering, all wrapped as
+ *                          one logical runtime. Used on every tier today.
+ *  - `sortformer`        — reserved for a future NVIDIA Streaming-Sortformer
+ *                          tier on capable GPUs. Schema accepts the value
+ *                          but no model ships yet (upstream ONNX export
+ *                          has a known issue in late 2025).
+ */
+export type ModelRuntime =
+  | "ollama"
+  | "moonshine"
+  | "parakeet"
+  | "pyannote-diarize"
+  | "sortformer";
 
 export interface ManifestTier {
   /** Discrete-GPU path: matches when `vram_gb >= min_vram_gb`. Meaningless
@@ -34,6 +54,12 @@ export interface ManifestTier {
    *  Settings → Family tier ladder so users can see what each rung costs
    *  before committing. Optional: tiers without it just hide the column. */
   disk_mb?: number;
+  /** Optional per-tier runtime override. When set, this rung uses the
+   *  named runtime regardless of the mode-level default — so a single
+   *  `transcribe` ladder can promote capable hardware to `parakeet`
+   *  while the bottom rung stays on `moonshine`. Falls through to
+   *  `ManifestMode.runtime`, then `defaultRuntimeFor(mode)`. */
+  runtime?: ModelRuntime;
   model: string;
   fallback: string;
 }
@@ -41,10 +67,10 @@ export interface ManifestTier {
 export interface ManifestMode {
   label: string;
   input?: "audio";
-  /** Which runtime executes models in this mode. Defaults to "ollama"
-   *  (the LLM stack); transcribe modes set "whisper" so the resolver
-   *  knows the `model` strings name files under `~/.myownllm/whisper/`
-   *  rather than Ollama tags. */
+  /** Default runtime for tiers that don't declare their own. Most modes
+   *  leave this blank and let the resolver derive it from the mode
+   *  (`text` → `ollama`, `transcribe` → `moonshine`, `diarize` →
+   *  `pyannote-diarize`). Per-tier `runtime` always wins. */
   runtime?: ModelRuntime;
   tiers: ManifestTier[];
 }
@@ -133,14 +159,14 @@ export interface RemoteUiConfig {
 
 /** Microphone capture settings used by transcribe mode. Audio capture
  *  runs through cpal on the Rust side; `device_name` is matched against
- *  `cpal::Device::name()`. Empty string = system default. The whisper
+ *  `cpal::Device::name()`. Empty string = system default. The ASR
  *  model itself is picked by the active family's tier resolver — set
- *  `mode_overrides.transcribe` to override (e.g. "small.en"). */
+ *  `mode_overrides.transcribe` to override. */
 export interface MicConfig {
   device_name: string;
-  /** Target capture rate in Hz. 16000 is what whisper wants; the cpal
-   *  capture path resamples to 16k regardless, so this is just a hint
-   *  to any future browser-side fallback. */
+  /** Target capture rate in Hz. 16000 is what every ASR backend we ship
+   *  expects; the cpal capture path resamples to 16k regardless, so this
+   *  is just a hint to any future browser-side fallback. */
   sample_rate: number;
   /** WebRTC echo cancellation — only applies if a future build uses the
    *  WebView mic path; cpal doesn't expose an equivalent. */

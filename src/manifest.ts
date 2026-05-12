@@ -202,15 +202,34 @@ export interface ResolvedModel {
   override: boolean;
 }
 
-/** Default runtime for a mode when the manifest doesn't declare one.
- *  Transcribe always uses whisper-rs in this app; everything else routes
- *  through Ollama. Centralised so the frontend, Rust resolver, and Rust
- *  preload loop can stay in sync. Crucial when a user's cached manifest
- *  predates the `runtime` field — without this fallback the resolver
- *  would inherit the fallback mode's runtime (usually `ollama`) and hand
- *  whisper-shaped names to `ollama pull`. */
+/** Default runtime for a mode when neither the tier nor the mode block
+ *  declares one. Centralised so the frontend, Rust resolver, and Rust
+ *  preload loop stay in sync. Crucial when a user's cached manifest
+ *  predates the per-tier `runtime` field — without this fallback the
+ *  resolver would inherit the wrong runtime and try `ollama pull` on
+ *  an ONNX filename. */
 export function defaultRuntimeFor(mode: Mode): ModelRuntime {
-  return mode === "transcribe" ? "whisper" : "ollama";
+  switch (mode) {
+    case "transcribe":
+      // Bottom of the tier ladder; capable hardware promotes to parakeet
+      // via the per-tier `runtime` override.
+      return "moonshine";
+    case "diarize":
+      return "pyannote-diarize";
+    default:
+      return "ollama";
+  }
+}
+
+/** Resolve the effective runtime for a tier under a given mode.
+ *  Per-tier `runtime` wins; falls through to the mode-level runtime,
+ *  then to `defaultRuntimeFor(mode)`. */
+export function tierRuntime(
+  tier: ManifestTier | null | undefined,
+  mode: ManifestMode | null | undefined,
+  modeName: Mode,
+): ModelRuntime {
+  return tier?.runtime ?? mode?.runtime ?? defaultRuntimeFor(modeName);
 }
 
 /** Look up a mode block, preferring the family's own declaration but
@@ -237,32 +256,31 @@ export function resolveModelEx(
   const picked = pickFamily(manifest, familyName);
   const family = picked?.family;
   // Look up the mode in the family first, then fall back to
-  // manifest.shared_modes (the canonical whisper transcribe ladder
-  // lives there). Never inherit from the family's `default_mode` —
-  // that mode runs on a different runtime and its tier ladder is
-  // incompatible.
+  // manifest.shared_modes (the canonical transcribe / diarize ladders
+  // live there). Never inherit from the family's `default_mode` — that
+  // mode runs on a different runtime and its tier ladder is incompatible.
   const exactSpec = family ? modeFor(manifest, family, mode) : undefined;
-  const runtime: ModelRuntime =
+  const modeLevelRuntime: ModelRuntime =
     exactSpec?.runtime ?? defaultRuntimeFor(mode);
 
   const override = modeOverrides?.[mode];
   if (override) {
-    return { model: override, runtime, tier: null, override: true };
+    return { model: override, runtime: modeLevelRuntime, tier: null, override: true };
   }
 
   // No exact OR shared block AND we're on a non-Ollama runtime — fall
-  // back to a safe well-known whisper model rather than crossing tier
-  // ladders with text mode (which would surface nonsense like
-  // `whisper:gemma4:e2b` and trip whisper-rs).
-  if (!exactSpec && runtime === "whisper") {
-    return { model: "tiny.en", runtime, tier: null, override: false };
+  // back to a safe well-known model rather than crossing tier ladders
+  // with text mode (which would surface nonsense and trip the wrong
+  // backend at load time).
+  if (!exactSpec && modeLevelRuntime !== "ollama") {
+    return { model: safeFallbackFor(modeLevelRuntime), runtime: modeLevelRuntime, tier: null, override: false };
   }
 
   const tierSpec = exactSpec
     ?? (family ? family.modes[family.default_mode] : null);
 
   if (!tierSpec) {
-    return { model: "tinyllama", runtime, tier: null, override: false };
+    return { model: "tinyllama", runtime: modeLevelRuntime, tier: null, override: false };
   }
 
   const unified = isUnifiedMemory(hardware);
@@ -270,16 +288,39 @@ export function resolveModelEx(
 
   for (const tier of tierSpec.tiers) {
     if (tierMatches(tier, hardware, manifest, unified, headroom)) {
-      return { model: tier.model, runtime, tier, override: false };
+      return {
+        model: tier.model,
+        runtime: tierRuntime(tier, exactSpec, mode),
+        tier,
+        override: false,
+      };
     }
   }
   const last = tierSpec.tiers.at(-1) ?? null;
   return {
     model: last?.model ?? "tinyllama",
-    runtime,
+    runtime: tierRuntime(last, exactSpec, mode),
     tier: last,
     override: false,
   };
+}
+
+/** Safe default model name when a non-Ollama mode has no tier block to
+ *  walk. Keeps the resolver from handing a text-model tag to an ASR
+ *  backend on stale cached manifests. */
+function safeFallbackFor(runtime: ModelRuntime): string {
+  switch (runtime) {
+    case "moonshine":
+      return "moonshine-small-q8";
+    case "parakeet":
+      return "parakeet-tdt-0.6b-v3-int8";
+    case "pyannote-diarize":
+      return "pyannote-seg-3.0+campp-small";
+    case "sortformer":
+      return "sortformer-streaming";
+    default:
+      return "tinyllama";
+  }
 }
 
 /** Compiled-in headroom defaults when a manifest omits `headroom_gb` (or a
@@ -371,9 +412,11 @@ export function allRecommendedModels(manifest: Manifest): Set<string> {
 /** Modes a family advertises. Reads both the family's own declared
  *  `modes` and the manifest's `shared_modes` so a family that just
  *  inherits the canonical transcribe block still surfaces it on the
- *  mode bar. Transcribe is always advertised because whisper-rs ships
- *  with the binary — exposing it even when a cached manifest predates
- *  the `transcribe` block keeps the mode bar usable across upgrades. */
+ *  mode bar. Transcribe is always advertised because the ASR backend
+ *  ships with the binary — exposing it even when a cached manifest
+ *  predates the `transcribe` block keeps the mode bar usable across
+ *  upgrades. Diarize is a sub-feature of transcribe, not a top-level
+ *  mode in the UI, so it does NOT appear here. */
 export function familyModes(manifest: Manifest, family: ManifestFamily): Set<Mode> {
   const out = new Set<Mode>();
   for (const m of ["text", "vision", "code", "transcribe"] as Mode[]) {
@@ -383,16 +426,15 @@ export function familyModes(manifest: Manifest, family: ManifestFamily): Set<Mod
   return out;
 }
 
-/** True if a mode resolves to whisper-rs (rather than Ollama) under the
- *  active family. Reads the family's spec first, then `shared_modes`,
- *  then falls back to `defaultRuntimeFor(mode)` so a stale
- *  pre-`runtime`-field cached manifest still flags transcribe as
- *  whisper. */
-export function isWhisperMode(
+/** True if a mode resolves to a non-Ollama runtime (so its `model` field
+ *  names a file under `~/.myownllm/asr/` or `~/.myownllm/diarize/`
+ *  rather than an Ollama tag). Reads the family's spec first, then
+ *  `shared_modes`, then falls back to `defaultRuntimeFor(mode)`. */
+export function isLocalRuntimeMode(
   manifest: Manifest,
   family: ManifestFamily,
   mode: Mode,
 ): boolean {
   const declared = modeFor(manifest, family, mode)?.runtime;
-  return (declared ?? defaultRuntimeFor(mode)) === "whisper";
+  return (declared ?? defaultRuntimeFor(mode)) !== "ollama";
 }

@@ -33,8 +33,8 @@ pub async fn preload<F: FnMut(PreloadEvent)>(
 
     // Look up the active family's manifest once so we can ask each mode
     // which runtime owns it and skip the Ollama pull step for non-Ollama
-    // runtimes (whisper today; possibly more later) without round-tripping
-    // through `resolve()` for each one.
+    // runtimes (moonshine / parakeet / pyannote-diarize) without round-
+    // tripping through `resolve()` for each one.
     let (active_family, manifest_opt) = match crate::resolver::load_config_value() {
         Ok(cfg) => {
             let family = cfg["active_family"].as_str().unwrap_or("").to_string();
@@ -50,11 +50,11 @@ pub async fn preload<F: FnMut(PreloadEvent)>(
     };
 
     for mode in modes {
-        // Modes whose runtime isn't Ollama (whisper today) live under
-        // `~/.myownllm/whisper/` and are managed by Settings →
-        // Transcription, not by `ollama pull`. Skipping here avoids the
-        // pre-#59 footgun of pulling a phantom tag like `whisper:medium`
-        // and silently writing nothing to disk.
+        // Modes whose runtime isn't Ollama (moonshine / parakeet /
+        // pyannote-diarize) live under `~/.myownllm/models/` and are
+        // managed by Settings → Transcription, not by `ollama pull`.
+        // Skipping here avoids handing a phantom tag like `moonshine:x`
+        // to ollama and silently writing nothing to disk.
         if let Some(ref m) = manifest_opt {
             if let Some(rt) = crate::resolver::mode_runtime(m, mode, &active_family) {
                 if rt != "ollama" {

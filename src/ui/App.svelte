@@ -131,10 +131,10 @@
   }
 
   /** What to display in the status bar / pass downstream as the "active
-   *  model". The manifest now declares the runtime per mode, so
-   *  transcribe and text both flow through the same resolver — we just
-   *  prefix whisper picks so the UI can't confuse `tiny.en` (a whisper
-   *  filename) with an Ollama tag. */
+   *  model". The manifest declares the runtime per tier, so transcribe
+   *  and text both flow through the same resolver — we prefix non-Ollama
+   *  picks with their runtime so the UI can't confuse `moonshine-small-q8`
+   *  (an ASR filename) with an Ollama tag. */
   function displayModelFor(
     mode: Mode,
     hw: HardwareProfile,
@@ -142,7 +142,7 @@
     config: Awaited<ReturnType<typeof loadConfig>>,
   ): string {
     const r = resolveModelEx(hw, manifest, mode, config.mode_overrides, config.active_family);
-    return r.runtime === "whisper" ? `whisper:${r.model}` : r.model;
+    return r.runtime !== "ollama" ? `${r.runtime}:${r.model}` : r.model;
   }
 
   async function refreshConversations() {
@@ -186,14 +186,14 @@
         activeFamilyName,
       );
       activeModel =
-        activeResolved.runtime === "whisper"
-          ? `whisper:${activeResolved.model}`
+        activeResolved.runtime !== "ollama"
+          ? `${activeResolved.runtime}:${activeResolved.model}`
           : activeResolved.model;
 
       // Always resolve transcribe alongside whatever the user's active
-      // mode is — we want the whisper model present too so a switch
-      // into transcribe mode "just works" without a separate download
-      // flow. Resolved here so FirstRun can pull both in parallel.
+      // mode is — we want the ASR model present too so a switch into
+      // transcribe mode "just works" without a separate download flow.
+      // Resolved here so FirstRun can pull both in parallel.
       const transcribeResolved = resolveModelEx(
         hw,
         manifest,
@@ -202,7 +202,7 @@
         activeFamilyName,
       );
       pendingWhisperModel =
-        transcribeResolved.runtime === "whisper" ? transcribeResolved.model : "";
+        transcribeResolved.runtime !== "ollama" ? transcribeResolved.model : "";
 
       // We need both the active text model (Ollama) AND the picked
       // whisper transcribe model on disk. FirstRun pulls whichever is
@@ -447,7 +447,7 @@
 
   /** Background-pull the family-resolved whisper model if it isn't on
    *  disk yet. Fire-and-forget so the user can keep using text mode
-   *  while the whisper download runs; the next switch into transcribe
+   *  while the ASR download runs; the next switch into transcribe
    *  mode lands on a ready model instead of erroring out. */
   function ensureWhisperPresent(
     hw: HardwareProfile,
@@ -455,14 +455,16 @@
     config: Awaited<ReturnType<typeof loadConfig>>,
   ) {
     const r = resolveModelEx(hw, manifest, "transcribe", config.mode_overrides, activeFamilyName);
-    if (r.runtime !== "whisper" || !r.model) return;
-    invoke<Array<{ name: string; installed: boolean }>>("whisper_models_list")
+    // Ollama-runtime transcribe is unsupported; any non-Ollama runtime
+    // (moonshine / parakeet) needs the local ONNX model on disk.
+    if (r.runtime === "ollama" || !r.model) return;
+    invoke<Array<{ name: string; installed: boolean }>>("asr_models_list")
       .then((list) => {
         const installed = list.some((m) => m.name === r.model && m.installed);
         if (installed) return;
-        console.info("[myownllm] background whisper pull: %s", r.model);
-        invoke("whisper_model_pull", { name: r.model }).catch((e) => {
-          console.warn("[myownllm] background whisper pull failed:", e);
+        console.info("[myownllm] background ASR pull: %s (%s)", r.model, r.runtime);
+        invoke("asr_model_pull", { name: r.model }).catch((e) => {
+          console.warn("[myownllm] background ASR pull failed:", e);
         });
       })
       .catch(() => {});
@@ -676,7 +678,10 @@
       config.mode_overrides,
       activeFamilyName,
     );
-    if (resolved.runtime === "whisper" || !resolved.model) {
+    if (resolved.runtime !== "ollama" || !resolved.model) {
+      // Talking Points needs an Ollama text-runtime model; the
+      // resolver picked an ASR / diarize runtime by mistake (or no
+      // chat family is configured).
       console.warn("TP: no chat model resolved for family", activeFamilyName);
       return;
     }
@@ -759,7 +764,11 @@
       // has somewhere to land. We don't try to merge into a previous
       // conversation — there's no way to know which one was open when
       // the buffer was written.
-      const conv = newConversation("transcribe", `whisper:${target.model}`, activeFamilyName || "");
+      const conv = newConversation(
+        "transcribe",
+        `${target.runtime ?? "asr"}:${target.model}`,
+        activeFamilyName || "",
+      );
       conv.title = `Recovered transcript ${new Date().toLocaleString()}`.slice(0, 80);
       await saveConversation(conv);
       await refreshConversations();

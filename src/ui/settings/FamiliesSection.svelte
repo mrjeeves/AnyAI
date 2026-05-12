@@ -86,7 +86,7 @@
   } {
     const runtime = modeSpec.runtime ?? "ollama";
     const installedBytes =
-      runtime === "whisper" ? whisperSizes[modelName] : pulledSizes[modelName];
+      runtime !== "ollama" ? whisperSizes[modelName] : pulledSizes[modelName];
     if (installedBytes && installedBytes > 0) {
       return { bytes: installedBytes, installed: true };
     }
@@ -243,8 +243,8 @@
             <div class="mode-block">
               <div class="mode-head">
                 <span class="mode-name">{modeSpec.label || modeName}</span>
-                <span class="runtime-tag" class:whisper={runtime === "whisper"}>
-                  {runtime === "whisper" ? "whisper.cpp" : "ollama"}
+                <span class="runtime-tag" class:local={runtime !== "ollama"}>
+                  {runtime}
                 </span>
                 {#if shared}
                   <span class="shared-tag" title="Inherited from the manifest's shared_modes block — same ladder for every family unless they override.">shared</span>
@@ -416,7 +416,11 @@
     border: 1px solid #25252f;
     font-family: monospace;
   }
-  .runtime-tag.whisper {
+  .runtime-tag.local {
+    /* Highlights non-Ollama runtimes (moonshine / parakeet /
+       pyannote-diarize / sortformer) so the user can tell at a
+       glance that this tier's model lives under ~/.myownllm/models/
+       rather than as an Ollama tag. */
     color: #d4a64a;
     border-color: #4a3a1a;
     background: #1f1812;
