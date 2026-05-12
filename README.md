@@ -2,7 +2,7 @@
 
 # MyOwnLLM
 
-### Local LLMs and real-time transcription, on your machine, in one binary.<br>The thing &ldquo;bring your own LLM&rdquo; and &ldquo;transcription is solved&rdquo; quietly assume already exists.
+### Local LLMs and real-time transcription, on your machine, in one binary.<br>The piece every &ldquo;bring your own LLM&rdquo; agent assumes you've already built.
 
 [**myownllm.net**](https://myownllm.net) — installers, screenshots, the pitch
 
@@ -20,16 +20,17 @@
 
 ## Why this exists
 
-> **&ldquo;Bring your own LLM.&rdquo;** &nbsp;To whom?<br>
-> **&ldquo;Transcription is a solved problem.&rdquo;** &nbsp;For whom?
+You starred OpenClaw, or Continue, or Cline, or opencode, or Aider. You imagined a local AI that just works on your laptop. Then you got to the part that says *"point it at an LLM."* Which one? Where from? On what hardware? Bring your own.
 
-Twenty years writing AI software, and getting either one *actually working* — locally, reliably, on whatever machine I happened to be holding — was still a week of yak-shaving. If it's that scary for me, nobody else stands a chance. So I built the thing I wished existed.
+In practice, "bring your own" quietly turns into "bring your own paid API key," and the bills add up faster than anyone budgeted for — every agent loop, every autocomplete burst, every transcript summary, charged by the token to a different vendor. The local-AI dream was supposed to cut that line, not refactor it.
 
-**MyOwnLLM is two solved paths in one binary:**
+MyOwnLLM is what people thought was in the box. One binary that resolves *the right model for this machine* against a JSON manifest, serves it on OpenAI / Ollama / Anthropic ports, and ships the on-device real-time transcription pipeline that the rest of the ecosystem hand-waves as a solved problem. After 20 years writing AI software it still took a week of yak-shaving to wire all this up by hand — so if that's the floor for someone who does this for a living, nobody else stands a chance. Hence this.
+
+**Two solved paths, one binary:**
 
 |   |   |
 |---|---|
-| **A local LLM endpoint that just works** | OpenAI-compatible HTTP on `127.0.0.1:1473` (also Ollama, also Anthropic), served by whichever model fits the machine, chosen by a JSON manifest you — or your team, or someone you trust — control. Drop it into Cursor, Continue, Aider, Cline, Zed, Open WebUI, opencode, OpenClaw, OpenClaude, or your own scripts and stop thinking about it. |
+| **A local LLM endpoint that just works** | OpenAI-compatible HTTP on `127.0.0.1:1473` (also Ollama, also Anthropic), serving whichever model fits the machine — picked by a JSON manifest you, your team, or someone you trust controls. Cursor, Continue, Aider, Cline, Zed, Open WebUI, opencode, **OpenClaw**, OpenClaude, and your own scripts target it on day one. No metered tokens, no vendor lock-in. |
 | **Real-time transcription that just works** | Mic-to-text in ~1 s on a Pi 5 (English) or 80–200 ms on capable hardware (25 languages), with optional speaker diarization that stays stable across the whole session and a Talking-Points summary that grows alongside the live transcript. No second daemon, no Python venv, no cloud round-trip. |
 
 ## Install
