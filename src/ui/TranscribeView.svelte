@@ -100,7 +100,7 @@
   let activeConversation = $state<Conversation | null>(null);
   let transcript = $state<TranscriptSegment[]>([]);
   let speakerLabels = $state<Record<number, string>>({});
-  let diarizeEnabled = $state(false);
+  let diarizeEnabled = $state(true);
   /** Set while we're pulling the diarize composite on first toggle-on.
    *  Drives the inline progress text on the toggle itself. */
   let diarizePullStatus = $state("");
@@ -151,7 +151,7 @@
       activeConversation = null;
       transcript = [];
       speakerLabels = {};
-      diarizeEnabled = false;
+      diarizeEnabled = true;
       talkingPoints = [];
       talkingPointsPrev = [];
       tpActionStatus = "";
@@ -164,7 +164,7 @@
       activeConversation = c;
       transcript = c.transcript ?? [];
       speakerLabels = c.speaker_labels ?? {};
-      diarizeEnabled = c.diarize_enabled ?? false;
+      diarizeEnabled = c.diarize_enabled ?? true;
       talkingPoints = c.talking_points ?? [];
       talkingPointsPrev = c.talking_points_prev ?? [];
       tpActionStatus = "";
@@ -186,7 +186,7 @@
     activeConversation = null;
     transcript = [];
     speakerLabels = {};
-    diarizeEnabled = false;
+    diarizeEnabled = true;
     talkingPoints = [];
     talkingPointsPrev = [];
     tpActionStatus = "";
