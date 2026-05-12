@@ -15,6 +15,19 @@
     installed_size_bytes: number | null;
   }
 
+  /** Mirror of `models::LegacyDirInfo`. Represents a directory left
+   *  behind by a deprecated runtime (whisper today, future
+   *  retirements later). Surfaced as a reclaim card so users
+   *  upgrading from older versions can free the disk through the
+   *  UI rather than having to `rm -rf` by hand. */
+  interface LegacyDirInfo {
+    id: string;
+    label: string;
+    path: string;
+    size_bytes: number;
+    exists: boolean;
+  }
+
   type Tab = "providers" | "families" | "models" | "storage" | "updates";
 
   let { setActive } = $props<{ setActive: (tab: Tab) => void }>();
@@ -34,44 +47,79 @@
    *  the inference loop drains the dir as it catches up. The card
    *  stays hidden when there's nothing pending. */
   let transcribeBacklogBytes = $state(0);
+  /** Leftover dirs from deprecated runtimes that still consume disk
+   *  on upgraded installs. Only entries with `exists: true && size_bytes > 0`
+   *  render; otherwise hidden so a clean install doesn't see stale
+   *  reclaim buttons. */
+  let legacyDirs = $state<LegacyDirInfo[]>([]);
+  /** While a reclaim is in flight, the entry's id sits here so the
+   *  button can show a spinner / disabled state. */
+  let reclaiming = $state<string | null>(null);
+  let reclaimError = $state("");
+
+  async function refreshStorage(): Promise<void> {
+    const [pulled, asr, diarize, hw, config, backlog, legacy] = await Promise.all([
+      invoke<OllamaModel[]>("ollama_list_models").catch(() => [] as OllamaModel[]),
+      invoke<ModelInfo[]>("asr_models_list").catch(() => [] as ModelInfo[]),
+      invoke<ModelInfo[]>("diarize_models_list").catch(() => [] as ModelInfo[]),
+      invoke<HardwareProfile>("detect_hardware").catch(() => null),
+      loadConfig(),
+      invoke<number>("transcribe_buffer_size_bytes").catch(() => 0),
+      invoke<LegacyDirInfo[]>("legacy_models_list").catch(() => [] as LegacyDirInfo[]),
+    ]);
+    // Local-runtime models live under ~/.myownllm/models/, not in
+    // Ollama's library, so the on-disk total has to sum every
+    // backend or it under-reports every transcribe / diarize
+    // install. Only count installed entries with a known size —
+    // pending downloads and unknown-size rows would inflate the
+    // total without representing real bytes on disk.
+    const ollamaBytes = pulled.reduce((acc, m) => acc + m.size, 0);
+    const localInstalled = [...asr, ...diarize].filter(
+      (m) => m.installed && (m.installed_size_bytes ?? 0) > 0,
+    );
+    const localBytes = localInstalled.reduce(
+      (acc, m) => acc + (m.installed_size_bytes ?? 0),
+      0,
+    );
+    // Legacy bytes count toward the disk total — they ARE on disk
+    // and the user is paying for them — but not toward `modelCount`,
+    // which represents currently-usable models.
+    const legacyBytes = legacy
+      .filter((d) => d.exists && d.size_bytes > 0)
+      .reduce((acc, d) => acc + d.size_bytes, 0);
+    totalBytes = ollamaBytes + localBytes + legacyBytes;
+    modelCount = pulled.length + localInstalled.length;
+    diskFreeGb = hw?.disk_free_gb ?? null;
+    transcribeBacklogBytes = backlog;
+    legacyDirs = legacy;
+    conversationDir = config.conversation_dir ?? "";
+    savedConvDir = conversationDir;
+    if (conversationDir) {
+      try { dirExists = await exists(conversationDir); } catch { dirExists = null; }
+    }
+  }
 
   onMount(async () => {
     try {
-      const [pulled, asr, diarize, hw, config, backlog] = await Promise.all([
-        invoke<OllamaModel[]>("ollama_list_models").catch(() => [] as OllamaModel[]),
-        invoke<ModelInfo[]>("asr_models_list").catch(() => [] as ModelInfo[]),
-        invoke<ModelInfo[]>("diarize_models_list").catch(() => [] as ModelInfo[]),
-        invoke<HardwareProfile>("detect_hardware").catch(() => null),
-        loadConfig(),
-        invoke<number>("transcribe_buffer_size_bytes").catch(() => 0),
-      ]);
-      // Local-runtime models live under ~/.myownllm/models/, not in
-      // Ollama's library, so the on-disk total has to sum every
-      // backend or it under-reports every transcribe / diarize
-      // install. Only count installed entries with a known size —
-      // pending downloads and unknown-size rows would inflate the
-      // total without representing real bytes on disk.
-      const ollamaBytes = pulled.reduce((acc, m) => acc + m.size, 0);
-      const localInstalled = [...asr, ...diarize].filter(
-        (m) => m.installed && (m.installed_size_bytes ?? 0) > 0,
-      );
-      const localBytes = localInstalled.reduce(
-        (acc, m) => acc + (m.installed_size_bytes ?? 0),
-        0,
-      );
-      totalBytes = ollamaBytes + localBytes;
-      modelCount = pulled.length + localInstalled.length;
-      diskFreeGb = hw?.disk_free_gb ?? null;
-      transcribeBacklogBytes = backlog;
-      conversationDir = config.conversation_dir ?? "";
-      savedConvDir = conversationDir;
-      if (conversationDir) {
-        try { dirExists = await exists(conversationDir); } catch { dirExists = null; }
-      }
+      await refreshStorage();
     } finally {
       loading = false;
     }
   });
+
+  async function reclaimLegacy(id: string): Promise<void> {
+    if (reclaiming) return;
+    reclaiming = id;
+    reclaimError = "";
+    try {
+      await invoke("legacy_models_remove", { id });
+      await refreshStorage();
+    } catch (e) {
+      reclaimError = String(e);
+    } finally {
+      reclaiming = null;
+    }
+  }
 
   function backlogSeconds(bytes: number): number {
     // 16 kHz mono f32 → 64 KB per second of audio. We round to the
@@ -158,13 +206,41 @@
                   {bytesLabel(transcribeBacklogBytes)}
                   ({backlogSeconds(transcribeBacklogBytes)} s of audio)
                 </span>
-                pending whisper inference under
+                pending ASR inference under
                 <code>~/.myownllm/transcribe-buffer/</code>.
                 Drains automatically while MyOwnLLM is open.
               </div>
             </div>
           </div>
         </div>
+      {/if}
+
+      {#each legacyDirs as legacy (legacy.id)}
+        {#if legacy.exists && legacy.size_bytes > 0}
+          <div class="card">
+            <div class="card-row">
+              <div class="card-info">
+                <div class="card-title">{legacy.label}</div>
+                <div class="card-meta">
+                  <span class="warn">{bytesLabel(legacy.size_bytes)}</span>
+                  under <code>{legacy.path}</code>.
+                  Left over from a previous MyOwnLLM version that used a
+                  different backend — safe to delete.
+                </div>
+              </div>
+              <button
+                class="link-btn"
+                disabled={reclaiming !== null}
+                onclick={() => reclaimLegacy(legacy.id)}
+              >
+                {reclaiming === legacy.id ? "Reclaiming…" : "Reclaim disk →"}
+              </button>
+            </div>
+          </div>
+        {/if}
+      {/each}
+      {#if reclaimError}
+        <p class="reclaim-err">{reclaimError}</p>
       {/if}
 
       <div class="card">
@@ -254,6 +330,13 @@
   .path-meta .ok  { color: #6a6; }
   .path-meta .err { color: #f88; }
   .path-meta .dim { color: #555; }
+
+  .reclaim-err {
+    margin: 0;
+    padding: 0 .25rem;
+    color: #f88;
+    font-size: .75rem;
+  }
 
   .loading { padding: 1.5rem; text-align: center; color: #555; font-size: .82rem; }
 </style>

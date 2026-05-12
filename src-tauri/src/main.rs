@@ -392,6 +392,23 @@ fn diarize_model_present(name: String) -> bool {
     models::composite_installed(&name, models::ModelKind::Diarize)
 }
 
+/// List leftover on-disk directories from deprecated runtimes
+/// (whisper today, future deprecations later). Returns every
+/// registered legacy id with its current on-disk size so the
+/// Storage tab can decide whether to render a reclaim row.
+#[tauri::command]
+fn legacy_models_list() -> Vec<models::LegacyDirInfo> {
+    models::legacy_list()
+}
+
+/// Reclaim one of the legacy runtime directories. Whitelist-
+/// guarded on the Rust side — `id` is rejected unless it's
+/// in `LEGACY_RUNTIME_DIRS`.
+#[tauri::command]
+fn legacy_models_remove(id: String) -> Result<(), String> {
+    models::legacy_remove(&id).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn audio_input_devices() -> Result<Vec<transcribe::AudioInputDevice>, String> {
     transcribe::list_input_devices().map_err(|e| e.to_string())
@@ -546,6 +563,8 @@ fn main() {
             diarize_models_list,
             diarize_model_pull,
             diarize_model_present,
+            legacy_models_list,
+            legacy_models_remove,
             audio_input_devices,
         ])
         .setup(|app| {

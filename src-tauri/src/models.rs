@@ -329,6 +329,108 @@ pub fn remove(spec: &ModelSpec) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Legacy runtime detection.
+//
+// When the app deprecates a runtime (whisper → moonshine/parakeet in v0.2.6,
+// possibly more later), the old on-disk model files stay where they are.
+// Users have no way to reclaim that disk through the UI because the new
+// download registry knows nothing about them. The list below is the
+// app's institutional memory of "directories that used to hold models we
+// no longer ship a backend for"; the Settings → Storage card walks it,
+// shows the size, and offers a one-click reclaim.
+//
+// Add to `LEGACY_RUNTIME_DIRS` whenever a runtime is retired — the entry
+// is a pair of `(short_id_for_tauri_command, ~/.myownllm/SUBDIR)`. Pin
+// the IDs (don't rename); `legacy_remove` whitelists against this list
+// so renaming would unfairly orphan an old install's cleanup.
+// ---------------------------------------------------------------------------
+
+/// `(id, subdir under ~/.myownllm/, human-readable label)`.
+const LEGACY_RUNTIME_DIRS: &[(&str, &str, &str)] = &[
+    // Whisper was the v0.2.0–v0.2.5 transcribe backend. Replaced by
+    // Moonshine + Parakeet in v0.2.6 (PR #101); the ggml model files
+    // are no longer touched by any code path.
+    ("whisper", "whisper", "Whisper models (deprecated v0.2.6)"),
+];
+
+/// One legacy runtime directory the user might still have on disk.
+/// `installed_size_bytes` is 0 when the directory is absent — the UI
+/// uses that to hide rows for runtimes the user never had.
+#[derive(Debug, Serialize, Clone)]
+pub struct LegacyDirInfo {
+    pub id: String,
+    pub label: String,
+    pub path: String,
+    pub size_bytes: u64,
+    pub exists: bool,
+}
+
+/// Walk the legacy registry and report what's actually on disk.
+/// Skipped entries (directory missing) still appear with
+/// `exists: false` and `size_bytes: 0` so the UI can decide whether
+/// to render them at all.
+pub fn legacy_list() -> Vec<LegacyDirInfo> {
+    let root = match crate::myownllm_dir() {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    LEGACY_RUNTIME_DIRS
+        .iter()
+        .map(|(id, subdir, label)| {
+            let path = root.join(subdir);
+            let exists = path.exists();
+            let size_bytes = if exists { dir_size_bytes(&path) } else { 0 };
+            LegacyDirInfo {
+                id: (*id).to_string(),
+                label: (*label).to_string(),
+                path: path.to_string_lossy().into_owned(),
+                size_bytes,
+                exists,
+            }
+        })
+        .collect()
+}
+
+/// Remove one of the legacy directories by id. Whitelisted against
+/// `LEGACY_RUNTIME_DIRS`; unknown ids return an error so a hostile or
+/// stale caller can't direct `remove_dir_all` at an arbitrary path
+/// under `~/.myownllm/`.
+pub fn legacy_remove(id: &str) -> Result<()> {
+    let entry = LEGACY_RUNTIME_DIRS
+        .iter()
+        .find(|(eid, _, _)| *eid == id)
+        .ok_or_else(|| anyhow!("unknown legacy runtime: {id}"))?;
+    let path = crate::myownllm_dir()?.join(entry.1);
+    if path.exists() {
+        std::fs::remove_dir_all(&path).map_err(|e| anyhow!("removing {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Recursive size of a directory tree in bytes. Errors collapse to 0
+/// — the Storage tab uses this for a "you can reclaim X" hint, not
+/// for billing.
+fn dir_size_bytes(path: &std::path::Path) -> u64 {
+    let entries = match std::fs::read_dir(path) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    let mut total: u64 = 0;
+    for entry in entries.flatten() {
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.is_dir() {
+            total = total.saturating_add(dir_size_bytes(&entry.path()));
+        } else {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    total
+}
+
 /// Frame emitted on `myownllm://model-pull/{kind}/{name}` while a pull
 /// is in flight. Mirrors the old whisper-pull progress shape so the
 /// frontend's progress UI can be reused with a different event prefix.
@@ -539,6 +641,43 @@ mod tests {
     #[test]
     fn composite_split_errors_on_unknown_component() {
         assert!(find_composite("pyannote-seg-3.0+totally-bogus", ModelKind::Diarize).is_err());
+    }
+
+    #[test]
+    fn legacy_registry_includes_whisper() {
+        // Whisper is the inaugural entry — guards against an
+        // accidental refactor that drops it before users on
+        // upgrade-from-v0.2.5 installs have had a chance to
+        // reclaim the disk.
+        let ids: Vec<&str> = LEGACY_RUNTIME_DIRS.iter().map(|(id, _, _)| *id).collect();
+        assert!(ids.contains(&"whisper"), "whisper not in legacy registry");
+    }
+
+    #[test]
+    fn legacy_remove_rejects_unknown_ids() {
+        // The whitelist guard is the only thing standing between a
+        // hostile caller and `remove_dir_all` on an arbitrary path.
+        // Make sure unknown ids stay rejected.
+        assert!(legacy_remove("../etc").is_err());
+        assert!(legacy_remove("conversations").is_err());
+        assert!(legacy_remove("").is_err());
+    }
+
+    #[test]
+    fn legacy_list_reports_missing_dirs_with_zero_size() {
+        // On a clean dev machine the whisper dir doesn't exist;
+        // legacy_list should still return the entry with
+        // `exists: false` so the UI can decide whether to render
+        // a "nothing to reclaim" row vs. hide it entirely.
+        let entries = legacy_list();
+        // Every registered id should appear regardless of
+        // whether the directory exists.
+        assert_eq!(entries.len(), LEGACY_RUNTIME_DIRS.len());
+        for entry in entries {
+            if !entry.exists {
+                assert_eq!(entry.size_bytes, 0);
+            }
+        }
     }
 
     #[test]
