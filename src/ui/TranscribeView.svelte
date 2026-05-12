@@ -5,12 +5,15 @@
   import ModeBar from "./ModeBar.svelte";
   import StatusBar from "./StatusBar.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
+  import ConflictModal from "./ConflictModal.svelte";
   import type { SettingsTab } from "../update-state.svelte";
   import {
     transcribeUi,
     startRecording,
     startUpload,
     stopRecording,
+    pauseRecording,
+    resumeRecording,
     takeLiveSegments,
     clearAfterPersist,
     type EmittedSegment,
@@ -274,7 +277,58 @@
 
   async function startRec() {
     transcribeError = "";
-    onRequestStartRecording(doStartRec);
+    requireSession(() => onRequestStartRecording(doStartRec));
+  }
+
+  /** Session-required modal state. The user must have a conversation
+   *  selected (or agree to start a fresh one) before record / upload
+   *  fire — same singleton thinking as the conflict modal in App, but
+   *  the choice is "create one for me" rather than "stop the other
+   *  one". Non-native so it can show over the curtain on platforms
+   *  where the Tauri dialog plugin pops up behind it. */
+  let sessionPrompt = $state<{ proceed: () => void | Promise<void> } | null>(
+    null,
+  );
+
+  /** Run `next` only after we know a conversation owns the upcoming
+   *  recording/upload. If none is selected the user gets a non-native
+   *  popup; confirming starts a new conversation and then invokes
+   *  `next`. Cancel does nothing. */
+  function requireSession(next: () => void | Promise<void>) {
+    if (conversationId) {
+      void next();
+      return;
+    }
+    sessionPrompt = {
+      proceed: async () => {
+        // persist({ force: true }) creates a Conversation, saves it,
+        // and flips `activeConversation` + emits onConversationChanged
+        // so the sidebar highlights the new row. Once that lands the
+        // record/upload pipeline runs against a real conversation id.
+        try {
+          await persist({ force: true });
+        } catch (e) {
+          transcribeError = `Couldn't create session: ${e}`;
+          return;
+        }
+        await next();
+      },
+    };
+  }
+
+  function dismissSessionPrompt() {
+    sessionPrompt = null;
+  }
+
+  async function confirmSessionPrompt() {
+    const p = sessionPrompt;
+    if (!p) return;
+    sessionPrompt = null;
+    try {
+      await p.proceed();
+    } catch (e) {
+      console.warn("session-prompt proceed failed:", e);
+    }
   }
 
   async function doStartRec(): Promise<void> {
@@ -327,31 +381,57 @@
     persist().catch((e) => console.warn("save after stop failed:", e));
   }
 
-  /** Pick an audio file and transcribe it. Goes through the same
-   *  conflict check as Record so we don't start an upload over a live
-   *  recording. */
+  /** Extensions Symphonia's built-in features handle (audio +
+   *  isomp4-wrapped video tracks). Anything else gets rejected before
+   *  we hand it to the Rust decoder so the user gets a clear error
+   *  instead of a cryptic "no audio track" later. */
+  const AUDIO_EXTS = ["wav", "mp3", "m4a", "flac", "ogg", "oga", "aac"];
+  const VIDEO_EXTS = ["mp4", "m4v", "mov"];
+  const ALL_EXTS = [...AUDIO_EXTS, ...VIDEO_EXTS];
+
+  /** Pick an audio or video file and transcribe it. Goes through the
+   *  same conflict + session checks as Record so we don't start an
+   *  upload over a live recording or without a destination. */
   async function pickAndUpload() {
     transcribeError = "";
-    let picked: string | string[] | null;
-    try {
-      picked = await openDialog({
-        multiple: false,
-        directory: false,
-        title: "Pick an audio file to transcribe",
-        filters: [
-          {
-            name: "Audio",
-            extensions: ["wav", "mp3", "m4a", "flac", "ogg", "oga", "aac", "mp4"],
-          },
-        ],
-      });
-    } catch (e) {
-      transcribeError = `Open file dialog failed: ${e}`;
-      return;
-    }
-    if (!picked || Array.isArray(picked)) return;
-    const filePath = picked;
-    onRequestStartRecording(() => doUpload(filePath));
+    requireSession(async () => {
+      let picked: string | string[] | null;
+      try {
+        picked = await openDialog({
+          multiple: false,
+          directory: false,
+          title: "Pick an audio or video file to transcribe",
+          filters: [
+            { name: "Audio or video", extensions: ALL_EXTS },
+            { name: "Audio", extensions: AUDIO_EXTS },
+            { name: "Video (audio track will be extracted)", extensions: VIDEO_EXTS },
+          ],
+        });
+      } catch (e) {
+        transcribeError = `Open file dialog failed: ${e}`;
+        return;
+      }
+      if (!picked || Array.isArray(picked)) return;
+      const filePath = picked;
+      const ext = extOf(filePath).toLowerCase();
+      if (!ALL_EXTS.includes(ext)) {
+        transcribeError =
+          `'${ext || "this file"}' isn't a supported audio or video format. ` +
+          `Pick a ${AUDIO_EXTS.join(", ")} (audio) or ` +
+          `${VIDEO_EXTS.join(", ")} (video) file.`;
+        return;
+      }
+      onRequestStartRecording(() => doUpload(filePath));
+    });
+  }
+
+  /** Strip the path components and the leading dot from the file
+   *  extension. Empty string when the filename has no extension. */
+  function extOf(p: string): string {
+    const slash = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+    const base = slash >= 0 ? p.slice(slash + 1) : p;
+    const dot = base.lastIndexOf(".");
+    return dot >= 0 ? base.slice(dot + 1) : "";
   }
 
   async function doUpload(filePath: string): Promise<void> {
@@ -526,6 +606,48 @@
   // to draw the rec dot in the local pane chrome.
   let isMyRecording = $derived(
     transcribeUi.active && transcribeUi.conversationId === conversationId,
+  );
+
+  /** This view's conversation is the one being fed by an upload. The
+   *  progress-bar / "consume the Upload button" UI keys off this. */
+  let isMyUploading = $derived(
+    transcribeUi.active &&
+      transcribeUi.uploadOnly &&
+      transcribeUi.conversationId === conversationId,
+  );
+
+  let uploadTotalMs = $derived(transcribeUi.uploadProgress?.total_ms ?? null);
+  let uploadDecodedMs = $derived(transcribeUi.uploadProgress?.decoded_ms ?? 0);
+  let uploadProcessedMs = $derived(transcribeUi.uploadProgress?.processed_ms ?? 0);
+
+  /** Decoded / processed as a 0..100 percent. With no known total, we
+   *  fall back to 100% bar fills so the shimmer is the dominant
+   *  signal (the `.indeterminate` class drives that animation). */
+  let uploadDecodedPct = $derived(
+    uploadTotalMs && uploadTotalMs > 0
+      ? Math.min(100, (uploadDecodedMs / uploadTotalMs) * 100)
+      : 100,
+  );
+  let uploadProcessedPct = $derived(
+    uploadTotalMs && uploadTotalMs > 0
+      ? Math.min(100, (uploadProcessedMs / uploadTotalMs) * 100)
+      : 0,
+  );
+
+  /** "Uploading… X% · Transcribed Y%" style caption. When total is
+   *  unknown we show ms counters instead so the user has something to
+   *  watch tick over. */
+  let uploadCaption = $derived(
+    uploadTotalMs && uploadTotalMs > 0
+      ? `Uploaded ${Math.round(uploadDecodedPct)}% · Transcribed ${Math.round(uploadProcessedPct)}%`
+      : `Uploaded ${(uploadDecodedMs / 1000).toFixed(1)} s · Transcribed ${(uploadProcessedMs / 1000).toFixed(1)} s`,
+  );
+  let uploadBarTitle = $derived(
+    transcribeUi.paused
+      ? "Upload paused — resume from the Transcribe mode pill"
+      : uploadTotalMs && uploadTotalMs > 0
+        ? `Transcribed ${Math.round(uploadProcessedPct)}% of file`
+        : "Transcribing upload…",
   );
 
   let isMyTalkingPoints = $derived(
@@ -734,16 +856,49 @@
   {/if}
 
   <div class="input-row">
-    <button
-      class="new-btn"
-      onclick={pickAndUpload}
-      disabled={transcribeUi.active}
-      title={transcribeUi.active
-        ? "Stop the current session before uploading another file"
-        : "Transcribe an audio file"}
-    >
-      <span class="plus" aria-hidden="true">+</span> Upload
-    </button>
+    {#if isMyUploading}
+      <div
+        class="upload-progress"
+        class:paused={transcribeUi.paused}
+        class:indeterminate={uploadTotalMs == null}
+        role="progressbar"
+        aria-label="Upload progress"
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow={uploadTotalMs ? Math.round(uploadProcessedPct) : undefined}
+        title={uploadBarTitle}
+      >
+        <span
+          class="upload-fill decoded"
+          style="width: {uploadDecodedPct}%"
+          aria-hidden="true"
+        ></span>
+        <span
+          class="upload-fill processed"
+          style="width: {uploadProcessedPct}%"
+          aria-hidden="true"
+        ></span>
+        <span class="upload-shimmer" aria-hidden="true"></span>
+        <span class="upload-label">
+          {#if transcribeUi.paused}
+            Paused · {uploadCaption}
+          {:else}
+            {uploadCaption}
+          {/if}
+        </span>
+      </div>
+    {:else}
+      <button
+        class="new-btn"
+        onclick={pickAndUpload}
+        disabled={transcribeUi.active}
+        title={transcribeUi.active
+          ? "Stop the current session before uploading another file"
+          : "Transcribe an audio file"}
+      >
+        <span class="plus" aria-hidden="true">+</span> Upload
+      </button>
+    {/if}
     <label class="name-field">
       <span class="name-label">Session Name:</span>
       <input
@@ -756,7 +911,11 @@
       />
     </label>
     {#if isMyRecording}
-      <button class="record-btn stop" onclick={onRequestStopTranscribe} title="Stop recording">
+      <button
+        class="record-btn stop"
+        onclick={onRequestStopTranscribe}
+        title={isMyUploading ? "Stop transcribing this upload" : "Stop recording"}
+      >
         <span class="rec-square" aria-hidden="true"></span>
         Stop
       </button>
@@ -777,6 +936,18 @@
       initialTab={settingsTab}
       onClose={() => (settingsTab = null)}
       onChanged={handleProviderChange}
+    />
+  {/if}
+
+  {#if sessionPrompt}
+    <ConflictModal
+      title="Start a new session?"
+      message="Recording and upload feed into a selected conversation. Start a new one to capture this into?"
+      hint="The new session will appear in your sidebar and the highlighted conversation will switch to it."
+      confirmLabel="Start new session"
+      cancelLabel="Cancel"
+      onConfirm={confirmSessionPrompt}
+      onCancel={dismissSessionPrompt}
     />
   {/if}
 </div>
@@ -1062,6 +1233,83 @@
   }
   .new-btn:hover { border-color: #3a3a55; background: #131320; color: #fff; }
   .new-btn .plus { font-size: 1rem; line-height: 1; color: #6e6ef7; }
+
+  /* Upload-progress bar. Replaces the upload button while an upload
+     is in flight in this conversation; two stacked fills inside the
+     pill show "decoded" (leading) and "transcribed" (trailing), with
+     a shimmer overlay sliding across to signal liveness. */
+  .upload-progress {
+    flex-shrink: 0;
+    position: relative;
+    overflow: hidden;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 11rem;
+    height: 2rem;
+    padding: 0 .85rem;
+    border: 1px solid #2a2a3a;
+    border-radius: 8px;
+    background: #131320;
+    color: #e8e8e8;
+    font-size: .76rem;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    user-select: none;
+  }
+  .upload-fill {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    transition: width .25s ease-out;
+  }
+  .upload-fill.decoded {
+    background: linear-gradient(90deg, #2a2a55 0%, #3a3a7a 100%);
+    opacity: .85;
+  }
+  .upload-fill.processed {
+    background: linear-gradient(90deg, #6e6ef7 0%, #8c6ef7 100%);
+    opacity: .9;
+  }
+  .upload-shimmer {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(
+      105deg,
+      rgba(255, 255, 255, 0) 35%,
+      rgba(255, 255, 255, .22) 50%,
+      rgba(255, 255, 255, 0) 65%
+    );
+    background-size: 250% 100%;
+    background-position: 200% 0;
+    animation: upload-shimmer 1.8s linear infinite;
+  }
+  .upload-progress.indeterminate .upload-fill.decoded {
+    /* No total: show the leading fill as a sliding band so the bar
+       still reads as "alive" without claiming a percent. */
+    animation: upload-indeterminate 1.6s ease-in-out infinite;
+  }
+  .upload-progress.paused .upload-fill.decoded {
+    background: linear-gradient(90deg, #3a341c 0%, #4a3a1a 100%);
+  }
+  .upload-progress.paused .upload-fill.processed {
+    background: linear-gradient(90deg, #c89a3b 0%, #d4a64a 100%);
+  }
+  .upload-progress.paused .upload-shimmer { animation: none; opacity: .25; }
+  .upload-label {
+    position: relative;
+    z-index: 1;
+    text-shadow: 0 1px 1px rgba(0, 0, 0, .55);
+    white-space: nowrap;
+  }
+  @keyframes upload-shimmer {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -100% 0; }
+  }
+  @keyframes upload-indeterminate {
+    0%   { transform: translateX(-65%); }
+    100% { transform: translateX(35%); }
+  }
 
   .name-field {
     flex: 1;

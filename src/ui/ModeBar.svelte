@@ -183,15 +183,27 @@
                 </svg>
               </button>
             {:else}
-              {#if slotStatus !== "drain" && slotStatus !== "upload"}
+              {#if slotStatus !== "drain"}
                 {#if slotStatus === "paused"}
-                  <button class="ctrl" onclick={() => resumeRecording()} title="Resume mic">
+                  <button
+                    class="ctrl"
+                    onclick={() => resumeRecording()}
+                    title={transcribeUi.uploadOnly
+                      ? "Resume upload"
+                      : "Resume mic"}
+                  >
                     <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
                       <path fill="currentColor" d="M8 5v14l11-7z" />
                     </svg>
                   </button>
                 {:else}
-                  <button class="ctrl" onclick={() => pauseRecording()} title="Pause mic (keeps draining backlog)">
+                  <button
+                    class="ctrl"
+                    onclick={() => pauseRecording()}
+                    title={transcribeUi.uploadOnly
+                      ? "Pause upload (halts decoding + transcription)"
+                      : "Pause mic (keeps draining backlog)"}
+                  >
                     <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
                       <path fill="currentColor" d="M6 5h4v14H6zM14 5h4v14h-4z" />
                     </svg>

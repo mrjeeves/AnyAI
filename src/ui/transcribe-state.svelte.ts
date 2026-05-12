@@ -31,6 +31,13 @@ interface TranscribeFrame {
    *  noteworthy is happening — a normal text frame omits it, which
    *  clears the rendered status. */
   status?: string | null;
+  /** Upload-only sessions report two-phase progress in milliseconds.
+   *  Mirrors `transcribe::UploadProgress`. */
+  upload_progress?: {
+    total_ms?: number | null;
+    decoded_ms: number;
+    processed_ms: number;
+  } | null;
 }
 
 /** Per-stream pending entry returned by the recovery probe. Mirror of
@@ -108,6 +115,14 @@ export const transcribeUi = $state({
    *  normal text. */
   status: "" as string,
   error: "" as string,
+  /** Upload-only sessions report a two-phase progress: how many ms of
+   *  the file have been decoded vs how many have been transcribed.
+   *  `total_ms === null` means the demuxer couldn't tell us the total
+   *  duration upfront, so the progress bar renders as an
+   *  indeterminate shimmer. Cleared on stop / clearAfterPersist. */
+  uploadProgress: null as
+    | { total_ms: number | null; decoded_ms: number; processed_ms: number }
+    | null,
 });
 
 let unlistenStream: UnlistenFn | null = null;
@@ -138,6 +153,7 @@ function resetState() {
   transcribeUi.liveSegments = [];
   transcribeUi.liveDelta = "";
   transcribeUi.status = "";
+  transcribeUi.uploadProgress = null;
 }
 
 async function attachListener(streamId: string) {
@@ -161,6 +177,13 @@ async function attachListener(streamId: string) {
       }
       if (typeof f.chunk_seconds === "number" && f.chunk_seconds > 0) {
         transcribeUi.chunkSeconds = f.chunk_seconds;
+      }
+      if (f.upload_progress) {
+        transcribeUi.uploadProgress = {
+          total_ms: f.upload_progress.total_ms ?? null,
+          decoded_ms: f.upload_progress.decoded_ms,
+          processed_ms: f.upload_progress.processed_ms,
+        };
       }
       // A frame with no `status` field clears the subtitle — the Rust
       // side omits `status` on normal text frames specifically so the
@@ -272,6 +295,7 @@ export async function startUpload(args: {
   transcribeUi.pendingChunks = 0;
   transcribeUi.liveSegments = [];
   transcribeUi.liveDelta = "";
+  transcribeUi.uploadProgress = { total_ms: null, decoded_ms: 0, processed_ms: 0 };
 }
 
 export async function pauseRecording(): Promise<void> {

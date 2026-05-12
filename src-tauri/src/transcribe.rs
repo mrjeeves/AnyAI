@@ -127,6 +127,28 @@ pub struct TranscribeFrame {
     /// the status display.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// Upload-only sessions report a two-phase progress: how much of
+    /// the file has been decoded into the inference queue, and how
+    /// much has actually been transcribed. The UI renders these as a
+    /// "uploaded vs transcribed" progress bar on the upload button.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upload_progress: Option<UploadProgress>,
+}
+
+/// Two-phase upload progress: decode reads the file ahead, ASR
+/// catches up. The gap is the user-visible backlog while a long file
+/// is being transcribed.
+#[derive(Debug, Serialize, Clone)]
+pub struct UploadProgress {
+    /// Total audio duration of the file in milliseconds. `None` when
+    /// the container didn't expose `n_frames` and we can't compute it
+    /// upfront — the UI falls back to an indeterminate shimmer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_ms: Option<u64>,
+    /// Audio decoded into the inference queue so far.
+    pub decoded_ms: u64,
+    /// Audio transcribed by the ASR backend so far.
+    pub processed_ms: u64,
 }
 
 /// One unit of ASR output, optionally tagged with a speaker.
@@ -171,6 +193,7 @@ impl TranscribeFrame {
             pending_chunks,
             chunk_seconds,
             status,
+            upload_progress: None,
         }
     }
 }
@@ -409,6 +432,7 @@ pub fn start(
                 pending_chunks: 0,
                 chunk_seconds: None,
                 status: None,
+                upload_progress: None,
             },
             Err(e) => TranscribeFrame {
                 elapsed_ms: 0,
@@ -417,6 +441,7 @@ pub fn start(
                 pending_chunks: 0,
                 chunk_seconds: None,
                 status: Some(format!("transcription error: {e}")),
+                upload_progress: None,
             },
         };
         sink.emit_frame(&event, final_frame);
@@ -501,6 +526,7 @@ pub fn start_drain(
                 pending_chunks: 0,
                 chunk_seconds: None,
                 status: None,
+                upload_progress: None,
             },
             Err(e) => TranscribeFrame {
                 elapsed_ms: 0,
@@ -509,6 +535,7 @@ pub fn start_drain(
                 pending_chunks: 0,
                 chunk_seconds: None,
                 status: Some(format!("transcription error: {e}")),
+                upload_progress: None,
             },
         };
         sink.emit_frame(&event, final_frame);
@@ -544,16 +571,18 @@ pub fn start_upload(
         return Err(anyhow!("audio file not found: {}", file_path.display()));
     }
     let cancel = Arc::new(AtomicBool::new(false));
+    let paused = Arc::new(AtomicBool::new(false));
     sessions().insert(
         stream_id.clone(),
         Session {
             cancel: cancel.clone(),
-            paused: Arc::new(AtomicBool::new(false)),
+            paused: paused.clone(),
         },
     );
 
     let stream_id_for_thread = stream_id.clone();
     let cancel_for_thread = cancel.clone();
+    let paused_for_thread = paused.clone();
     let sink: Arc<dyn FrameSink> = Arc::new(window);
     thread::spawn(move || {
         let event = format!("myownllm://transcribe-stream/{stream_id_for_thread}");
@@ -564,6 +593,7 @@ pub fn start_upload(
             &file_path,
             diarize_model.as_deref(),
             cancel_for_thread,
+            paused_for_thread,
             &sink,
         );
         sessions().remove(&stream_id_for_thread);
@@ -575,6 +605,7 @@ pub fn start_upload(
                 pending_chunks: 0,
                 chunk_seconds: None,
                 status: None,
+                upload_progress: None,
             },
             Err(e) => TranscribeFrame {
                 elapsed_ms: 0,
@@ -583,6 +614,7 @@ pub fn start_upload(
                 pending_chunks: 0,
                 chunk_seconds: None,
                 status: Some(format!("transcription error: {e}")),
+                upload_progress: None,
             },
         };
         sink.emit_frame(&event, final_frame);
@@ -908,6 +940,7 @@ fn run_session(
                 pending_chunks: count_pending_chunks(&buffer_dir),
                 chunk_seconds: None,
                 status: None,
+                upload_progress: None,
             }
         } else {
             TranscribeFrame::heartbeat(
@@ -1051,6 +1084,7 @@ fn run_drain(
                     pending_chunks: count_pending_chunks(&buffer_dir),
                     chunk_seconds: None,
                     status: None,
+                    upload_progress: None,
                 },
             );
         }
@@ -1068,6 +1102,18 @@ fn run_drain(
     Ok(())
 }
 
+/// One resampled chunk handed from the upload decoder thread to the
+/// ASR consumer. `chunk_t0_ms` is the chunk's start time in the source
+/// timeline; `tail` flags the partial final chunk so the consumer can
+/// honour `caps.min_tail_seconds` instead of dropping audio under the
+/// regular chunk threshold.
+struct UploadChunk {
+    samples: Vec<f32>,
+    chunk_t0_ms: u64,
+    tail: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_upload(
     event: &str,
     runtime: &str,
@@ -1075,6 +1121,7 @@ fn run_upload(
     file_path: &Path,
     diarize_composite: Option<&str>,
     cancel: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
     window: &std::sync::Arc<dyn FrameSink>,
 ) -> Result<()> {
     use std::fs::File;
@@ -1112,13 +1159,25 @@ fn run_upload(
         .tracks()
         .iter()
         .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .ok_or_else(|| anyhow!("no audio track in {}", file_path.display()))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "no audio track in {} — pick an audio file, or a video that has audio.",
+                file_path.display()
+            )
+        })?;
     let track_id = track.id;
     let codec_params = track.codec_params.clone();
     let src_rate = codec_params
         .sample_rate
         .ok_or_else(|| anyhow!("audio file has no declared sample rate"))?;
     let src_channels = codec_params.channels.map(|c| c.count()).unwrap_or(1);
+    // n_frames isn't populated for every container/codec — when the
+    // demuxer can't compute it upfront we leave `total_ms` as None and
+    // the UI renders an indeterminate progress shimmer instead of a
+    // fixed-width fill.
+    let total_ms: Option<u64> = codec_params
+        .n_frames
+        .map(|n| (n.saturating_mul(1000)) / src_rate as u64);
 
     let mut decoder = symphonia::default::get_codecs()
         .make(&codec_params, &DecoderOptions::default())
@@ -1126,158 +1185,303 @@ fn run_upload(
 
     let chunk_at_src_rate = (src_rate as f32 * caps.chunk_seconds) as usize;
     let tail_min_src = (src_rate as f32 * caps.min_tail_seconds) as usize;
-    let mut buf: Vec<f32> = Vec::with_capacity(chunk_at_src_rate * 2);
-    let mut sb: Option<SampleBuffer<f32>> = None;
-    let mut chunk_t0_ms: u64 = 0;
+
+    // Producer / consumer split. The decoder runs on a worker thread
+    // and pushes resampled 16 kHz chunks into a small bounded channel;
+    // the ASR loop on this thread drains it. The gap between
+    // `decoded_ms` and `processed_ms` is the visible "uploading vs
+    // transcribed" backlog on the progress bar — bounded channel
+    // capacity caps how far ahead the decoder can get so memory use
+    // stays predictable even on huge files.
+    let (tx, rx) = bounded::<UploadChunk>(8);
+    let decoded_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    // First progress frame: tell the UI the total duration up front so
+    // it can render a deterministic bar from the start instead of
+    // waiting for the first chunk to land.
+    window.emit_frame(
+        event,
+        TranscribeFrame {
+            elapsed_ms: started.elapsed().as_millis(),
+            segments: Vec::new(),
+            is_final: false,
+            pending_chunks: 0,
+            chunk_seconds: Some(caps.chunk_seconds),
+            status: Some(format!(
+                "Transcribing {}…",
+                file_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("audio")
+            )),
+            upload_progress: Some(UploadProgress {
+                total_ms,
+                decoded_ms: 0,
+                processed_ms: 0,
+            }),
+        },
+    );
+
+    // Decoder thread. Pulls packets, downmixes + resamples, batches
+    // into `chunk_at_src_rate`-sized chunks, ships each chunk to the
+    // ASR consumer. Honours pause + cancel; on the natural EOF the
+    // remainder is sent as a single tail chunk if it meets the
+    // backend's `min_tail_seconds`. The producer drops `tx` on exit so
+    // the consumer's recv loop terminates cleanly.
+    let producer_cancel = cancel.clone();
+    let producer_paused = paused.clone();
+    let producer_decoded_ms = decoded_ms.clone();
+    let producer = thread::spawn(move || -> Result<()> {
+        let mut buf: Vec<f32> = Vec::with_capacity(chunk_at_src_rate * 2);
+        let mut sb: Option<SampleBuffer<f32>> = None;
+        let mut next_chunk_t0_ms: u64 = 0;
+        loop {
+            if producer_cancel.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            while producer_paused.load(Ordering::SeqCst) {
+                if producer_cancel.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            let packet = match format.next_packet() {
+                Ok(p) => p,
+                Err(SymError::IoError(ref e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    break;
+                }
+                Err(e) => return Err(anyhow!("symphonia read packet: {e}")),
+            };
+            if packet.track_id() != track_id {
+                continue;
+            }
+            let decoded = match decoder.decode(&packet) {
+                Ok(d) => d,
+                Err(SymError::IoError(_)) => continue,
+                Err(SymError::DecodeError(_)) => continue,
+                Err(e) => return Err(anyhow!("symphonia decode: {e}")),
+            };
+            let frames = decoded.frames();
+            let spec = *decoded.spec();
+            let sb_ref = match sb.as_mut() {
+                Some(b) => {
+                    if b.capacity() < decoded.capacity() {
+                        sb = Some(SampleBuffer::new(decoded.capacity() as u64, spec));
+                        sb.as_mut().unwrap()
+                    } else {
+                        b
+                    }
+                }
+                None => {
+                    sb = Some(SampleBuffer::new(decoded.capacity() as u64, spec));
+                    sb.as_mut().unwrap()
+                }
+            };
+            sb_ref.copy_interleaved_ref(decoded);
+            let samples = sb_ref.samples();
+            if src_channels == 1 {
+                buf.extend_from_slice(samples);
+            } else {
+                for f in 0..frames {
+                    let base = f * src_channels;
+                    let mut sum = 0.0f32;
+                    for c in 0..src_channels {
+                        sum += samples[base + c];
+                    }
+                    buf.push(sum / src_channels as f32);
+                }
+            }
+
+            while buf.len() >= chunk_at_src_rate {
+                if producer_cancel.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+                while producer_paused.load(Ordering::SeqCst) {
+                    if producer_cancel.load(Ordering::SeqCst) {
+                        return Ok(());
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+                let chunk: Vec<f32> = buf.drain(..chunk_at_src_rate).collect();
+                let resampled = resample_linear(&chunk, src_rate, TARGET_SR);
+                let chunk_ms = (resampled.len() as u64 * 1000) / TARGET_SR as u64;
+                let this_t0 = next_chunk_t0_ms;
+                next_chunk_t0_ms += chunk_ms;
+                producer_decoded_ms.store(next_chunk_t0_ms, Ordering::SeqCst);
+                if tx
+                    .send(UploadChunk {
+                        samples: resampled,
+                        chunk_t0_ms: this_t0,
+                        tail: false,
+                    })
+                    .is_err()
+                {
+                    return Ok(());
+                }
+            }
+        }
+
+        // Tail (partial chunk past the last full one). Only push if
+        // it's at least `min_tail_seconds` worth of source samples so
+        // we don't waste an inference call on a sliver.
+        if !producer_cancel.load(Ordering::SeqCst) && buf.len() >= tail_min_src {
+            let resampled = resample_linear(&buf, src_rate, TARGET_SR);
+            let chunk_ms = (resampled.len() as u64 * 1000) / TARGET_SR as u64;
+            let this_t0 = next_chunk_t0_ms;
+            next_chunk_t0_ms += chunk_ms;
+            producer_decoded_ms.store(next_chunk_t0_ms, Ordering::SeqCst);
+            let _ = tx.send(UploadChunk {
+                samples: resampled,
+                chunk_t0_ms: this_t0,
+                tail: true,
+            });
+        }
+        Ok(())
+    });
+
+    // Consumer: pull each chunk off the channel, run ASR (+ diarize),
+    // emit a frame with the latest progress, advance `processed_ms`.
+    // Silence chunks still advance progress so a long quiet stretch
+    // doesn't stall the bar.
     let mut chunks_since_reset: u64 = 0;
     let mut consecutive_errors: u32 = 0;
+    let mut processed_ms: u64 = 0;
+    let mut last_progress_emit_ms: u128 = 0;
 
-    'outer: loop {
+    let emit_progress = |window: &std::sync::Arc<dyn FrameSink>,
+                         elapsed_ms: u128,
+                         segments: Vec<EmittedSegment>,
+                         decoded: u64,
+                         processed: u64,
+                         status: Option<String>| {
+        window.emit_frame(
+            event,
+            TranscribeFrame {
+                elapsed_ms,
+                segments,
+                is_final: false,
+                pending_chunks: 0,
+                chunk_seconds: None,
+                status,
+                upload_progress: Some(UploadProgress {
+                    total_ms,
+                    decoded_ms: decoded,
+                    processed_ms: processed,
+                }),
+            },
+        );
+    };
+
+    while let Ok(chunk) = rx.recv() {
         if cancel.load(Ordering::SeqCst) {
             break;
         }
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(SymError::IoError(ref e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+        while paused.load(Ordering::SeqCst) {
+            if cancel.load(Ordering::SeqCst) {
                 break;
             }
-            Err(e) => return Err(anyhow!("symphonia read packet: {e}")),
-        };
-        if packet.track_id() != track_id {
+            thread::sleep(Duration::from_millis(100));
+        }
+        if cancel.load(Ordering::SeqCst) {
+            break;
+        }
+
+        let resampled = &chunk.samples;
+        let chunk_t0_ms = chunk.chunk_t0_ms;
+        let chunk_ms = (resampled.len() as u64 * 1000) / TARGET_SR as u64;
+        let is_tail = chunk.tail;
+
+        // Silence skip: still advance progress so a long quiet stretch
+        // doesn't stall the bar.
+        if chunk_rms(resampled) < SILENCE_RMS_THRESHOLD {
+            processed_ms = chunk_t0_ms + chunk_ms;
+            let now_ms = started.elapsed().as_millis();
+            if now_ms.saturating_sub(last_progress_emit_ms) >= 250 {
+                last_progress_emit_ms = now_ms;
+                let decoded = decoded_ms.load(Ordering::SeqCst).max(processed_ms);
+                emit_progress(window, now_ms, Vec::new(), decoded, processed_ms, None);
+            }
             continue;
         }
-        let decoded = match decoder.decode(&packet) {
-            Ok(d) => d,
-            Err(SymError::IoError(_)) => continue,
-            Err(SymError::DecodeError(_)) => continue,
-            Err(e) => return Err(anyhow!("symphonia decode: {e}")),
-        };
-        let frames = decoded.frames();
-        let spec = *decoded.spec();
-        let sb = match sb.as_mut() {
-            Some(b) => {
-                if b.capacity() < decoded.capacity() {
-                    sb = Some(SampleBuffer::new(decoded.capacity() as u64, spec));
-                    sb.as_mut().unwrap()
-                } else {
-                    b
-                }
-            }
-            None => {
-                sb = Some(SampleBuffer::new(decoded.capacity() as u64, spec));
-                sb.as_mut().unwrap()
-            }
-        };
-        sb.copy_interleaved_ref(decoded);
-        let samples = sb.samples();
-        if src_channels == 1 {
-            buf.extend_from_slice(samples);
-        } else {
-            for f in 0..frames {
-                let base = f * src_channels;
-                let mut sum = 0.0f32;
-                for c in 0..src_channels {
-                    sum += samples[base + c];
-                }
-                buf.push(sum / src_channels as f32);
-            }
-        }
 
-        while buf.len() >= chunk_at_src_rate {
-            if cancel.load(Ordering::SeqCst) {
-                break 'outer;
+        let asr_out = match asr.process_chunk(resampled, chunk_t0_ms, &cancel) {
+            Ok(o) => {
+                consecutive_errors = 0;
+                o
             }
-            let chunk: Vec<f32> = buf.drain(..chunk_at_src_rate).collect();
-            let resampled = resample_linear(&chunk, src_rate, TARGET_SR);
-            let chunk_ms = (resampled.len() as u64 * 1000) / TARGET_SR as u64;
-            if chunk_rms(&resampled) < SILENCE_RMS_THRESHOLD {
-                chunk_t0_ms += chunk_ms;
+            Err(e) => {
+                if cancel.load(Ordering::SeqCst) {
+                    break;
+                }
+                consecutive_errors += 1;
+                eprintln!("ASR inference failed (consecutive={consecutive_errors}): {e}");
+                if consecutive_errors >= ASR_CONSECUTIVE_ERROR_LIMIT {
+                    cancel.store(true, Ordering::SeqCst);
+                    let _ = producer.join();
+                    return Err(anyhow!(
+                        "ASR backend failed {consecutive_errors} times in a row \
+                         while transcribing the uploaded file: {e}"
+                    ));
+                }
+                asr.reset_state();
+                processed_ms = chunk_t0_ms + chunk_ms;
                 continue;
             }
-            let asr_out = match asr.process_chunk(&resampled, chunk_t0_ms, &cancel) {
-                Ok(o) => {
-                    consecutive_errors = 0;
-                    o
-                }
-                Err(e) => {
-                    if cancel.load(Ordering::SeqCst) {
-                        break 'outer;
-                    }
-                    consecutive_errors += 1;
-                    eprintln!("ASR inference failed (consecutive={consecutive_errors}): {e}");
-                    if consecutive_errors >= ASR_CONSECUTIVE_ERROR_LIMIT {
-                        return Err(anyhow!(
-                            "ASR backend failed {consecutive_errors} times in a row \
-                             while transcribing the uploaded file: {e}"
-                        ));
-                    }
-                    asr.reset_state();
-                    chunk_t0_ms += chunk_ms;
-                    continue;
-                }
-            };
-            let turns: Vec<SpeakerTurn> = if let Some(d) = diarize.as_mut() {
-                d.process_chunk(&resampled, chunk_t0_ms, &cancel)
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-            let mut segments = join_segments(&asr_out.segments, &turns, chunk_t0_ms);
-            chunk_t0_ms += chunk_ms;
-            segments.retain(|s| !s.text.trim().is_empty());
+        };
+        let turns: Vec<SpeakerTurn> = if let Some(d) = diarize.as_mut() {
+            d.process_chunk(resampled, chunk_t0_ms, &cancel)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let mut segments = join_segments(&asr_out.segments, &turns, chunk_t0_ms);
+        segments.retain(|s| !s.text.trim().is_empty());
+        processed_ms = chunk_t0_ms + chunk_ms;
 
-            if !segments.is_empty() {
-                window.emit_frame(
-                    event,
-                    TranscribeFrame {
-                        elapsed_ms: started.elapsed().as_millis(),
-                        segments,
-                        is_final: false,
-                        pending_chunks: 0,
-                        chunk_seconds: None,
-                        status: None,
-                    },
-                );
-            }
+        let now_ms = started.elapsed().as_millis();
+        let decoded = decoded_ms.load(Ordering::SeqCst).max(processed_ms);
+        if !segments.is_empty() || now_ms.saturating_sub(last_progress_emit_ms) >= 250 {
+            last_progress_emit_ms = now_ms;
+            emit_progress(window, now_ms, segments, decoded, processed_ms, None);
+        }
 
-            if asr_out.used_state && caps.state_reset_chunks > 0 {
-                chunks_since_reset += 1;
-                if chunks_since_reset >= caps.state_reset_chunks {
-                    chunks_since_reset = 0;
-                    asr.reset_state();
-                }
+        if asr_out.used_state && caps.state_reset_chunks > 0 {
+            chunks_since_reset += 1;
+            if chunks_since_reset >= caps.state_reset_chunks {
+                chunks_since_reset = 0;
+                asr.reset_state();
             }
         }
+        // Tail chunk is by definition the last one — nothing more to
+        // do after it, but the loop will exit naturally once the
+        // producer has dropped `tx`.
+        let _ = is_tail;
     }
 
-    // Tail
-    if !cancel.load(Ordering::SeqCst) && buf.len() >= tail_min_src {
-        let resampled = resample_linear(&buf, src_rate, TARGET_SR);
-        if chunk_rms(&resampled) >= SILENCE_RMS_THRESHOLD {
-            if let Ok(asr_out) = asr.process_chunk(&resampled, chunk_t0_ms, &cancel) {
-                let turns: Vec<SpeakerTurn> = if let Some(d) = diarize.as_mut() {
-                    d.process_chunk(&resampled, chunk_t0_ms, &cancel)
-                        .unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
-                let mut segments = join_segments(&asr_out.segments, &turns, chunk_t0_ms);
-                segments.retain(|s| !s.text.trim().is_empty());
-                if !segments.is_empty() {
-                    window.emit_frame(
-                        event,
-                        TranscribeFrame {
-                            elapsed_ms: started.elapsed().as_millis(),
-                            segments,
-                            is_final: false,
-                            pending_chunks: 0,
-                            chunk_seconds: None,
-                            status: None,
-                        },
-                    );
-                }
-            }
-        }
+    // Producer might still be holding on to a final state-reset; join
+    // so its error (if any) doesn't get silently dropped.
+    let producer_result = producer
+        .join()
+        .unwrap_or_else(|_| Err(anyhow!("upload decoder thread panicked")));
+    producer_result?;
+
+    // One last "100%" frame so the bar finishes filling even if the
+    // last chunk was silence-skipped or all chunks landed below the
+    // throttle threshold.
+    if !cancel.load(Ordering::SeqCst) {
+        let decoded = decoded_ms.load(Ordering::SeqCst).max(processed_ms);
+        let final_processed = match total_ms {
+            Some(t) => processed_ms.max(t),
+            None => processed_ms,
+        };
+        emit_progress(
+            window,
+            started.elapsed().as_millis(),
+            Vec::new(),
+            decoded.max(final_processed),
+            final_processed,
+            None,
+        );
     }
 
     Ok(())
