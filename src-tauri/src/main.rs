@@ -7,6 +7,7 @@ mod asr;
 mod cli;
 mod conversations;
 mod diarize;
+mod frame_sink;
 mod hardware;
 mod models;
 mod ollama;

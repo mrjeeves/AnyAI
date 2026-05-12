@@ -38,10 +38,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
-use tauri::{Emitter, WebviewWindow};
+use tauri::WebviewWindow;
 
 use crate::asr::{self, AsrBackend, AsrCaps, AsrSegment};
 use crate::diarize::{self, DiarizeBackend, SpeakerTurn};
+use crate::frame_sink::FrameSink;
 use crate::models::{self, ModelKind};
 
 /// Target sample rate. Every ASR / diarize backend we ship is trained
@@ -385,6 +386,7 @@ pub fn start(
     let runtime_for_thread = runtime.clone();
     let model_for_thread = model_name.clone();
     let diarize_for_thread = diarize_model.clone();
+    let sink: Arc<dyn FrameSink> = Arc::new(window);
     thread::spawn(move || {
         let event = format!("myownllm://transcribe-stream/{stream_id_for_thread}");
         let res = run_session(
@@ -396,7 +398,7 @@ pub fn start(
             device_name.as_deref(),
             cancel_for_thread,
             paused_for_thread,
-            &window,
+            &sink,
         );
         sessions().remove(&stream_id_for_thread);
         let final_frame = match res {
@@ -417,7 +419,7 @@ pub fn start(
                 status: Some(format!("transcription error: {e}")),
             },
         };
-        let _ = window.emit(&event, final_frame);
+        sink.emit_frame(&event, final_frame);
     });
     Ok(())
 }
@@ -478,6 +480,7 @@ pub fn start_drain(
 
     let stream_id_for_thread = stream_id.clone();
     let cancel_for_thread = cancel.clone();
+    let sink: Arc<dyn FrameSink> = Arc::new(window);
     thread::spawn(move || {
         let event = format!("myownllm://transcribe-stream/{stream_id_for_thread}");
         let res = run_drain(
@@ -487,7 +490,7 @@ pub fn start_drain(
             &model_name,
             diarize_model.as_deref(),
             cancel_for_thread,
-            &window,
+            &sink,
         );
         sessions().remove(&stream_id_for_thread);
         let final_frame = match res {
@@ -508,7 +511,7 @@ pub fn start_drain(
                 status: Some(format!("transcription error: {e}")),
             },
         };
-        let _ = window.emit(&event, final_frame);
+        sink.emit_frame(&event, final_frame);
     });
     Ok(())
 }
@@ -551,6 +554,7 @@ pub fn start_upload(
 
     let stream_id_for_thread = stream_id.clone();
     let cancel_for_thread = cancel.clone();
+    let sink: Arc<dyn FrameSink> = Arc::new(window);
     thread::spawn(move || {
         let event = format!("myownllm://transcribe-stream/{stream_id_for_thread}");
         let res = run_upload(
@@ -560,7 +564,7 @@ pub fn start_upload(
             &file_path,
             diarize_model.as_deref(),
             cancel_for_thread,
-            &window,
+            &sink,
         );
         sessions().remove(&stream_id_for_thread);
         let final_frame = match res {
@@ -581,7 +585,7 @@ pub fn start_upload(
                 status: Some(format!("transcription error: {e}")),
             },
         };
-        let _ = window.emit(&event, final_frame);
+        sink.emit_frame(&event, final_frame);
     });
     Ok(())
 }
@@ -629,10 +633,10 @@ fn run_session(
     device_name: Option<&str>,
     cancel: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
-    window: &WebviewWindow,
+    window: &std::sync::Arc<dyn FrameSink>,
 ) -> Result<()> {
     let started = std::time::Instant::now();
-    let _ = window.emit(
+    window.emit_frame(
         event,
         TranscribeFrame::heartbeat(0, 0, None, Some(format!("Loading {} model…", runtime))),
     );
@@ -743,7 +747,7 @@ fn run_session(
     let ingest_cancel = cancel.clone();
     let ingest_caps = caps;
     let ingest_event = event.to_string();
-    let ingest_window = window.clone();
+    let ingest_window: std::sync::Arc<dyn FrameSink> = std::sync::Arc::clone(window);
     let ingest_handle = thread::spawn(move || {
         ingest_loop(
             rx,
@@ -758,7 +762,7 @@ fn run_session(
     });
 
     // First frame announces the cadence.
-    let _ = window.emit(
+    window.emit_frame(
         event,
         TranscribeFrame::heartbeat(
             started.elapsed().as_millis(),
@@ -795,7 +799,7 @@ fn run_session(
                 eprintln!("transcribe-buffer read failed for {next_path:?}: {e}");
                 let _ = std::fs::remove_file(&next_path);
                 next_seq += 1;
-                let _ = window.emit(
+                window.emit_frame(
                     event,
                     TranscribeFrame::heartbeat(
                         started.elapsed().as_millis(),
@@ -814,7 +818,7 @@ fn run_session(
             let _ = std::fs::remove_file(&next_path);
             next_seq += 1;
             chunk_t0_ms += chunk_ms;
-            let _ = window.emit(
+            window.emit_frame(
                 event,
                 TranscribeFrame::heartbeat(
                     started.elapsed().as_millis(),
@@ -855,7 +859,7 @@ fn run_session(
                 let _ = std::fs::remove_file(&next_path);
                 next_seq += 1;
                 chunk_t0_ms += chunk_ms;
-                let _ = window.emit(
+                window.emit_frame(
                     event,
                     TranscribeFrame::heartbeat(
                         started.elapsed().as_millis(),
@@ -913,7 +917,7 @@ fn run_session(
                 Some("No speech detected in this chunk".into()),
             )
         };
-        let _ = window.emit(event, frame);
+        window.emit_frame(event, frame);
 
         if asr_out.used_state && caps.state_reset_chunks > 0 {
             chunks_since_reset += 1;
@@ -937,10 +941,10 @@ fn run_drain(
     model_name: &str,
     diarize_composite: Option<&str>,
     cancel: Arc<AtomicBool>,
-    window: &WebviewWindow,
+    window: &std::sync::Arc<dyn FrameSink>,
 ) -> Result<()> {
     let started = std::time::Instant::now();
-    let _ = window.emit(
+    window.emit_frame(
         event,
         TranscribeFrame::heartbeat(0, 0, None, Some(format!("Loading {} model…", runtime))),
     );
@@ -952,7 +956,7 @@ fn run_drain(
     let mut chunk_t0_ms: u64 = 0;
     let mut consecutive_errors: u32 = 0;
     let initial_pending = count_pending_chunks(&buffer_dir);
-    let _ = window.emit(
+    window.emit_frame(
         event,
         TranscribeFrame::heartbeat(
             started.elapsed().as_millis(),
@@ -1038,7 +1042,7 @@ fn run_drain(
         segments.retain(|s| !s.text.trim().is_empty());
 
         if !segments.is_empty() {
-            let _ = window.emit(
+            window.emit_frame(
                 event,
                 TranscribeFrame {
                     elapsed_ms: started.elapsed().as_millis(),
@@ -1071,7 +1075,7 @@ fn run_upload(
     file_path: &Path,
     diarize_composite: Option<&str>,
     cancel: Arc<AtomicBool>,
-    window: &WebviewWindow,
+    window: &std::sync::Arc<dyn FrameSink>,
 ) -> Result<()> {
     use std::fs::File;
     use symphonia::core::audio::SampleBuffer;
@@ -1083,7 +1087,7 @@ fn run_upload(
     use symphonia::core::probe::Hint;
 
     let started = std::time::Instant::now();
-    let _ = window.emit(
+    window.emit_frame(
         event,
         TranscribeFrame::heartbeat(0, 0, None, Some(format!("Loading {} model…", runtime))),
     );
@@ -1223,7 +1227,7 @@ fn run_upload(
             segments.retain(|s| !s.text.trim().is_empty());
 
             if !segments.is_empty() {
-                let _ = window.emit(
+                window.emit_frame(
                     event,
                     TranscribeFrame {
                         elapsed_ms: started.elapsed().as_millis(),
@@ -1260,7 +1264,7 @@ fn run_upload(
                 let mut segments = join_segments(&asr_out.segments, &turns, chunk_t0_ms);
                 segments.retain(|s| !s.text.trim().is_empty());
                 if !segments.is_empty() {
-                    let _ = window.emit(
+                    window.emit_frame(
                         event,
                         TranscribeFrame {
                             elapsed_ms: started.elapsed().as_millis(),
@@ -1357,7 +1361,7 @@ fn ingest_loop(
     caps: AsrCaps,
     cancel: Arc<AtomicBool>,
     event: &str,
-    window: &WebviewWindow,
+    window: &std::sync::Arc<dyn FrameSink>,
     started: std::time::Instant,
 ) {
     let chunk_at_device_rate = (device_sr as f32 * caps.chunk_seconds) as usize;
@@ -1396,7 +1400,7 @@ fn ingest_loop(
                     let p = buffer_dir.join(format!("{oldest:010}.f32"));
                     let _ = std::fs::remove_file(&p);
                 }
-                let _ = window.emit(
+                window.emit_frame(
                     event,
                     TranscribeFrame::heartbeat(
                         started.elapsed().as_millis(),
@@ -1521,4 +1525,87 @@ pub fn list_input_devices() -> Result<Vec<AudioInputDevice>> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seg(start_ms: u64, end_ms: u64, text: &str) -> AsrSegment {
+        AsrSegment {
+            start_ms,
+            end_ms,
+            text: text.into(),
+            confidence: None,
+        }
+    }
+
+    fn turn(start_ms: u64, end_ms: u64, speaker: u32, overlap: bool) -> SpeakerTurn {
+        SpeakerTurn {
+            start_ms,
+            end_ms,
+            speaker,
+            overlap,
+            confidence: None,
+        }
+    }
+
+    #[test]
+    fn join_with_no_turns_emits_segments_without_speakers() {
+        let segments = vec![seg(0, 500, "hello"), seg(500, 1000, "world")];
+        let turns: Vec<SpeakerTurn> = Vec::new();
+        let out = join_segments(&segments, &turns, 5_000);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|s| s.speaker.is_none()));
+        assert_eq!(out[0].start_ms, 5_000);
+        assert_eq!(out[0].end_ms, 5_500);
+        assert_eq!(out[0].text, "hello");
+    }
+
+    #[test]
+    fn join_picks_turn_with_maximum_overlap() {
+        // Chunk starts at session ms 5000. Segment spans 5050..5500
+        // (50 ms..500 ms inside chunk). Two turns compete:
+        //   speaker 0 covers 5000..5300 — overlap 250 ms
+        //   speaker 1 covers 5100..5700 — overlap 400 ms
+        // Speaker 1 wins.
+        let segments = vec![seg(50, 500, "hi")];
+        let turns = vec![turn(5000, 5300, 0, false), turn(5100, 5700, 1, false)];
+        let out = join_segments(&segments, &turns, 5_000);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].speaker, Some(1));
+    }
+
+    #[test]
+    fn join_propagates_overlap_flag() {
+        let segments = vec![seg(0, 500, "two voices")];
+        let turns = vec![turn(0, 500, 2, true)];
+        let out = join_segments(&segments, &turns, 0);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].overlap);
+        assert_eq!(out[0].speaker, Some(2));
+    }
+
+    #[test]
+    fn join_no_overlap_means_no_speaker_assignment() {
+        // Segment lives entirely outside any turn — speaker should
+        // be None (vs. picking the nearest turn).
+        let segments = vec![seg(0, 500, "alone")];
+        let turns = vec![turn(2000, 2500, 0, false)];
+        let out = join_segments(&segments, &turns, 5_000);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].speaker.is_none());
+        assert!(!out[0].overlap);
+    }
+
+    #[test]
+    fn join_offsets_segment_times_by_chunk_t0() {
+        // Segments come in chunk-local ms; the joined output should
+        // be session-absolute (chunk_t0_ms + segment offset).
+        let segments = vec![seg(100, 200, "x")];
+        let turns: Vec<SpeakerTurn> = Vec::new();
+        let out = join_segments(&segments, &turns, 7_000);
+        assert_eq!(out[0].start_ms, 7_100);
+        assert_eq!(out[0].end_ms, 7_200);
+    }
 }

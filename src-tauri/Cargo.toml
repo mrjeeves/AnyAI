@@ -60,7 +60,12 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 cpal = "0.15"
 crossbeam-channel = "0.5"
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "load-dynamic", "ndarray", "api-22"] }
-ndarray = "0.16"
+# Pinned to 0.17 to match what ort 2.0.0-rc.12 depends on. Mixing
+# 0.16 and 0.17 compiles them as distinct types so trait impls (like
+# OwnedTensorArrayData) don't line up between our arrays and ort's
+# tensor constructors — the failure mode is a confusing "trait not
+# satisfied" error that suggests the same type as the one you have.
+ndarray = "0.17"
 # HuggingFace `tokenizers` for Moonshine's BPE tokenizer (ships a
 # tokenizer.json). The `unstable_wasm` feature name is misleading — what
 # it actually does is swap Oniguruma (a C regex library that needs cmake
