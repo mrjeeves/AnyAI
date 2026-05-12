@@ -32,15 +32,28 @@ jobs:
             libasound2-dev \
             cmake
 
-      # Whisper Vulkan backend needs the LunarG SDK at build time. Linux's
-      # apt-provided libvulkan-dev is missing glslc, which whisper.cpp's
-      # FindVulkan.cmake demands; on Windows whisper-rs-sys panics outright
-      # if VULKAN_SDK isn't set. macOS uses Metal so it doesn't need any
-      # of this. The SDK action only ships x86_64 binaries, so the arm64
-      # Linux job stays on the CPU build (matching Cargo.toml's per-arch
-      # feature gating).
-      - name: Install Vulkan SDK
-        if: runner.os != 'macOS' && runner.arch == 'X64'
+      # Whisper Vulkan backend needs the LunarG SDK at build time:
+      #   - Linux: apt's libvulkan-dev is missing glslc, which whisper.cpp's
+      #     FindVulkan.cmake demands. Install the full SDK from LunarG's
+      #     official apt repo on x86_64; arm64 stays CPU-only (Cargo.toml
+      #     gates the feature off there).
+      #   - Windows: whisper-rs-sys panics outright if VULKAN_SDK isn't
+      #     set; use the humbletim action which exports it.
+      #   - macOS: uses Metal, nothing to do here.
+      - name: Install Vulkan SDK (Linux x86_64)
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        run: |
+          sudo mkdir -p /etc/apt/keyrings
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc \
+            | sudo tee /etc/apt/keyrings/lunarg-vulkan.asc > /dev/null
+          UBU_CODENAME=$(. /etc/os-release && echo "$UBUNTU_CODENAME")
+          echo "deb [signed-by=/etc/apt/keyrings/lunarg-vulkan.asc] https://packages.lunarg.com/vulkan ${UBU_CODENAME} main" \
+            | sudo tee /etc/apt/sources.list.d/lunarg-vulkan.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
+
+      - name: Install Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
         uses: humbletim/install-vulkan-sdk@v1.2
         with:
           version: 1.3.290.0
