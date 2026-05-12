@@ -104,6 +104,11 @@
   /** Set while we're pulling the diarize composite on first toggle-on.
    *  Drives the inline progress text on the toggle itself. */
   let diarizePullStatus = $state("");
+  /** Set while we're lazily pulling the ASR model from a record/upload
+   *  click — same idea as `diarizePullStatus` but for the moonshine /
+   *  parakeet ONNX artifacts. Surfaces above the input row so the user
+   *  knows the click is doing something. */
+  let asrPullStatus = $state("");
   let talkingPoints = $state<string[]>([]);
   /** One-step undo buffer for talking points. Populated when the user
    *  regenerates: the prior bullets stash here so the Undo button can
@@ -371,11 +376,8 @@
         `Switch family in Settings to one with a transcribe ladder.`;
       return;
     }
-    if (!(await asrModelInstalled(model))) {
-      transcribeError =
-        `The ${runtime} model '${model}' isn't downloaded yet. Switch ` +
-        `family or relaunch to trigger the auto-pull, or check ` +
-        `Settings → Models.`;
+    if (!(await ensureAsrReady(runtime, model))) {
+      // ensureAsrReady set transcribeError; abort start.
       return;
     }
 
@@ -471,13 +473,7 @@
         `Switch family in Settings to one with a transcribe ladder.`;
       return;
     }
-    if (!(await asrModelInstalled(model))) {
-      transcribeError =
-        `The ${runtime} model '${model}' isn't downloaded yet. Switch ` +
-        `family or relaunch to trigger the auto-pull, or check ` +
-        `Settings → Models.`;
-      return;
-    }
+    if (!(await ensureAsrReady(runtime, model))) return;
     let diarizeModel: string | null = null;
     if (diarizeEnabled) {
       if (!(await ensureDiarizeReady())) return;
@@ -494,6 +490,28 @@
       });
     } catch (e) {
       transcribeError = String(e);
+    }
+  }
+
+  /** Make sure the resolved ASR model is on disk before the session
+   *  starts. If `App.ensureAsrPresent` hasn't finished its background
+   *  pull (or it failed) the record/upload click lands here and we
+   *  pull inline with progress surfaced above the input row. Returns
+   *  `false` (with `transcribeError` set) if the pull failed. */
+  async function ensureAsrReady(
+    runtime: string,
+    model: string,
+  ): Promise<boolean> {
+    if (await asrModelInstalled(model)) return true;
+    asrPullStatus = `Downloading ${runtime} model '${model}'…`;
+    try {
+      await invoke("asr_model_pull", { name: model });
+      asrPullStatus = "";
+      return true;
+    } catch (e) {
+      asrPullStatus = "";
+      transcribeError = `Couldn't download ${runtime} model '${model}': ${e}`;
+      return false;
     }
   }
 
@@ -1010,6 +1028,10 @@
     onRequestStopChat={() => onRequestStopChat()}
   />
 
+  {#if asrPullStatus}
+    <div class="mic-status">{asrPullStatus}</div>
+  {/if}
+
   {#if transcribeError}
     <div class="mic-error">{transcribeError}</div>
   {/if}
@@ -1399,6 +1421,14 @@
     background: #3a1717;
     color: #ffb4b4;
     border-top: 1px solid #5a2424;
+    padding: .4rem .85rem;
+    font-size: .78rem;
+  }
+
+  .mic-status {
+    background: #15252e;
+    color: #a8d4e6;
+    border-top: 1px solid #1f3e4d;
     padding: .4rem .85rem;
     font-size: .78rem;
   }
