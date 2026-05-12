@@ -1,17 +1,35 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-/** Frame shape from the Rust side. Mirror of `transcribe::TranscribeFrame`
- *  in src-tauri — keep these in sync. */
+/** One unit of decoded speech emitted by the ASR worker. Mirror of
+ *  `transcribe::EmittedSegment` in src-tauri. Speaker IDs are
+ *  optional — present only when diarization is enabled and the
+ *  diarize worker assigned a turn that overlaps this segment. */
+export interface EmittedSegment {
+  start_ms: number;
+  end_ms: number;
+  text: string;
+  speaker?: number;
+  overlap?: boolean;
+  provisional?: boolean;
+}
+
+/** Frame shape from the Rust side. Mirror of
+ *  `transcribe::TranscribeFrame` in src-tauri — keep these in sync.
+ *  v13 protocol: structured `segments` carry per-segment timing and
+ *  speaker info; the whisper-era `delta: string` field is gone. */
 interface TranscribeFrame {
-  delta: string;
   elapsed_ms: number;
+  segments: EmittedSegment[];
   final: boolean;
   pending_chunks?: number;
-  /** Ephemeral status message ("Loading whisper model…", "Low mic level",
-   *  whisper errors, …). Present only when something noteworthy is
-   *  happening — a normal text frame omits it, which clears the rendered
-   *  status. */
+  /** First-frame-only: tells the UI how many seconds of audio each
+   *  pending chunk represents (backend-specific). */
+  chunk_seconds?: number;
+  /** Ephemeral status message ("Loading moonshine model…", "Low mic
+   *  level", inference errors, …). Present only when something
+   *  noteworthy is happening — a normal text frame omits it, which
+   *  clears the rendered status. */
   status?: string | null;
 }
 
@@ -49,34 +67,45 @@ export const transcribeUi = $state({
    *  of "Recovering…". The two flags are mutually exclusive. */
   uploadOnly: false,
   streamId: null as string | null,
-  /** Whisper model name without the "whisper:" prefix. We need it to
-   *  start a drain session and to label the pending state in the bar. */
+  /** Which ASR backend the session is running through (e.g.
+   *  `"moonshine"`, `"parakeet"`). Set at start; used by the drain
+   *  recovery flow to re-spawn the same backend. */
+  runtime: "" as string,
+  /** ASR model name (e.g. `"moonshine-small-q8"`). We need it to
+   *  start a drain session and to label the pending state in the
+   *  bar. */
   model: "" as string,
   /** Conversation that receives delta text. When the active view
-   *  conversation matches, TranscribeView appends `liveDelta` to the
-   *  rendered transcript so the user sees text arrive even after a
-   *  mode-switch round trip. */
+   *  conversation matches, TranscribeView appends `liveSegments` to
+   *  the rendered transcript so the user sees text arrive even after
+   *  a mode-switch round trip. */
   conversationId: null as string | null,
   startedAt: 0,
   /** Capture wall-clock seconds since `startedAt`. The status bar shows
    *  it next to the rec dot the same way the in-pane chrome used to. */
   elapsed: 0,
-  /** Whisper backlog. > 0 means inference is behind realtime — surface
+  /** ASR backlog. > 0 means inference is behind realtime — surface
    *  to the user as "X s behind" so they don't think we're stuck. */
   pendingChunks: 0,
-  /** Text that has streamed in since `liveDelta` was last consumed by
-   *  TranscribeView. The view appends + clears on each frame so the
-   *  transcript stays the canonical store-of-truth and we don't have to
-   *  buffer per-conversation here. */
-  liveDelta: "",
+  /** Seconds each pending chunk represents (backend-specific cadence).
+   *  Multiply by `pendingChunks` to get "X s behind realtime". */
+  chunkSeconds: 1.0,
+  /** Segments that have streamed in since the view last flushed them
+   *  to the rendered transcript. The view appends + clears on each
+   *  frame so the transcript stays the canonical store-of-truth and
+   *  we don't have to buffer per-conversation here. */
+  liveSegments: [] as EmittedSegment[],
+  /** Concatenated text of `liveSegments`, kept in sync for callers
+   *  that only need the flat string (notably the Talking Points loop
+   *  in chat-slot.svelte.ts). */
+  liveDelta: "" as string,
   /** True for one tick after every frame so consumers can $effect on
    *  it without having to inspect string length changes that race
    *  against same-text reappends. */
   framePulse: 0,
-  /** Ephemeral subtitle ("Loading whisper model…", "Low mic level…",
-   *  whisper errors). Empty when the session is producing normal text;
-   *  rendered under the transcript so the user can see WHY the
-   *  transcript is idle. */
+  /** Ephemeral subtitle ("Loading moonshine model…", "Low mic
+   *  level…", inference errors). Empty when the session is producing
+   *  normal text. */
   status: "" as string,
   error: "" as string,
 });
@@ -99,11 +128,14 @@ function resetState() {
   transcribeUi.drainOnly = false;
   transcribeUi.uploadOnly = false;
   transcribeUi.streamId = null;
+  transcribeUi.runtime = "";
   transcribeUi.model = "";
   transcribeUi.conversationId = null;
   transcribeUi.startedAt = 0;
   transcribeUi.elapsed = 0;
   transcribeUi.pendingChunks = 0;
+  transcribeUi.chunkSeconds = 1.0;
+  transcribeUi.liveSegments = [];
   transcribeUi.liveDelta = "";
   transcribeUi.status = "";
 }
@@ -113,26 +145,32 @@ async function attachListener(streamId: string) {
     `myownllm://transcribe-stream/${streamId}`,
     (e) => {
       const f = e.payload;
-      if (f.delta) {
-        transcribeUi.liveDelta = transcribeUi.liveDelta + f.delta;
+      if (Array.isArray(f.segments) && f.segments.length > 0) {
+        transcribeUi.liveSegments = [...transcribeUi.liveSegments, ...f.segments];
+        // Maintain the flat string projection for legacy consumers
+        // (Talking Points). Each segment contributes its text with a
+        // trailing space; whitespace gets collapsed downstream.
+        transcribeUi.liveDelta =
+          transcribeUi.liveDelta +
+          f.segments.map((s) => s.text).join(" ") +
+          " ";
         transcribeUi.framePulse++;
       }
       if (typeof f.pending_chunks === "number") {
         transcribeUi.pendingChunks = f.pending_chunks;
       }
+      if (typeof f.chunk_seconds === "number" && f.chunk_seconds > 0) {
+        transcribeUi.chunkSeconds = f.chunk_seconds;
+      }
       // A frame with no `status` field clears the subtitle — the Rust
       // side omits `status` on normal text frames specifically so the
-      // "Loading whisper model…" / "Low mic level" line disappears once
-      // real transcription starts flowing.
+      // "Loading model…" / "Low mic level" line disappears once real
+      // transcription starts flowing.
       transcribeUi.status = typeof f.status === "string" ? f.status : "";
       if (f.final) {
-        // Worker unwound (cancel or natural end). Tear down our side.
         clearTimers();
         unlistenStream?.();
         unlistenStream = null;
-        // Hold the live transcript in place for one tick so the view
-        // can flush it; the stopRecording / drainStart caller is
-        // responsible for resetting once it's persisted.
         transcribeUi.active = false;
         const r = stopResolver;
         stopResolver = null;
@@ -143,9 +181,16 @@ async function attachListener(streamId: string) {
 }
 
 export interface StartArgs {
+  /** ASR runtime, e.g. `"moonshine"` or `"parakeet"`. */
+  runtime: string;
+  /** ASR model name, e.g. `"moonshine-small-q8"`. */
   model: string;
   device: string | null;
   conversationId: string | null;
+  /** Composite diarize model name (e.g.
+   *  `"pyannote-seg-3.0+wespeaker-r34"`). `null` to disable
+   *  diarization for this session. */
+  diarizeModel: string | null;
 }
 
 export async function startRecording(args: StartArgs): Promise<void> {
@@ -156,8 +201,10 @@ export async function startRecording(args: StartArgs): Promise<void> {
   try {
     await invoke("transcribe_start", {
       streamId,
+      runtime: args.runtime,
       model: args.model,
       device: args.device,
+      diarizeModel: args.diarizeModel,
     });
   } catch (e) {
     unlistenStream?.();
@@ -170,11 +217,13 @@ export async function startRecording(args: StartArgs): Promise<void> {
   transcribeUi.drainOnly = false;
   transcribeUi.uploadOnly = false;
   transcribeUi.streamId = streamId;
+  transcribeUi.runtime = args.runtime;
   transcribeUi.model = args.model;
   transcribeUi.conversationId = args.conversationId;
   transcribeUi.startedAt = Date.now();
   transcribeUi.elapsed = 0;
   transcribeUi.pendingChunks = 0;
+  transcribeUi.liveSegments = [];
   transcribeUi.liveDelta = "";
   elapsedTimer = setInterval(() => {
     if (transcribeUi.paused) return;
@@ -183,12 +232,14 @@ export async function startRecording(args: StartArgs): Promise<void> {
 }
 
 /** Spin up an inference-only session against an audio file the user
- *  picked. The mic is never touched; the Rust side decodes the file with
- *  symphonia and runs whisper on each 5-second chunk. */
+ *  picked. The mic is never touched; the Rust side decodes the file
+ *  with symphonia and runs the chosen ASR backend on each chunk. */
 export async function startUpload(args: {
+  runtime: string;
   model: string;
   filePath: string;
   conversationId: string | null;
+  diarizeModel: string | null;
 }): Promise<void> {
   if (transcribeUi.active) return;
   transcribeUi.error = "";
@@ -197,8 +248,10 @@ export async function startUpload(args: {
   try {
     await invoke("transcribe_upload_start", {
       streamId,
+      runtime: args.runtime,
       model: args.model,
       filePath: args.filePath,
+      diarizeModel: args.diarizeModel,
     });
   } catch (e) {
     unlistenStream?.();
@@ -211,11 +264,13 @@ export async function startUpload(args: {
   transcribeUi.drainOnly = false;
   transcribeUi.uploadOnly = true;
   transcribeUi.streamId = streamId;
+  transcribeUi.runtime = args.runtime;
   transcribeUi.model = args.model;
   transcribeUi.conversationId = args.conversationId;
   transcribeUi.startedAt = Date.now();
   transcribeUi.elapsed = 0;
   transcribeUi.pendingChunks = 0;
+  transcribeUi.liveSegments = [];
   transcribeUi.liveDelta = "";
 }
 
@@ -231,9 +286,6 @@ export async function resumeRecording(): Promise<void> {
   if (!transcribeUi.streamId) return;
   await invoke("transcribe_resume", { streamId: transcribeUi.streamId });
   transcribeUi.paused = false;
-  // Realign the wall-clock so paused time doesn't show in the elapsed
-  // counter — without this, the timer jumps forward by however long the
-  // user was paused the first time it ticks after resume.
   transcribeUi.startedAt = Date.now() - transcribeUi.elapsed * 1000;
 }
 
@@ -250,7 +302,6 @@ export async function stopRecording(): Promise<void> {
     await invoke("transcribe_stop", { streamId: id });
   } catch (e) {
     console.warn("transcribe_stop failed:", e);
-    // Backend may already be gone — treat as done so the UI unsticks.
     const r = stopResolver;
     stopResolver = null;
     r?.();
@@ -259,12 +310,14 @@ export async function stopRecording(): Promise<void> {
 }
 
 /** Spin up an inference-only session against a stream id whose buffer
- *  dir already has chunks (from a previous MyOwnLLM process that crashed
- *  or was force-quit). The mic is never touched. */
+ *  dir already has chunks (from a previous MyOwnLLM process that
+ *  crashed or was force-quit). The mic is never touched. */
 export async function startDrain(args: {
   streamId: string;
+  runtime: string;
   model: string;
   conversationId: string | null;
+  diarizeModel: string | null;
 }): Promise<void> {
   if (transcribeUi.active) return;
   transcribeUi.error = "";
@@ -272,7 +325,9 @@ export async function startDrain(args: {
   try {
     await invoke("transcribe_drain_start", {
       streamId: args.streamId,
+      runtime: args.runtime,
       model: args.model,
+      diarizeModel: args.diarizeModel,
     });
   } catch (e) {
     unlistenStream?.();
@@ -285,15 +340,28 @@ export async function startDrain(args: {
   transcribeUi.drainOnly = true;
   transcribeUi.uploadOnly = false;
   transcribeUi.streamId = args.streamId;
+  transcribeUi.runtime = args.runtime;
   transcribeUi.model = args.model;
   transcribeUi.conversationId = args.conversationId;
   transcribeUi.startedAt = Date.now();
   transcribeUi.elapsed = 0;
   transcribeUi.pendingChunks = 0;
+  transcribeUi.liveSegments = [];
   transcribeUi.liveDelta = "";
 }
 
+/** Hand back whatever segments have streamed in since the last flush,
+ *  emptying the buffer. Called by `TranscribeView` so it can merge them
+ *  into the rendered transcript and persist. */
+export function takeLiveSegments(): EmittedSegment[] {
+  const out = transcribeUi.liveSegments;
+  transcribeUi.liveSegments = [];
+  transcribeUi.liveDelta = "";
+  return out;
+}
+
 export function clearLiveDelta(): void {
+  transcribeUi.liveSegments = [];
   transcribeUi.liveDelta = "";
 }
 

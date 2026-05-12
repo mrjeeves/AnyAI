@@ -8,18 +8,24 @@
   let {
     hardware,
     activeModel,
-    whisperModel,
+    asrModel,
+    asrRuntime,
     onComplete,
   } = $props<{
     hardware: HardwareProfile | null;
     /** Ollama text-mode tag to pull (always present). */
     activeModel: string;
-    /** Optional whisper-rs ggml name (e.g. "tiny.en") to pull alongside
-     *  the text model. When the active family resolves transcribe to a
-     *  whisper model and that model isn't on disk, App.svelte passes
-     *  it in here so first-run can grab both. Empty / missing skips
-     *  the whisper pull. */
-    whisperModel?: string;
+    /** Optional ASR model name (e.g. "moonshine-small-q8" or
+     *  "parakeet-tdt-0.6b-v3-int8") to pull alongside the text model.
+     *  When the active family resolves transcribe to a local-runtime
+     *  ASR model and that model isn't on disk, App.svelte passes it
+     *  in here so first-run can grab both. Empty / missing skips the
+     *  ASR pull. */
+    asrModel?: string;
+    /** Which ASR runtime owns `asrModel` (e.g. "moonshine",
+     *  "parakeet"). Used to subscribe to the right per-runtime
+     *  progress event. Mandatory whenever `asrModel` is set. */
+    asrRuntime?: string;
     onComplete: () => void;
   }>();
 
@@ -38,11 +44,17 @@
     done?: boolean;
   }
 
-  /** Mirrors `WhisperPullProgress` in src-tauri/src/transcribe.rs. */
-  interface WhisperPullEvent {
+  /** Mirrors `models::ModelPullProgress` in src-tauri/src/models.rs.
+   *  A single logical ASR model can map to several artifacts (Moonshine
+   *  ships encoder + decoder + tokenizer); the pull emits one event
+   *  stream that increments `artifact_index` across the set. */
+  interface ModelPullEvent {
     name: string;
+    kind: string;
     bytes: number;
     total: number;
+    artifact_index: number;
+    artifact_count: number;
     done: boolean;
     error: string | null;
   }
@@ -64,7 +76,7 @@
   // `$state` declarations cheap so svelte-check doesn't flag the
   // prop-ref warning ("only captures initial value").
   let textProgress = $state<ModelProgress | null>(null);
-  let whisperProgress = $state<ModelProgress | null>(null);
+  let asrProgress = $state<ModelProgress | null>(null);
   let errorMsg = $state("");
   let unlisteners: UnlistenFn[] = [];
 
@@ -72,8 +84,8 @@
   // approach the original FirstRun used.
   let textLastSampleAt = 0;
   let textLastSampleBytes = 0;
-  let whisperLastSampleAt = 0;
-  let whisperLastSampleBytes = 0;
+  let asrLastSampleAt = 0;
+  let asrLastSampleBytes = 0;
 
   function emptyProgress(tag: string, label: string): ModelProgress {
     return {
@@ -96,8 +108,8 @@
     if (activeModel) {
       textProgress = emptyProgress(activeModel, "Text model");
     }
-    if (whisperModel) {
-      whisperProgress = emptyProgress(whisperModel, "Transcribe model");
+    if (asrModel) {
+      asrProgress = emptyProgress(asrModel, "Transcribe model");
     }
     // Subscribe to both event streams up front so neither pull can fire
     // a frame faster than its listener attaches.
@@ -143,31 +155,41 @@
       );
     }
 
-    if (whisperModel) {
-      const event = `myownllm://whisper-pull/${whisperModel}`;
+    if (asrModel && asrRuntime) {
+      // New event shape: `myownllm://model-pull/{kind}/{name}` carries
+      // `ModelPullEvent` frames. The pull is multi-artifact for
+      // Moonshine (encoder + decoder + tokenizer) so artifact_index /
+      // artifact_count let us show "Artifact 1 of 3" while the bytes
+      // bar still tracks the current artifact's progress.
+      const event = `myownllm://model-pull/asr/${asrModel}`;
       unlisteners.push(
-        await listen<WhisperPullEvent>(event, (e) => {
-          if (!whisperProgress) return;
+        await listen<ModelPullEvent>(event, (e) => {
+          if (!asrProgress) return;
           const f = e.payload;
           const now = Date.now();
-          let rate = whisperProgress.rate;
-          if (
-            whisperLastSampleAt &&
-            f.bytes >= whisperLastSampleBytes
-          ) {
-            const dt = (now - whisperLastSampleAt) / 1000;
+          let rate = asrProgress.rate;
+          if (asrLastSampleAt && f.bytes >= asrLastSampleBytes) {
+            const dt = (now - asrLastSampleAt) / 1000;
             if (dt >= 0.5) {
-              rate = (f.bytes - whisperLastSampleBytes) / dt;
-              whisperLastSampleAt = now;
-              whisperLastSampleBytes = f.bytes;
+              rate = (f.bytes - asrLastSampleBytes) / dt;
+              asrLastSampleAt = now;
+              asrLastSampleBytes = f.bytes;
             }
           } else {
-            whisperLastSampleAt = now;
-            whisperLastSampleBytes = f.bytes;
+            asrLastSampleAt = now;
+            asrLastSampleBytes = f.bytes;
           }
-          whisperProgress = {
-            ...whisperProgress,
-            status: f.error ? `Failed: ${f.error}` : f.done ? "Done" : "Downloading",
+          const artifactSuffix =
+            f.artifact_count > 1
+              ? ` (artifact ${f.artifact_index + 1} of ${f.artifact_count})`
+              : "";
+          asrProgress = {
+            ...asrProgress,
+            status: f.error
+              ? `Failed: ${f.error}`
+              : f.done
+                ? "Done"
+                : `Downloading${artifactSuffix}`,
             percent: f.total > 0 ? f.bytes / f.total : null,
             bytes: f.total > 0 ? { done: f.bytes, total: f.total } : null,
             rate,
@@ -203,8 +225,8 @@
 
       phase = "pull";
       if (textProgress) textProgress = { ...textProgress, status: "Starting download…" };
-      if (whisperProgress) {
-        whisperProgress = { ...whisperProgress, status: "Starting download…" };
+      if (asrProgress) {
+        asrProgress = { ...asrProgress, status: "Starting download…" };
       }
 
       // Pull each side in parallel only if we have a model name for it.
@@ -222,22 +244,22 @@
             })
         : Promise.resolve();
 
-      const whisperPull: Promise<void> = whisperModel
-        ? invoke("whisper_model_pull", { name: whisperModel })
+      const asrPull: Promise<void> = asrModel
+        ? invoke("asr_model_pull", { name: asrModel })
             .then(() => {
-              if (whisperProgress) {
-                whisperProgress = { ...whisperProgress, done: true, status: "Done" };
+              if (asrProgress) {
+                asrProgress = { ...asrProgress, done: true, status: "Done" };
               }
             })
             .catch((e) => {
-              if (whisperProgress) {
-                whisperProgress = { ...whisperProgress, error: String(e) };
+              if (asrProgress) {
+                asrProgress = { ...asrProgress, error: String(e) };
               }
-              // Whisper failure is non-fatal — text mode still works.
+              // ASR failure is non-fatal — text mode still works.
             })
         : Promise.resolve();
 
-      await Promise.all([textPull, whisperPull]);
+      await Promise.all([textPull, asrPull]);
 
       phase = "done";
       onComplete();
@@ -348,10 +370,10 @@
         {#if textProgress}
           {@render modelRow(textProgress, true)}
         {/if}
-        {#if whisperProgress}
-          {@render modelRow(whisperProgress, false)}
+        {#if asrProgress}
+          {@render modelRow(asrProgress, false)}
         {/if}
-        {#if !textProgress && !whisperProgress}
+        {#if !textProgress && !asrProgress}
           <p class="empty">Nothing to download — finishing up…</p>
         {/if}
       </div>

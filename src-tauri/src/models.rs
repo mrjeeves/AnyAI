@@ -271,13 +271,16 @@ pub fn composite_installed(composite: &str, kind: ModelKind) -> bool {
 
 /// Listed view used by the Settings panel: what models the registry
 /// knows about for a given kind, and whether each one is fully
-/// installed on this machine.
+/// installed on this machine. `installed_size_bytes` is the on-disk
+/// total across all artifacts when present — surfaced for the
+/// Storage tab and the Family tier ladder size column.
 #[derive(Debug, Serialize, Clone)]
 pub struct ModelInfo {
     pub name: String,
     pub kind: String,
     pub approx_size_bytes: u64,
     pub installed: bool,
+    pub installed_size_bytes: Option<u64>,
     pub artifact_count: usize,
 }
 
@@ -285,12 +288,31 @@ pub fn list(kind: ModelKind) -> Vec<ModelInfo> {
     REGISTRY
         .iter()
         .filter(|m| m.kind == kind)
-        .map(|m| ModelInfo {
-            name: m.name.to_string(),
-            kind: m.kind.as_str().to_string(),
-            approx_size_bytes: m.artifacts.iter().map(|a| a.approx_bytes).sum(),
-            installed: is_installed(m),
-            artifact_count: m.artifacts.len(),
+        .map(|m| {
+            let installed = is_installed(m);
+            let installed_size_bytes = if installed {
+                model_dir(m.kind, m.name).ok().and_then(|dir| {
+                    let mut total: u64 = 0;
+                    for artifact in m.artifacts {
+                        let path = dir.join(artifact.filename);
+                        match std::fs::metadata(&path) {
+                            Ok(meta) => total = total.saturating_add(meta.len()),
+                            Err(_) => return None,
+                        }
+                    }
+                    Some(total)
+                })
+            } else {
+                None
+            };
+            ModelInfo {
+                name: m.name.to_string(),
+                kind: m.kind.as_str().to_string(),
+                approx_size_bytes: m.artifacts.iter().map(|a| a.approx_bytes).sum(),
+                installed,
+                installed_size_bytes,
+                artifact_count: m.artifacts.len(),
+            }
         })
         .collect()
 }

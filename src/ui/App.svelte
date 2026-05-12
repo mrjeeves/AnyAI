@@ -87,12 +87,16 @@
   let activeFamilyName = $state("");
   /** What the family/tier resolver picks for transcribe with the
    *  current hardware. Stored separately from `activeModel` so we can
-   *  pre-pull / re-pull whisper independently of the active mode. */
-  let pendingWhisperModel = $state("");
+   *  pre-pull / re-pull the ASR model independently of the active
+   *  mode. Runtime is captured alongside so FirstRun's pull
+   *  subscription knows which event prefix to listen on. */
+  let pendingAsrModel = $state("");
+  let pendingAsrRuntime = $state("");
   /** Tag handed to FirstRun when something needs pulling. Set during
    *  onMount based on what's actually missing on disk. */
   let firstRunTextModel = $state("");
-  let firstRunWhisperModel = $state("");
+  let firstRunAsrModel = $state("");
+  let firstRunAsrRuntime = $state("");
   let supportedModes = $state<Set<Mode>>(new Set(["text", "vision", "code", "transcribe"]));
   let error = $state("");
 
@@ -201,13 +205,15 @@
         config.mode_overrides,
         activeFamilyName,
       );
-      pendingWhisperModel =
+      pendingAsrModel =
         transcribeResolved.runtime !== "ollama" ? transcribeResolved.model : "";
+      pendingAsrRuntime =
+        transcribeResolved.runtime !== "ollama" ? transcribeResolved.runtime : "";
 
       // We need both the active text model (Ollama) AND the picked
-      // whisper transcribe model on disk. FirstRun pulls whichever is
-      // missing in parallel; if everything is already present we skip
-      // straight to chat.
+      // ASR transcribe model on disk. FirstRun pulls whichever is
+      // missing in parallel; if everything is already present we
+      // skip straight to chat.
       const ollamaInstalled = await invoke<boolean>("ollama_installed");
       const textModelToCheck =
         activeResolved.runtime === "ollama" ? activeResolved.model : "";
@@ -216,21 +222,21 @@
         const pulled = await invoke<Array<{ name: string }>>("ollama_list_models");
         textPresent = pulled.some((m) => m.name === textModelToCheck);
       }
-      let whisperPresent = pendingWhisperModel === "";
-      if (pendingWhisperModel) {
+      let asrPresent = pendingAsrModel === "";
+      if (pendingAsrModel) {
         try {
           const list = await invoke<Array<{ name: string; installed: boolean }>>(
-            "whisper_models_list",
+            "asr_models_list",
           );
-          whisperPresent = list.some(
-            (m) => m.name === pendingWhisperModel && m.installed,
+          asrPresent = list.some(
+            (m) => m.name === pendingAsrModel && m.installed,
           );
         } catch {
-          whisperPresent = false;
+          asrPresent = false;
         }
       }
 
-      if (!ollamaInstalled || !textPresent || !whisperPresent) {
+      if (!ollamaInstalled || !textPresent || !asrPresent) {
         // Only ask FirstRun to pull what's actually missing. Passing
         // empty strings tells FirstRun to skip that side — important
         // because we don't want a "Downloading text" row to flash on
@@ -242,12 +248,14 @@
           config.mode_overrides,
           activeFamilyName,
         ).model);
-        firstRunWhisperModel = whisperPresent ? "" : pendingWhisperModel;
+        firstRunAsrModel = asrPresent ? "" : pendingAsrModel;
+        firstRunAsrRuntime = asrPresent ? "" : pendingAsrRuntime;
         view = "first-run";
         console.info(
-          "[myownllm] first-run: text=%s whisper=%s",
+          "[myownllm] first-run: text=%s asr=%s (%s)",
           firstRunTextModel || "(present)",
-          firstRunWhisperModel || "(present)",
+          firstRunAsrModel || "(present)",
+          firstRunAsrRuntime || "-",
         );
       } else {
         await invoke("ollama_ensure_running");
@@ -433,7 +441,7 @@
     activeModel = displayModelFor(mode, hardware, manifest, config);
 
     await updateConfig({ active_mode: mode });
-    ensureWhisperPresent(hardware, manifest, config);
+    ensureAsrPresent(hardware, manifest, config);
   }
 
   async function onProviderChange() {
@@ -442,14 +450,14 @@
     activeFamilyName = config.active_family;
     supportedModes = modesForActiveFamily(manifest, activeFamilyName);
     activeModel = displayModelFor(activeMode, hardware, manifest, config);
-    ensureWhisperPresent(hardware, manifest, config);
+    ensureAsrPresent(hardware, manifest, config);
   }
 
-  /** Background-pull the family-resolved whisper model if it isn't on
+  /** Background-pull the family-resolved ASR model if it isn't on
    *  disk yet. Fire-and-forget so the user can keep using text mode
    *  while the ASR download runs; the next switch into transcribe
    *  mode lands on a ready model instead of erroring out. */
-  function ensureWhisperPresent(
+  function ensureAsrPresent(
     hw: HardwareProfile,
     manifest: Awaited<ReturnType<typeof getActiveManifest>>,
     config: Awaited<ReturnType<typeof loadConfig>>,
@@ -751,37 +759,47 @@
     recoveryProbeStarted = true;
     try {
       const pending = await invoke<PendingStream[]>("transcribe_pending_streams");
-      // Pick the largest backlog — multiple orphans are possible if the
-      // app crashed twice without cleanup, but only one drain runs at
-      // a time. The others stay on disk and the user can clear them
-      // from the Storage tab.
+      // Pick the largest backlog — multiple orphans are possible if
+      // the app crashed twice without cleanup, but only one drain
+      // runs at a time. The others stay on disk and the user can
+      // clear them from the Storage tab. We need both `model` and
+      // `runtime` to re-spawn the ASR backend; older buffer-meta
+      // files (pre-v13) only have `model`, so they're skipped here
+      // and surfaced via Settings → Storage for manual cleanup.
       const target = pending
-        .filter((p) => p.pending_chunks > 0 && p.model)
+        .filter((p) => p.pending_chunks > 0 && p.model && p.runtime)
         .sort((a, b) => b.pending_chunks - a.pending_chunks)[0];
-      if (!target || !target.model) return;
+      if (!target || !target.model || !target.runtime) return;
 
-      // Mint a "Recovered transcript" conversation so the drained text
-      // has somewhere to land. We don't try to merge into a previous
-      // conversation — there's no way to know which one was open when
-      // the buffer was written.
+      // Mint a "Recovered transcript" conversation so the drained
+      // text has somewhere to land. We don't try to merge into a
+      // previous conversation — there's no way to know which one was
+      // open when the buffer was written.
       const conv = newConversation(
         "transcribe",
-        `${target.runtime ?? "asr"}:${target.model}`,
+        `${target.runtime}:${target.model}`,
         activeFamilyName || "",
       );
       conv.title = `Recovered transcript ${new Date().toLocaleString()}`.slice(0, 80);
+      // If the orphaned session had diarize on, restore that on the
+      // recovered conversation so the drain re-runs the same
+      // pipeline.
+      if (target.diarize_model) conv.diarize_enabled = true;
       await saveConversation(conv);
       await refreshConversations();
 
       console.info(
-        "[myownllm] resuming transcript backlog: stream=%s pending=%d model=%s",
+        "[myownllm] resuming transcript backlog: stream=%s pending=%d runtime=%s model=%s",
         target.stream_id,
         target.pending_chunks,
+        target.runtime,
         target.model,
       );
       await startDrain({
         streamId: target.stream_id,
+        runtime: target.runtime,
         model: target.model,
+        diarizeModel: target.diarize_model ?? null,
         conversationId: conv.id,
       });
     } catch (e) {
@@ -803,7 +821,8 @@
     <FirstRun
       {hardware}
       activeModel={firstRunTextModel}
-      whisperModel={firstRunWhisperModel}
+      asrModel={firstRunAsrModel}
+      asrRuntime={firstRunAsrRuntime}
       onComplete={onFirstRunComplete}
     />
   {:else}

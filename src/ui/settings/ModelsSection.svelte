@@ -47,13 +47,13 @@
    *  pin this exact tag as the override for any mode, or revert all modes
    *  it currently overrides. The Mode-overrides tab is the inverse view —
    *  same config field, just keyed by mode rather than by tag. */
-  let rowOverridePicker = $state<{ tag: string; runtime: "ollama" | "whisper" } | null>(null);
+  let rowOverridePicker = $state<{ tag: string; runtime: string } | null>(null);
   let availableModels = $state<string[]>([]);
   let deleteTarget = $state<{
     name: string;
     size: number;
     kept: boolean;
-    runtime: "ollama" | "whisper";
+    runtime: string;
   } | null>(null);
   let deleteUsage = $state<ModelUsage | null>(null);
   let deleteUsageLoading = $state(false);
@@ -224,10 +224,20 @@
       if (deleteTarget.kept) {
         try { await unkeepModel(deleteTarget.name); } catch {}
       }
-      // Route the delete to the right backend — whisper models live
-      // under `~/.myownllm/whisper/`, not in Ollama's library.
-      if (deleteTarget.runtime === "whisper") {
-        await invoke("whisper_model_remove", { name: deleteTarget.name });
+      // Route the delete to the right backend — local-runtime models
+      // (ASR / diarize) live under `~/.myownllm/models/`, not in
+      // Ollama's library. The runtime string carries the kind for
+      // local models (see model-lifecycle.ts).
+      if (deleteTarget.runtime === "asr") {
+        await invoke("asr_model_remove", { name: deleteTarget.name });
+      } else if (deleteTarget.runtime === "diarize") {
+        // No `diarize_model_remove` Tauri command yet — diarize
+        // models are pulled and removed alongside the transcribe
+        // toggle. Surface a clear error so the user knows where to
+        // manage them.
+        throw new Error(
+          "Diarize models are managed via the Transcribe pane's 'Identify speakers' toggle.",
+        );
       } else {
         await invoke("ollama_delete_model", { name: deleteTarget.name });
       }
@@ -308,11 +318,19 @@
     onChanged?.();
   }
 
-  /** Modes legal as override targets for `runtime`. Whisper tags are only
-   *  valid for transcribe; ollama tags for everything else. The picker
-   *  uses this to hide invalid choices instead of silently misrouting. */
-  function eligibleModes(runtime: "ollama" | "whisper"): Mode[] {
-    return runtime === "whisper" ? ["transcribe"] : ["text", "vision", "code"];
+  /** Modes legal as override targets for `runtime`. Local-runtime ASR
+   *  tags (moonshine / parakeet) are only valid for transcribe; the
+   *  diarize runtime is only valid for diarize; ollama tags for
+   *  everything else. The picker uses this to hide invalid choices
+   *  instead of silently misrouting. */
+  function eligibleModes(runtime: string): Mode[] {
+    if (runtime === "asr" || runtime === "moonshine" || runtime === "parakeet") {
+      return ["transcribe"];
+    }
+    if (runtime === "diarize" || runtime === "pyannote-diarize") {
+      return ["diarize"];
+    }
+    return ["text", "vision", "code"];
   }
 
   function ageLabel(isoDate: string): string {
@@ -360,8 +378,8 @@
             <div class="model-info">
               <div class="name-row">
                 <span class="name">{m.name}</span>
-                <span class="runtime-tag" class:whisper={m.runtime === "whisper"}>
-                  {m.runtime === "whisper" ? "whisper.cpp" : "ollama"}
+                <span class="runtime-tag" class:local={m.runtime !== "ollama"}>
+                  {m.runtime}
                 </span>
               </div>
               <span class="size">{sizeLabel(m.size)}</span>
@@ -614,7 +632,10 @@
     font-family: monospace;
     flex-shrink: 0;
   }
-  .runtime-tag.whisper {
+  .runtime-tag.local {
+    /* Non-Ollama runtimes (moonshine / parakeet / diarize / etc.)
+       — these live under ~/.myownllm/models/ rather than Ollama's
+       library. */
     color: #d4a64a;
     border-color: #4a3a1a;
     background: #1f1812;

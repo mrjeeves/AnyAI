@@ -269,13 +269,20 @@ async function runTpCycle(): Promise<void> {
     return;
   }
   if (!conv) return;
-  const transcript = conv.transcript ?? "";
-  // Only the *new* slice — the model never sees the whole transcript, so the
-  // prompt stays small even after a long meeting. This is what keeps TP from
-  // starving whisper on a memory-tight machine.
+  // v13 stores the transcript as `TranscriptSegment[]`; legacy files
+  // (string) are migrated on load by `loadConversation`. Flatten to a
+  // single string here — Talking Points only cares about word content,
+  // not speaker boundaries.
+  const transcript = (conv.transcript ?? [])
+    .map((s) => s.text)
+    .join(" ");
+  // Only the *new* slice — the model never sees the whole transcript,
+  // so the prompt stays small even after a long meeting. This is what
+  // keeps TP from starving the ASR worker on a memory-tight machine.
   const sliceEnd = transcript.length;
-  // Snapshot the chunk-pool counter alongside the slice so success advances
-  // both atomically — otherwise a frame arriving mid-cycle could be missed.
+  // Snapshot the chunk-pool counter alongside the slice so success
+  // advances both atomically — otherwise a frame arriving mid-cycle
+  // could be missed.
   const pulseAtCycleStart = transcribeUi.framePulse;
   const newSlice = transcript.slice(tpProcessedLen, sliceEnd).trim();
   if (!newSlice) {

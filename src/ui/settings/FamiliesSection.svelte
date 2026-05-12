@@ -18,8 +18,12 @@
     onClose: () => void;
   }>();
 
-  interface WhisperInfo {
+  /** Mirror of `models::ModelInfo` in src-tauri/src/models.rs. The
+   *  Family tier ladder calls `asr_models_list` to surface installed
+   *  sizes alongside the manifest's declared `disk_mb` estimate. */
+  interface ModelInfo {
     name: string;
+    kind: string;
     installed: boolean;
     installed_size_bytes: number | null;
   }
@@ -30,11 +34,14 @@
   let activeMode = $state<Mode>("text");
   let modeOverrides = $state<Partial<Record<Mode, string | null>>>({});
   let hardware = $state<HardwareProfile | null>(null);
-  /** Pulled-tag → size in bytes (Ollama models). Whisper models live in a
-   *  separate location and are tracked via `whisperSizes` below. */
+  /** Pulled-tag → size in bytes (Ollama models). Local-runtime models
+   *  (ASR / diarize ONNX) live in a separate location and are tracked
+   *  via `localSizes` below. */
   let pulledSizes = $state<Record<string, number>>({});
-  /** Whisper model name (e.g. `tiny.en`) → installed size in bytes. */
-  let whisperSizes = $state<Record<string, number>>({});
+  /** Local-runtime model name → installed size in bytes. Keyed by
+   *  bare name (e.g. `moonshine-small-q8`,
+   *  `pyannote-seg-3.0+wespeaker-r34`). */
+  let localSizes = $state<Record<string, number>>({});
   let loading = $state(true);
 
   /** When non-null, render the detail page for this family instead of the
@@ -47,13 +54,14 @@
   async function load() {
     loading = true;
     try {
-      const [m, provider, config, hw, pulled, whisper] = await Promise.all([
+      const [m, provider, config, hw, pulled, asr, diarize] = await Promise.all([
         getActiveManifest(),
         getActiveProvider(),
         loadConfig(),
         invoke<HardwareProfile>("detect_hardware"),
         invoke<OllamaModel[]>("ollama_list_models").catch(() => [] as OllamaModel[]),
-        invoke<WhisperInfo[]>("whisper_models_list").catch(() => [] as WhisperInfo[]),
+        invoke<ModelInfo[]>("asr_models_list").catch(() => [] as ModelInfo[]),
+        invoke<ModelInfo[]>("diarize_models_list").catch(() => [] as ModelInfo[]),
       ]);
       manifest = m;
       providerName = provider?.name ?? "(none)";
@@ -64,13 +72,13 @@
       const sizes: Record<string, number> = {};
       for (const p of pulled) sizes[p.name] = p.size;
       pulledSizes = sizes;
-      const wsizes: Record<string, number> = {};
-      for (const w of whisper) {
-        if (w.installed && w.installed_size_bytes != null) {
-          wsizes[w.name] = w.installed_size_bytes;
+      const lsizes: Record<string, number> = {};
+      for (const m of [...asr, ...diarize]) {
+        if (m.installed && m.installed_size_bytes != null) {
+          lsizes[m.name] = m.installed_size_bytes;
         }
       }
-      whisperSizes = wsizes;
+      localSizes = lsizes;
     } finally {
       loading = false;
     }
@@ -86,7 +94,7 @@
   } {
     const runtime = modeSpec.runtime ?? "ollama";
     const installedBytes =
-      runtime !== "ollama" ? whisperSizes[modelName] : pulledSizes[modelName];
+      runtime !== "ollama" ? localSizes[modelName] : pulledSizes[modelName];
     if (installedBytes && installedBytes > 0) {
       return { bytes: installedBytes, installed: true };
     }
