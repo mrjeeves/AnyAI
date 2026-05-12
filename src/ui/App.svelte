@@ -493,6 +493,12 @@
     activeConversationId = id;
     suppressNextActiveEvent = true;
     setActiveConversationId(id);
+    // Land in the matching workspace: sessions open transcribe, chats open
+    // text. Users can still flip modes manually afterward.
+    const target = conversations.find((c) => c.id === id);
+    if (target && target.mode !== activeMode) {
+      onModeChange(target.mode).catch(() => {});
+    }
   }
 
   function onNewConversation() {

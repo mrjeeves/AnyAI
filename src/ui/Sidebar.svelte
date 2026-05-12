@@ -130,6 +130,10 @@
   }
 
   function onRenameKey(e: KeyboardEvent, kind: "item" | "folder") {
+    // The parent row/folder div treats Space as "select/toggle" and calls
+    // preventDefault(). Stop the bubble so typing spaces in the rename
+    // input works.
+    e.stopPropagation();
     if (e.key === "Enter") {
       e.preventDefault();
       if (kind === "item") commitRenameItem();
@@ -661,6 +665,7 @@
         onblur={commitRenameFolder}
         onkeydown={(e) => onRenameKey(e, "folder")}
         onclick={(e) => e.stopPropagation()}
+        use:autofocus
       />
     {:else}
       <span class="folder-name">{node.name}</span>
@@ -741,6 +746,7 @@
         onblur={commitRenameItem}
         onkeydown={(e) => onRenameKey(e, "item")}
         onclick={(e) => e.stopPropagation()}
+        use:autofocus
       />
     {:else}
       <span class="title">{c.title}</span>
