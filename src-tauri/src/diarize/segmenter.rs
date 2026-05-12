@@ -1,9 +1,5 @@
 //! pyannote-segmentation-3.0 ONNX wrapper.
 //!
-//! **STATUS: scaffolded, ONNX inference pending.** The powerset →
-//! voiced-slice decoder is fully implemented and unit-tested; the
-//! ONNX forward pass is the next session's job (see `PROGRESS.md`).
-//!
 //! Inputs 16 kHz mono f32 audio (typically 10 s windows), outputs
 //! per-frame logits of shape `[batch=1, T_frames, 7]`. Frame stride
 //! is the model's native ~17 ms. The 7-class axis is the **powerset**
@@ -25,8 +21,11 @@
 //!
 //! Reference: <https://huggingface.co/pyannote/segmentation-3.0>.
 
-use anyhow::{anyhow, Result};
-use std::sync::atomic::AtomicBool;
+use anyhow::{anyhow, Context, Result};
+use ndarray::Array2;
+use ort::session::{builder::GraphOptimizationLevel, Session};
+use ort::value::Tensor;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::models::{model_dir, ModelKind};
 
@@ -40,7 +39,6 @@ const FRAME_STRIDE_MS: u64 = 17;
 const MIN_SLICE_MS: u64 = 100;
 
 /// Powerset bitmask: which of {A, B, C} are active in each class.
-#[allow(dead_code)]
 const CLASS_TO_BITS: [u8; 7] = [
     0b000, // ∅
     0b001, // {A}
@@ -67,12 +65,19 @@ pub struct VoicedSlice {
 
 pub struct Segmenter {
     model_name: String,
+    session: Option<Session>,
+    /// Sniffed at warm-up.
+    input_name: String,
+    output_name: String,
 }
 
 impl Segmenter {
     pub fn new(name: &str) -> Result<Self> {
         Ok(Self {
             model_name: name.to_string(),
+            session: None,
+            input_name: "waveform".to_string(),
+            output_name: "logits".to_string(),
         })
     }
 
@@ -81,6 +86,35 @@ impl Segmenter {
         if !path.exists() {
             return Err(anyhow!("segmenter ONNX missing: {}", path.display()));
         }
+        let session = Session::builder()
+            .map_err(|e| anyhow!("ort builder: {e}"))?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| anyhow!("ort opt level: {e}"))?
+            .with_intra_threads(intra_threads())
+            .map_err(|e| anyhow!("ort threads: {e}"))?
+            .commit_from_file(&path)
+            .map_err(|e| anyhow!("loading {}: {e}", path.display()))
+            .with_context(|| format!("warm_up segmenter {}", self.model_name))?;
+
+        // Sherpa-onnx's export uses `waveform` as the input and
+        // `logits` as the output, but we suffix-match so a re-export
+        // (which is what we'd switch to if upstream patches the
+        // dynamic-shape issues) doesn't break us.
+        for input in session.inputs() {
+            let n = input.name().to_lowercase();
+            if n.contains("wave") || n.contains("audio") || n == "input" {
+                self.input_name = input.name().to_string();
+                break;
+            }
+        }
+        for output in session.outputs() {
+            let n = output.name().to_lowercase();
+            if n.contains("logit") || n.contains("output") || n.contains("score") {
+                self.output_name = output.name().to_string();
+                break;
+            }
+        }
+        self.session = Some(session);
         Ok(())
     }
 
@@ -88,27 +122,79 @@ impl Segmenter {
     /// absolute (session-relative) start time of the window.
     pub fn segment(
         &mut self,
-        _window: &[f32],
-        _window_t0_ms: u64,
-        _cancel: &AtomicBool,
+        window: &[f32],
+        window_t0_ms: u64,
+        cancel: &AtomicBool,
     ) -> Result<Vec<VoicedSlice>> {
-        // TODO(diarization-branch, session-2): wire ort 2.0.0-rc.12
-        // forward → `[1, T, 7]` logits → argmax per frame →
-        // `rle_to_slices`. See `PROGRESS.md` § "pyannote-seg forward".
-        Err(anyhow!(
-            "pyannote-seg ONNX inference not yet implemented — see PROGRESS.md"
-        ))
+        // < 100 ms of audio: nothing meaningful to segment. The
+        // pyannote-seg-3.0 model's receptive field is well above
+        // this, so feeding it tiny windows produces garbage.
+        if window.len() < 16_000 / 10 {
+            return Ok(Vec::new());
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(Vec::new());
+        }
+        let session = self
+            .session
+            .as_mut()
+            .ok_or_else(|| anyhow!("segmenter not warmed up"))?;
+
+        let input: Array2<f32> = Array2::from_shape_vec((1, window.len()), window.to_vec())
+            .map_err(|e| anyhow!("shape input: {e}"))?;
+        let tensor = Tensor::from_array(input).map_err(|e| anyhow!("ort tensor: {e}"))?;
+        let outputs = session
+            .run(ort::inputs![self.input_name.as_str() => tensor])
+            .map_err(|e| anyhow!("ort run: {e}"))?;
+
+        let value = outputs
+            .get(self.output_name.as_str())
+            .ok_or_else(|| anyhow!("segmenter missing output {}", self.output_name))?;
+        let logits = value
+            .try_extract_array::<f32>()
+            .map_err(|e| anyhow!("ort extract: {e}"))?;
+        // Expected shape: [1, T, 7].
+        let shape = logits.shape().to_vec();
+        if shape.len() != 3 || shape[0] != 1 || shape[2] != 7 {
+            return Err(anyhow!(
+                "unexpected segmenter output shape {:?} (want [1, T, 7])",
+                shape
+            ));
+        }
+        let t_frames = shape[1];
+
+        // Argmax per frame → bitmask. Walking the ArrayView via
+        // `.iter()` would give C-order (frame-major over class), so
+        // we index explicitly to keep the per-frame scan obvious.
+        let mut bitmasks = Vec::with_capacity(t_frames);
+        for t in 0..t_frames {
+            let mut best_class = 0usize;
+            let mut best_score = f32::NEG_INFINITY;
+            for k in 0..7 {
+                let s = logits[[0, t, k]];
+                if s > best_score {
+                    best_score = s;
+                    best_class = k;
+                }
+            }
+            bitmasks.push(CLASS_TO_BITS[best_class]);
+        }
+
+        Ok(rle_to_slices(&bitmasks, window_t0_ms))
     }
+}
+
+fn intra_threads() -> usize {
+    let n = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2);
+    n.saturating_sub(1).clamp(1, 2)
 }
 
 /// Run-length-encode a per-frame bitmask sequence into voiced slices.
 /// Each contiguous run of frames with the same active-speaker set
 /// becomes one `VoicedSlice` per active local speaker. Overlap is
 /// `true` when more than one bit is set in the run's mask.
-///
-/// Pure function — kept around for the ort wire-up to call once it
-/// has logits.
-#[allow(dead_code)]
 pub(crate) fn rle_to_slices(bitmasks: &[u8], window_t0_ms: u64) -> Vec<VoicedSlice> {
     let mut out = Vec::new();
     if bitmasks.is_empty() {

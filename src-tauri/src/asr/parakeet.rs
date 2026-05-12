@@ -1,25 +1,23 @@
 //! NVIDIA Parakeet TDT 0.6B v3 ASR backend.
 //!
-//! **STATUS: scaffolded, ONNX inference pending.** The trait surface,
-//! model-file resolution, vocab loading, and SentencePiece-style
-//! detokenization work today; the ONNX forward pass is the next
-//! session's job (see `PROGRESS.md`).
-//!
 //! Parakeet is a CTC/RNN-T family hybrid trained by NVIDIA's NeMo
 //! team. The v3 0.6B variant adds 25-language support. We pull the
 //! community ONNX export (istupakov/parakeet-tdt-0.6b-v3-onnx) which
 //! bakes the encoder + RNNT predictor + joint network + the TDT
 //! decode loop into a single graph: input is raw f32 PCM (with a
 //! lengths tensor), output is a `[batch, time]` int sequence of token
-//! IDs plus per-token frame indices.
+//! IDs plus optional per-token frame indices.
 //!
 //! Vocab is a flat `tokens.txt` (one BPE piece per line, indexed by
 //! line number). We detokenize by joining pieces and replacing the
 //! SentencePiece ▁ with spaces.
 
 use anyhow::{anyhow, Context, Result};
+use ndarray::{Array1, Array2};
+use ort::session::{builder::GraphOptimizationLevel, Session};
+use ort::value::Tensor;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::asr::{AsrBackend, AsrCaps, AsrChunkOut, AsrSegment};
 use crate::models::{model_dir, ModelKind};
@@ -34,6 +32,17 @@ const WORD_BOUNDARY: &str = "\u{2581}";
 pub struct ParakeetBackend {
     model_name: String,
     tokens: Vec<String>,
+    session: Option<Session>,
+    /// Sniffed at warm-up.
+    audio_input: String,
+    /// Some exports take an explicit length tensor; others don't.
+    length_input: Option<String>,
+    /// Sniffed at warm-up: the output that carries decoded token IDs.
+    tokens_output: String,
+    /// Sniffed at warm-up: the output that carries per-token frame
+    /// indices, if present. Optional — without it the whole chunk
+    /// becomes one segment.
+    timestamps_output: Option<String>,
 }
 
 impl ParakeetBackend {
@@ -41,6 +50,11 @@ impl ParakeetBackend {
         Ok(Self {
             model_name: model_name.to_string(),
             tokens: Vec::new(),
+            session: None,
+            audio_input: "audio_signal".to_string(),
+            length_input: None,
+            tokens_output: "tokens".to_string(),
+            timestamps_output: None,
         })
     }
 
@@ -50,7 +64,6 @@ impl ParakeetBackend {
 
     /// Resolve a token ID to its string form. Out-of-vocab IDs
     /// resolve to empty so the RNNT blank effectively vanishes.
-    #[allow(dead_code)]
     fn id_to_piece(&self, id: usize) -> &str {
         self.tokens.get(id).map(String::as_str).unwrap_or("")
     }
@@ -96,25 +109,127 @@ impl AsrBackend for ParakeetBackend {
             return Err(anyhow!("empty tokens.txt for {}", model_path.display()));
         }
         self.tokens = tokens;
+
+        let session = Session::builder()
+            .map_err(|e| anyhow!("ort builder: {e}"))?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| anyhow!("ort opt level: {e}"))?
+            .with_intra_threads(intra_threads())
+            .map_err(|e| anyhow!("ort threads: {e}"))?
+            .commit_from_file(&model_path)
+            .map_err(|e| anyhow!("loading {}: {e}", model_path.display()))
+            .with_context(|| format!("warm_up parakeet {}", self.model_name))?;
+
+        // Sniff I/O names. NeMo's istupakov export uses
+        // `audio_signal` / `audio_signal_lens` for inputs and
+        // `tokens` / `timestamps` for outputs. Tolerate renames.
+        for input in session.inputs() {
+            let n = input.name().to_lowercase();
+            if n.contains("length") || n.contains("lens") {
+                self.length_input = Some(input.name().to_string());
+            } else if n.contains("audio") || n.contains("signal") || n == "input" {
+                self.audio_input = input.name().to_string();
+            }
+        }
+        for output in session.outputs() {
+            let n = output.name().to_lowercase();
+            if n.contains("time") || n.contains("frame") {
+                self.timestamps_output = Some(output.name().to_string());
+            } else if n.contains("token") || n == "y" {
+                self.tokens_output = output.name().to_string();
+            }
+        }
+        self.session = Some(session);
         Ok(())
     }
 
     fn process_chunk(
         &mut self,
-        _pcm16k_mono: &[f32],
+        pcm16k_mono: &[f32],
         _chunk_t0_ms: u64,
-        _cancel: &AtomicBool,
+        cancel: &AtomicBool,
     ) -> Result<AsrChunkOut> {
-        // TODO(diarization-branch, session-2): wire ort 2.0.0-rc.12
-        // single-pass forward. Build the input tensor as `[1, T]` f32
-        // (audio_signal) + optional `[1]` i64 lengths, run the
-        // session, decode token IDs and (when the export emits them)
-        // per-token frame indices to segments via
-        // `decode_to_segments`. See `PROGRESS.md` § "Parakeet
-        // forward".
-        Err(anyhow!(
-            "Parakeet ONNX inference not yet implemented — see PROGRESS.md"
-        ))
+        if pcm16k_mono.len() < 16_000 / 10 {
+            // < 100 ms: ASR backends hallucinate on tiny inputs.
+            return Ok(AsrChunkOut::default());
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(AsrChunkOut::default());
+        }
+        let session = self
+            .session
+            .as_mut()
+            .ok_or_else(|| anyhow!("Parakeet session not warmed up"))?;
+
+        let audio: Array2<f32> =
+            Array2::from_shape_vec((1, pcm16k_mono.len()), pcm16k_mono.to_vec())
+                .map_err(|e| anyhow!("shape audio: {e}"))?;
+        let audio_tensor =
+            Tensor::from_array(audio).map_err(|e| anyhow!("ort tensor audio: {e}"))?;
+
+        // Some exports take `audio_signal_lens` as a `[1]` i64
+        // tensor naming the number of valid samples. When sniffed,
+        // build it; when absent, the graph infers length from the
+        // audio shape.
+        let outputs = if let Some(len_name) = self.length_input.clone() {
+            let lengths: Array1<i64> = Array1::from_vec(vec![pcm16k_mono.len() as i64]);
+            let len_tensor =
+                Tensor::from_array(lengths).map_err(|e| anyhow!("ort tensor len: {e}"))?;
+            session
+                .run(ort::inputs![
+                    self.audio_input.as_str() => audio_tensor,
+                    len_name.as_str() => len_tensor,
+                ])
+                .map_err(|e| anyhow!("ort run: {e}"))?
+        } else {
+            session
+                .run(ort::inputs![self.audio_input.as_str() => audio_tensor])
+                .map_err(|e| anyhow!("ort run: {e}"))?
+        };
+
+        let tokens_value = outputs
+            .get(self.tokens_output.as_str())
+            .ok_or_else(|| anyhow!("Parakeet missing tokens output: {}", self.tokens_output))?;
+        // Some exports emit i64, others i32. Try i64 first; on type
+        // mismatch fall through to i32 and widen.
+        let token_ids: Vec<i64> = match tokens_value.try_extract_array::<i64>() {
+            Ok(arr) => arr.iter().copied().collect(),
+            Err(_) => tokens_value
+                .try_extract_array::<i32>()
+                .map_err(|e| anyhow!("ort extract tokens: {e}"))?
+                .iter()
+                .map(|&v| v as i64)
+                .collect(),
+        };
+
+        // Timestamps output is optional. If present, try i64 then
+        // i32. Missing or unreadable timestamps fall back to a
+        // single-segment-per-chunk render.
+        let timestamps: Option<Vec<i64>> = self.timestamps_output.as_ref().and_then(|name| {
+            outputs.get(name.as_str()).and_then(|v| {
+                v.try_extract_array::<i64>()
+                    .ok()
+                    .map(|a| a.iter().copied().collect::<Vec<_>>())
+                    .or_else(|| {
+                        v.try_extract_array::<i32>()
+                            .ok()
+                            .map(|a| a.iter().map(|&x| x as i64).collect::<Vec<_>>())
+                    })
+            })
+        });
+
+        // Drop the session borrow before calling `decode_to_segments`
+        // (which takes `&self`). The session was held mutably above
+        // via `self.session.as_mut()`; that borrow extends through
+        // the `outputs` variable. We pull what we need out first.
+        let chunk_samples = pcm16k_mono.len();
+        drop(outputs);
+
+        let segments = self.decode_to_segments(&token_ids, timestamps.as_deref(), chunk_samples);
+        Ok(AsrChunkOut {
+            segments,
+            used_state: false,
+        })
     }
 
     fn reset_state(&mut self) {
@@ -128,10 +243,6 @@ impl ParakeetBackend {
     /// multiple segments wherever there's a > 300 ms silent gap
     /// between tokens. Without timestamps, the whole chunk becomes
     /// one segment.
-    ///
-    /// Pure function — kept around for the ort wire-up to call once
-    /// it has token IDs and frames.
-    #[allow(dead_code)]
     pub(crate) fn decode_to_segments(
         &self,
         token_ids: &[i64],
@@ -202,6 +313,17 @@ impl ParakeetBackend {
             confidence: None,
         }
     }
+}
+
+/// Threads to give the ORT CPU EP. Parakeet's encoder is the most
+/// compute-heavy stage in the new pipeline; up to 6 cores helps on
+/// modern x86 / Apple Silicon without starving the chat model or
+/// the ingest thread.
+fn intra_threads() -> usize {
+    let n = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2);
+    n.saturating_sub(1).clamp(1, 6)
 }
 
 /// Combine SentencePiece-style pieces into a readable string: replace
