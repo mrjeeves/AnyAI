@@ -414,6 +414,16 @@ fn audio_input_devices() -> Result<Vec<transcribe::AudioInputDevice>, String> {
     transcribe::list_input_devices().map_err(|e| e.to_string())
 }
 
+/// Write UTF-8 text to a filesystem path the user picked via the save
+/// dialog. The fs plugin's allowlist is scoped to ~/.myownllm/** so
+/// downloads to anywhere else (Desktop, Downloads, an external drive) need
+/// a backend channel that trusts the dialog's consent prompt instead of
+/// the plugin's path-prefix check.
+#[tauri::command]
+fn write_text_to_path(path: String, contents: String) -> Result<(), String> {
+    std::fs::write(&path, contents).map_err(|e| format!("write {path}: {e}"))
+}
+
 #[tauri::command]
 fn update_status() -> Result<self_update::UpdateStatus, String> {
     self_update::status().map_err(|e| e.to_string())
@@ -566,6 +576,7 @@ fn main() {
             legacy_models_list,
             legacy_models_remove,
             audio_input_devices,
+            write_text_to_path,
         ])
         .setup(|app| {
             // If the configured 800x600 window can't fit on this monitor —
