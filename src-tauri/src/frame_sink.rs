@@ -93,6 +93,7 @@ mod tests {
             pending_chunks: 0,
             chunk_seconds: None,
             status: None,
+            upload_progress: None,
         }
     }
 
