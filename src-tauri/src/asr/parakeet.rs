@@ -187,7 +187,10 @@ impl ParakeetBackend {
 
     fn emit_run(&self, pieces: &[&str], frames: &[i64]) -> AsrSegment {
         let text = stitch_pieces(pieces);
-        let start_ms = frames.first().map(|f| *f as u64 * FRAME_STRIDE_MS).unwrap_or(0);
+        let start_ms = frames
+            .first()
+            .map(|f| *f as u64 * FRAME_STRIDE_MS)
+            .unwrap_or(0);
         let end_ms = frames
             .last()
             .map(|f| (*f as u64 + 1) * FRAME_STRIDE_MS)

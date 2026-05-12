@@ -54,6 +54,9 @@ const CLASS_TO_BITS: [u8; 7] = [
 /// A run of frames with a stable speaker bitmask. Times are absolute
 /// (session-relative milliseconds).
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // `local_speaker` is read by the embedder slice
+                    // extractor when the ort wire-up lands — kept here
+                    // so the surface stays stable across that change.
 pub struct VoicedSlice {
     pub start_ms: u64,
     pub end_ms: u64,

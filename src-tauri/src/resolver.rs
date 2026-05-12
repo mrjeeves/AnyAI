@@ -108,11 +108,12 @@ pub fn default_runtime_for(mode: &str) -> &'static str {
 
 /// Effective runtime for a tier under a given mode: per-tier override
 /// wins, then the mode-level runtime, then the compiled default.
-fn tier_runtime(tier: Option<&Value>, mode_spec: Option<&Map<String, Value>>, mode: &str) -> String {
-    if let Some(rt) = tier
-        .and_then(|t| t.get("runtime"))
-        .and_then(|v| v.as_str())
-    {
+fn tier_runtime(
+    tier: Option<&Value>,
+    mode_spec: Option<&Map<String, Value>>,
+    mode: &str,
+) -> String {
+    if let Some(rt) = tier.and_then(|t| t.get("runtime")).and_then(|v| v.as_str()) {
         return rt.to_string();
     }
     if let Some(rt) = mode_spec
@@ -205,7 +206,10 @@ pub fn resolve_full(
     for tier in tiers {
         if tier_matches(tier, hw, unified, headroom) {
             if let Some(model) = tier["model"].as_str() {
-                return Ok((model.to_string(), tier_runtime(Some(tier), exact_spec, mode)));
+                return Ok((
+                    model.to_string(),
+                    tier_runtime(Some(tier), exact_spec, mode),
+                ));
             }
         }
     }
@@ -216,7 +220,10 @@ pub fn resolve_full(
     let last_model = last["model"]
         .as_str()
         .ok_or_else(|| anyhow!("no model found in active family tiers"))?;
-    Ok((last_model.to_string(), tier_runtime(Some(last), exact_spec, mode)))
+    Ok((
+        last_model.to_string(),
+        tier_runtime(Some(last), exact_spec, mode),
+    ))
 }
 
 /// Look up the effective runtime for `mode` under the active family,

@@ -22,6 +22,11 @@ const MIN_EMBED_SAMPLES: usize = 16_000 / 2; // 0.5 s
 
 pub struct Embedder {
     model_name: String,
+    /// Cached output dimensionality after the first forward pass.
+    /// Currently set but not yet read — populated when the ort wire-up
+    /// lands so the clusterer can pre-size centroid buffers without an
+    /// extra forward.
+    #[allow(dead_code)]
     dim: Option<usize>,
 }
 
@@ -41,6 +46,7 @@ impl Embedder {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn dim(&self) -> Option<usize> {
         self.dim
     }

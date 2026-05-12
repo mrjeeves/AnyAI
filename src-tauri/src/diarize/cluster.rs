@@ -22,6 +22,8 @@ use std::time::Duration;
 
 /// Configuration for the online clusterer.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // `stale_after` is wired in for the cold-start re-label
+                    // pass that lands with the ort wire-up — see PROGRESS.md.
 pub struct ClusterConfig {
     /// Cosine *distance* (1 - cosine similarity) under which a new
     /// embedding joins an existing cluster. Above this, a new
@@ -90,17 +92,21 @@ impl OnlineClusterer {
         }
     }
 
-    /// Active speaker count.
+    /// Active speaker count. Surfaced via the Settings UI once the
+    /// diarize pane lands.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.centroids.len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.centroids.is_empty()
     }
 
-    /// Reset state. Used when the user toggles diarize off mid-session
-    /// or starts a new conversation.
+    /// Reset state. Used by `PyannoteOrtBackend::reset()` when the
+    /// user toggles diarize off mid-session or starts a new
+    /// conversation.
     pub fn reset(&mut self) {
         self.centroids.clear();
         self.next_id = 0;
@@ -171,7 +177,8 @@ impl OnlineClusterer {
         if let Some((i, j, sim)) = best {
             let merge_threshold = 1.0 - self.cfg.threshold * 0.8;
             if sim >= merge_threshold {
-                let (src_count, src_mean) = (self.centroids[j].count, self.centroids[j].mean.clone());
+                let (src_count, src_mean) =
+                    (self.centroids[j].count, self.centroids[j].mean.clone());
                 let last_seen = self.centroids[j].last_seen_ms;
                 merge_into(&mut self.centroids[i], &src_mean, src_count, last_seen);
                 self.centroids.remove(j);
@@ -306,7 +313,15 @@ mod tests {
         let a_drift = norm(vec![0.9, 0.4, 0.0]);
         c.assign(&a, 100);
         c.assign(&a_drift, 200);
-        let mag: f32 = c.centroids[0].mean.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((mag - 1.0).abs() < 1e-5, "centroid lost normalization: {mag}");
+        let mag: f32 = c.centroids[0]
+            .mean
+            .iter()
+            .map(|x| x * x)
+            .sum::<f32>()
+            .sqrt();
+        assert!(
+            (mag - 1.0).abs() < 1e-5,
+            "centroid lost normalization: {mag}"
+        );
     }
 }

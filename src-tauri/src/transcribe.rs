@@ -354,7 +354,10 @@ pub fn start(
     if sessions().contains_key(&stream_id) {
         return Err(anyhow!("transcription {stream_id} is already running"));
     }
-    if !models::find(&model_name, ModelKind::Asr).map(models::is_installed).unwrap_or(false) {
+    if !models::find(&model_name, ModelKind::Asr)
+        .map(models::is_installed)
+        .unwrap_or(false)
+    {
         return Err(anyhow!(
             "ASR model '{model_name}' ({runtime}) isn't installed yet — pull it first from Settings → Transcription."
         ));
@@ -456,7 +459,10 @@ pub fn start_drain(
     if sessions().contains_key(&stream_id) {
         return Err(anyhow!("transcription {stream_id} is already running"));
     }
-    if !models::find(&model_name, ModelKind::Asr).map(models::is_installed).unwrap_or(false) {
+    if !models::find(&model_name, ModelKind::Asr)
+        .map(models::is_installed)
+        .unwrap_or(false)
+    {
         return Err(anyhow!(
             "ASR model '{model_name}' isn't installed — install it from Settings → Models."
         ));
@@ -523,7 +529,10 @@ pub fn start_upload(
     if sessions().contains_key(&stream_id) {
         return Err(anyhow!("transcription {stream_id} is already running"));
     }
-    if !models::find(&model_name, ModelKind::Asr).map(models::is_installed).unwrap_or(false) {
+    if !models::find(&model_name, ModelKind::Asr)
+        .map(models::is_installed)
+        .unwrap_or(false)
+    {
         return Err(anyhow!(
             "ASR model '{model_name}' isn't installed — install it from Settings → Models."
         ));
@@ -577,13 +586,24 @@ pub fn start_upload(
     Ok(())
 }
 
+/// Bundle returned by `build_backends`: the warmed-up ASR backend,
+/// the optional diarize backend (None when diarization is off), and
+/// the backend's caps so the worker can read `chunk_seconds` without
+/// going back through the trait. Named to keep `build_backends`'s
+/// signature scannable (clippy `type_complexity` lint).
+type Backends = (
+    Box<dyn AsrBackend>,
+    Option<Box<dyn DiarizeBackend>>,
+    AsrCaps,
+);
+
 /// Build + warm up the ASR + (optional) diarize backends. Returns
 /// `(asr, diarize_opt, caps)` ready for the chunk loop.
 fn build_backends(
     runtime: &str,
     model_name: &str,
     diarize_composite: Option<&str>,
-) -> Result<(Box<dyn AsrBackend>, Option<Box<dyn DiarizeBackend>>, AsrCaps)> {
+) -> Result<Backends> {
     let mut asr = asr::make_backend(runtime, model_name)?;
     asr.warm_up()?;
     let caps = asr.caps();
@@ -614,16 +634,10 @@ fn run_session(
     let started = std::time::Instant::now();
     let _ = window.emit(
         event,
-        TranscribeFrame::heartbeat(
-            0,
-            0,
-            None,
-            Some(format!("Loading {} model…", runtime)),
-        ),
+        TranscribeFrame::heartbeat(0, 0, None, Some(format!("Loading {} model…", runtime))),
     );
 
-    let (mut asr, mut diarize, caps) =
-        build_backends(runtime, model_name, diarize_composite)?;
+    let (mut asr, mut diarize, caps) = build_backends(runtime, model_name, diarize_composite)?;
 
     let buffer_dir = chunk_buffer_dir(stream_id)?;
     if let Ok(entries) = std::fs::read_dir(&buffer_dir) {
@@ -750,7 +764,10 @@ fn run_session(
             started.elapsed().as_millis(),
             0,
             Some(caps.chunk_seconds),
-            Some(format!("Listening… first chunk in ~{:.0} s", caps.chunk_seconds)),
+            Some(format!(
+                "Listening… first chunk in ~{:.0} s",
+                caps.chunk_seconds
+            )),
         ),
     );
 
@@ -821,9 +838,7 @@ fn run_session(
                     break;
                 }
                 consecutive_errors += 1;
-                eprintln!(
-                    "ASR inference failed (consecutive={consecutive_errors}): {e}"
-                );
+                eprintln!("ASR inference failed (consecutive={consecutive_errors}): {e}");
                 if consecutive_errors >= ASR_CONSECUTIVE_ERROR_LIMIT {
                     return Err(anyhow!(
                         "ASR backend failed {consecutive_errors} times in a row: {e}. \
@@ -927,15 +942,9 @@ fn run_drain(
     let started = std::time::Instant::now();
     let _ = window.emit(
         event,
-        TranscribeFrame::heartbeat(
-            0,
-            0,
-            None,
-            Some(format!("Loading {} model…", runtime)),
-        ),
+        TranscribeFrame::heartbeat(0, 0, None, Some(format!("Loading {} model…", runtime))),
     );
-    let (mut asr, mut diarize, caps) =
-        build_backends(runtime, model_name, diarize_composite)?;
+    let (mut asr, mut diarize, caps) = build_backends(runtime, model_name, diarize_composite)?;
     let buffer_dir = chunk_buffer_dir(stream_id)?;
 
     let mut next_seq: u64 = lowest_pending_seq(&buffer_dir).unwrap_or(1);
@@ -1000,9 +1009,7 @@ fn run_drain(
                     break;
                 }
                 consecutive_errors += 1;
-                eprintln!(
-                    "ASR inference failed (consecutive={consecutive_errors}): {e}"
-                );
+                eprintln!("ASR inference failed (consecutive={consecutive_errors}): {e}");
                 if consecutive_errors >= ASR_CONSECUTIVE_ERROR_LIMIT {
                     return Err(anyhow!(
                         "ASR backend failed {consecutive_errors} times in a row \
@@ -1078,15 +1085,9 @@ fn run_upload(
     let started = std::time::Instant::now();
     let _ = window.emit(
         event,
-        TranscribeFrame::heartbeat(
-            0,
-            0,
-            None,
-            Some(format!("Loading {} model…", runtime)),
-        ),
+        TranscribeFrame::heartbeat(0, 0, None, Some(format!("Loading {} model…", runtime))),
     );
-    let (mut asr, mut diarize, caps) =
-        build_backends(runtime, model_name, diarize_composite)?;
+    let (mut asr, mut diarize, caps) = build_backends(runtime, model_name, diarize_composite)?;
 
     let file = File::open(file_path).map_err(|e| anyhow!("open audio file: {e}"))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -1151,7 +1152,7 @@ fn run_upload(
         let spec = *decoded.spec();
         let sb = match sb.as_mut() {
             Some(b) => {
-                if (b.capacity() as usize) < decoded.capacity() {
+                if b.capacity() < decoded.capacity() {
                     sb = Some(SampleBuffer::new(decoded.capacity() as u64, spec));
                     sb.as_mut().unwrap()
                 } else {
@@ -1199,9 +1200,7 @@ fn run_upload(
                         break 'outer;
                     }
                     consecutive_errors += 1;
-                    eprintln!(
-                        "ASR inference failed (consecutive={consecutive_errors}): {e}"
-                    );
+                    eprintln!("ASR inference failed (consecutive={consecutive_errors}): {e}");
                     if consecutive_errors >= ASR_CONSECUTIVE_ERROR_LIMIT {
                         return Err(anyhow!(
                             "ASR backend failed {consecutive_errors} times in a row \
@@ -1287,7 +1286,11 @@ fn run_upload(
 /// is the turn that overlaps it most (ties → earlier start). When no
 /// turn overlaps, `speaker` is `None`. Overlap-flagged turns
 /// propagate the flag onto the resulting segment.
-fn join_segments(asr_segments: &[AsrSegment], turns: &[SpeakerTurn], chunk_t0_ms: u64) -> Vec<EmittedSegment> {
+fn join_segments(
+    asr_segments: &[AsrSegment],
+    turns: &[SpeakerTurn],
+    chunk_t0_ms: u64,
+) -> Vec<EmittedSegment> {
     let mut out = Vec::with_capacity(asr_segments.len());
     for seg in asr_segments {
         let seg_abs_start = chunk_t0_ms + seg.start_ms;

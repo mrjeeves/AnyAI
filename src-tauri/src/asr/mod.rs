@@ -29,6 +29,9 @@ pub mod parakeet;
 /// slicing, the UI's pending-chunks display ("X s behind realtime"),
 /// and the multilingual badge in Settings.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // `label`, `multilingual`, `streaming` are read by the
+                    // frontend Settings UI surface that lands when the ort
+                    // wire-up does — see PROGRESS.md.
 pub struct AsrCaps {
     /// Human-readable label rendered in the transcribe pane header.
     /// Example: "Moonshine Small", "Parakeet TDT 0.6B v3".

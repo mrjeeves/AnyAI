@@ -31,7 +31,7 @@ pub mod segmenter;
 
 pub use cluster::{ClusterConfig, OnlineClusterer};
 pub use embedder::Embedder;
-pub use segmenter::{Segmenter, VoicedSlice};
+pub use segmenter::Segmenter;
 
 /// One unit of speaker activity emitted by a diarize backend. Speakers
 /// are local to one conversation; numbering is stable within a session
@@ -74,8 +74,11 @@ pub trait DiarizeBackend: Send {
         cancel: &AtomicBool,
     ) -> Result<Vec<SpeakerTurn>>;
 
-    /// Drop any retained state (tail buffer, clusterer). Called when
-    /// a session ends or the user toggles diarize off mid-session.
+    /// Drop any retained state (tail buffer, clusterer). Wired up
+    /// for the toggle-off-mid-session flow that lands with the ort
+    /// wire-up; the trait method is here today so the surface stays
+    /// stable.
+    #[allow(dead_code)]
     fn reset(&mut self);
 }
 
@@ -167,12 +170,10 @@ impl DiarizeBackend for PyannoteOrtBackend {
             // Extract waveform for the slice. start_ms / end_ms are
             // absolute (session-relative); convert back to indices
             // within `window` using `window_t0_ms`.
-            let local_start = slice
-                .start_ms
-                .saturating_sub(window_t0_ms);
+            let local_start = slice.start_ms.saturating_sub(window_t0_ms);
             let local_end = slice.end_ms.saturating_sub(window_t0_ms);
-            let s_idx = ((local_start as u64 * 16_000) / 1000) as usize;
-            let e_idx = ((local_end as u64 * 16_000) / 1000) as usize;
+            let s_idx = ((local_start * 16_000) / 1000) as usize;
+            let e_idx = ((local_end * 16_000) / 1000) as usize;
             if e_idx <= s_idx || e_idx > window.len() {
                 continue;
             }

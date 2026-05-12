@@ -223,9 +223,7 @@ pub const REGISTRY: &[ModelSpec] = &[
 /// resolver and Tauri command surface call this to validate user input
 /// before triggering a download.
 pub fn find(name: &str, kind: ModelKind) -> Option<&'static ModelSpec> {
-    REGISTRY
-        .iter()
-        .find(|m| m.name == name && m.kind == kind)
+    REGISTRY.iter().find(|m| m.name == name && m.kind == kind)
 }
 
 /// Resolve a composite diarize name (e.g. `pyannote-seg-3.0+wespeaker-r34`)
@@ -235,8 +233,12 @@ pub fn find_composite(composite: &str, kind: ModelKind) -> Result<Vec<&'static M
     let mut out = Vec::new();
     for part in composite.split('+') {
         let part = part.trim();
-        let spec = find(part, kind)
-            .ok_or_else(|| anyhow!("unknown {kind} model component: {part}", kind = kind.as_str()))?;
+        let spec = find(part, kind).ok_or_else(|| {
+            anyhow!(
+                "unknown {kind} model component: {part}",
+                kind = kind.as_str()
+            )
+        })?;
         out.push(spec);
     }
     Ok(out)
@@ -353,7 +355,8 @@ fn emit_progress(window: &WebviewWindow, spec: &ModelSpec, frame: ModelPullProgr
 /// Returns the model's on-disk directory once every artifact is in
 /// place.
 pub async fn pull_model(name: String, kind: ModelKind, window: WebviewWindow) -> Result<PathBuf> {
-    let spec = find(&name, kind).ok_or_else(|| anyhow!("unknown {} model: {}", kind.as_str(), name))?;
+    let spec =
+        find(&name, kind).ok_or_else(|| anyhow!("unknown {} model: {}", kind.as_str(), name))?;
     let dir = model_dir(kind, &name)?;
     std::fs::create_dir_all(&dir)?;
 
@@ -545,7 +548,10 @@ mod tests {
         // survives — but the path-separator slashes are gone, which
         // is the point: there's no way to escape the model dir.
         assert_eq!(sanitize_name("../../etc/passwd"), ".._.._etc_passwd");
-        assert_eq!(sanitize_name("safe-name_1.0+suffix"), "safe-name_1.0+suffix");
+        assert_eq!(
+            sanitize_name("safe-name_1.0+suffix"),
+            "safe-name_1.0+suffix"
+        );
         // The "../../" prefix can't escape because join() with a
         // relative path collapses but doesn't traverse, and we sit
         // under `models/{kind}/...` so absolute path safety is
