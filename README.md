@@ -65,14 +65,14 @@ A first-class capture pipeline, not a sidebar feature. Mic in, segmented transcr
 - **Crash-resilient by design.** Audio chunks land on disk before the ASR backend sees them, so a force-quit can be drained on next launch. Transcripts, speaker labels, diarize state, and the talking-points list are all part of the conversation record.
 - **One binary.** No second daemon, no Python venv, no cloud round-trip. The same `myownllm` process hosts ASR, diarization, and the chat model used to summarise — coordinated through two singleton slots on the GUI's mode bar.
 
-The current GUI keeps audio capture local to the host machine; the LAN remote view is text-first today and a streaming-mic remote path is on the roadmap.
+Both paths — chat and transcription — are designed to be available on the GUI, the headless `serve` API, and the LAN remote view. The desktop GUI is the most complete today; full audio capture over `serve` / remote is on the near-term roadmap.
 
 ## Highlights
 
 |   |   |
 |---|---|
 | **Three wire formats, one server** | OpenAI on `:1473`, plus Ollama and Anthropic. Point Cursor, Continue, Aider, Cline, Zed, Open WebUI, opencode, OpenClaw, OpenClaude or your own scripts at it and it just works. |
-| **Virtual model IDs** | `myownllm-text`, `myownllm-vision`, `myownllm-code`, `myownllm-transcribe`. Stable names; the right tag for your hardware auto-resolves. |
+| **Virtual model IDs** | `myownllm` and `myownllm-transcribe`. Stable names; the right tag for your hardware auto-resolves. |
 | **Manifests, not config** | A JSON file at a URL is the source of truth. `imports` compose merged catalogs across publishers — no coordination required. |
 | **Runs on a Pi 5** | Default manifest ships Gemma 4 edge variants (`e2b` / `e4b`), Apache-2.0, ~7.6 tok/s on a Pi 5. Same manifest gives a 4090 the 4090 tag. |
 | **Desktop GUI** | Tauri + Svelte 5. Two singleton slots (chat-model, transcription) with conversation folders, in-place rename, crash-recoverable state. |

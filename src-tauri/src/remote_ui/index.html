@@ -541,7 +541,7 @@
           }
         } catch {
           const o = document.createElement("option");
-          o.value = "myownllm-text";
+          o.value = "myownllm";
           o.textContent = "myownllm · text";
           modelSel.appendChild(o);
         }
@@ -739,7 +739,7 @@
         const slot = appendAssistantBubble();
         let assistantContent = "";
         let assistantThinking = "";
-        const modelAtSend = modelSel.value || "myownllm-text";
+        const modelAtSend = modelSel.value || "myownllm";
         setSending(true);
         await streamChat(
           {

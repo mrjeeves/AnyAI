@@ -130,12 +130,10 @@ myownllm serve --no-ollama                           # don't auto-start ollama
 
 These resolve at request-time to whatever tag your manifest currently selects for your hardware. Client-side configuration stays stable forever — the underlying tag swaps automatically when upstream JSON changes.
 
-| Model ID            | Resolves to (example) |
-|---------------------|-----------------------|
-| `myownllm-text`        | `qwen2.5:14b`         |
-| `myownllm-vision`      | `qwen2.5vl:7b`        |
-| `myownllm-code`        | `qwen2.5-coder:14b`   |
-| `myownllm-transcribe`  | `parakeet:parakeet-tdt-0.6b-v3-int8` |
+| Model ID              | Resolves to (example) |
+|-----------------------|-----------------------|
+| `myownllm`            | `gemma4:e4b`          |
+| `myownllm-transcribe` | `parakeet:parakeet-tdt-0.6b-v3-int8` |
 
 Every response includes `X-MyOwnLLM-Resolved-Model` so a client (or a log) can see what tag actually served the request.
 
@@ -155,7 +153,7 @@ The universal answer to *"how do I point [client] at my local LLM?"* is always t
 |----------|----------------------------------------------------|
 | Base URL | `http://127.0.0.1:1473/v1`                         |
 | API key  | any non-empty string (e.g. `myownllm`)                |
-| Model    | `myownllm-text` · `myownllm-code` · `myownllm-vision`       |
+| Model    | `myownllm` (chat) · `myownllm-transcribe` (ASR)    |
 | Auth     | `Authorization: Bearer <key>` (clients add this for you) |
 
 Below are exact, copy-pasteable configs for the apps that most commonly ship with the toggle but bury the fields. Start `myownllm serve` first; everything else just points at the same URL.
@@ -173,9 +171,8 @@ Below are exact, copy-pasteable configs for the apps that most commonly ship wit
       "name": "MyOwnLLM (local)",
       "options": { "baseURL": "http://127.0.0.1:1473/v1" },
       "models": {
-        "myownllm-text":   { "name": "MyOwnLLM (text)" },
-        "myownllm-code":   { "name": "MyOwnLLM (code)" },
-        "myownllm-vision": { "name": "MyOwnLLM (vision)" }
+        "myownllm":            { "name": "MyOwnLLM (chat)" },
+        "myownllm-transcribe": { "name": "MyOwnLLM (transcribe)" }
       }
     }
   }
@@ -192,7 +189,7 @@ In OpenClaw's Settings → Providers → Add → **OpenAI-compatible**:
 Name:     MyOwnLLM
 Base URL: http://127.0.0.1:1473/v1
 API key:  myownllm
-Model:    myownllm-text
+Model:    myownllm
 ```
 
 Equivalent CLI:
@@ -202,7 +199,7 @@ openclaw provider add myownllm \
   --kind openai-compatible \
   --base-url http://127.0.0.1:1473/v1 \
   --api-key myownllm \
-  --model myownllm-text
+  --model myownllm
 openclaw provider use myownllm
 ```
 
@@ -214,7 +211,7 @@ OpenClaude reads its OpenAI-mode settings from environment variables:
 export CLAUDE_CODE_USE_OPENAI=1
 export OPENAI_BASE_URL=http://127.0.0.1:1473/v1
 export OPENAI_API_KEY=myownllm
-export OPENAI_MODEL=myownllm-code     # or myownllm-text
+export OPENAI_MODEL=myownllm          # or myownllm-transcribe
 openclaude
 ```
 
@@ -228,7 +225,7 @@ Settings → Models → enable **Override OpenAI Base URL**:
 http://127.0.0.1:1473/v1
 ```
 
-API key field: `myownllm`. Add `myownllm-text` / `myownllm-code` to the **Model Names** list and click **Verify**. Cursor caches model lists — toggle the override off and on once after adding new model IDs.
+API key field: `myownllm`. Add `myownllm` to the **Model Names** list and click **Verify**. Cursor caches model lists — toggle the override off and on once after adding new model IDs.
 
 ### Continue.dev
 
@@ -236,14 +233,9 @@ API key field: `myownllm`. Add `myownllm-text` / `myownllm-code` to the **Model 
 
 ```yaml
 models:
-  - name: MyOwnLLM (text)
+  - name: MyOwnLLM
     provider: openai
-    model: myownllm-text
-    apiBase: http://127.0.0.1:1473/v1
-    apiKey: myownllm
-  - name: MyOwnLLM (code)
-    provider: openai
-    model: myownllm-code
+    model: myownllm
     apiBase: http://127.0.0.1:1473/v1
     apiKey: myownllm
 ```
@@ -252,7 +244,7 @@ Legacy `config.json` form, if you haven't migrated yet:
 
 ```json
 { "title": "MyOwnLLM", "provider": "openai",
-  "model": "myownllm-text",
+  "model": "myownllm",
   "apiBase": "http://127.0.0.1:1473/v1",
   "apiKey": "myownllm" }
 ```
@@ -264,7 +256,7 @@ Legacy `config.json` form, if you haven't migrated yet:
 ```
 Base URL:  http://127.0.0.1:1473/v1
 API Key:   myownllm
-Model ID:  myownllm-text
+Model ID:  myownllm
 ```
 
 If the Base URL field is missing, update the extension — it was hidden briefly in some 3.x builds and has since been restored. CLI users: `cline provider configure openai-compatible`.
@@ -277,7 +269,7 @@ Flags:
 aider \
   --openai-api-base http://127.0.0.1:1473/v1 \
   --openai-api-key  myownllm \
-  --model           openai/myownllm-code
+  --model           openai/myownllm
 ```
 
 Or `.env` in your project:
@@ -285,7 +277,7 @@ Or `.env` in your project:
 ```
 OPENAI_API_BASE=http://127.0.0.1:1473/v1
 OPENAI_API_KEY=myownllm
-AIDER_MODEL=openai/myownllm-code
+AIDER_MODEL=openai/myownllm
 ```
 
 The `openai/` prefix tells aider's LiteLLM layer to treat it as a generic OpenAI-compatible model and skip token-cost lookups.
@@ -301,8 +293,8 @@ The `openai/` prefix tells aider's LiteLLM layer to treat it as a generic OpenAI
       "MyOwnLLM": {
         "api_url": "http://127.0.0.1:1473/v1",
         "available_models": [
-          { "name": "myownllm-text", "display_name": "MyOwnLLM (text)", "max_tokens": 32768 },
-          { "name": "myownllm-code", "display_name": "MyOwnLLM (code)", "max_tokens": 32768 }
+          { "name": "myownllm",            "display_name": "MyOwnLLM (chat)",       "max_tokens": 32768 },
+          { "name": "myownllm-transcribe", "display_name": "MyOwnLLM (transcribe)", "max_tokens": 32768 }
         ]
       }
     }
@@ -334,7 +326,7 @@ endpoints:
       apiKey: myownllm
       baseURL: http://127.0.0.1:1473/v1
       models:
-        default: ["myownllm-text", "myownllm-code", "myownllm-vision"]
+        default: ["myownllm", "myownllm-transcribe"]
         fetch: false
       titleConvo: true
       modelDisplayLabel: MyOwnLLM
@@ -346,7 +338,7 @@ endpoints:
 from openai import OpenAI
 client = OpenAI(base_url="http://127.0.0.1:1473/v1", api_key="myownllm")
 client.chat.completions.create(
-    model="myownllm-text",
+    model="myownllm",
     messages=[{"role": "user", "content": "hi"}],
 )
 ```
@@ -363,7 +355,7 @@ const client = new OpenAI({
 
 A handful of tools (Msty, some Obsidian plugins, older Open WebUI builds) only know how to talk to `http://localhost:11434`. MyOwnLLM already runs Ollama as a managed child process, so those tools can hit `http://127.0.0.1:11434` directly and see exactly the models MyOwnLLM pulled. Confirm with `myownllm status`.
 
-The trade-off: going through Ollama directly bypasses MyOwnLLM's virtual model IDs (`myownllm-text` etc.), so you'll be naming raw tags like `qwen3.5:9b`. Use MyOwnLLM's URL whenever the client lets you.
+The trade-off: going through Ollama directly bypasses MyOwnLLM's virtual model IDs (`myownllm`, `myownllm-transcribe`), so you'll be naming raw tags like `qwen3.5:9b`. Use MyOwnLLM's URL whenever the client lets you.
 
 ### Clients that only speak Anthropic's wire format
 
@@ -372,7 +364,7 @@ If a tool only accepts `ANTHROPIC_BASE_URL` and the Anthropic Messages API (vani
 ### Troubleshooting
 
 - **`Connection refused`** — `myownllm serve` isn't running, or the client is on a different host. MyOwnLLM binds `127.0.0.1` by default; for LAN access run `myownllm serve --host 0.0.0.0 --bearer-token sk-…` and point the client at that host with the matching key.
-- **`model not found: myownllm-text`** — the client is hitting MyOwnLLM but the manifest doesn't expose that mode. `curl http://127.0.0.1:1473/v1/models` lists what's actually available; `myownllm status` shows which mode resolved.
+- **`model not found: myownllm`** — the client is hitting MyOwnLLM but the manifest doesn't expose that mode (or the active family is missing a `text` tier). `curl http://127.0.0.1:1473/v1/models` lists what's actually available; `myownllm status` shows which mode resolved.
 - **`503 Retry-After`** — the model isn't pulled yet. Wait, or run `myownllm preload text` ahead of time. Clients that respect `Retry-After` will recover on their own.
 - **Client streams nothing then errors** — some clients send `stream: true` but don't handle SSE keep-alive frames. Disable streaming in the client, or pass `?wait=true` so MyOwnLLM streams progress as keep-alives.
 
@@ -399,8 +391,6 @@ If a tool only accepts `ANTHROPIC_BASE_URL` and the Anthropic Messages API (vani
 ```bash
 myownllm                          # open GUI (no args = launch window)
 myownllm run                      # chat in the terminal
-myownllm run --mode vision        # use a vision-capable model
-myownllm run --mode code          # use a code-optimized model
 myownllm run --mode transcribe    # mic → text via Moonshine / Parakeet (auto-picked by tier)
 myownllm run --model qwen2.5:7b   # force a specific model
 myownllm run --profile https://example.com/manifest.json   # one-off manifest URL
@@ -410,11 +400,9 @@ myownllm run --profile https://example.com/manifest.json   # one-off manifest UR
 
 | Mode | What it loads | Notes |
 |------|---------------|-------|
-| `text` | General-purpose LLM | Default |
-| `vision` | Multimodal LLM | Accepts image paths in chat |
-| `code` | Code-optimized LLM | Same chat interface |
-| `transcribe` | Moonshine / Parakeet (per tier) | Activates mic; outputs transcribed text. Pi 5 → Moonshine (English only); capable hardware → Parakeet TDT 0.6B v3 (25 languages). |
-| `diarize`    | pyannote pipeline | Sub-feature of transcribe (opt-in via the transcribe pane's "Identify speakers" toggle). Tags each segment with a speaker ID; click the pill to rename. |
+| `text` | General-purpose LLM | Default; served as virtual ID `myownllm` |
+| `transcribe` | Moonshine / Parakeet (per tier) | Activates mic; outputs transcribed text. Pi 5 → Moonshine (English only); capable hardware → Parakeet TDT 0.6B v3 (25 languages). Served as virtual ID `myownllm-transcribe`. |
+| `diarize`    | pyannote pipeline | Internal sub-feature of transcribe (opt-in via the transcribe pane's "Identify speakers" toggle). Tags each segment with a speaker ID; click the pill to rename. Not exposed as a virtual ID. |
 
 Exit chat: `Ctrl+C` or type `exit`.
 
@@ -549,8 +537,8 @@ Pull and warm models for one or more modes ahead of time. Useful before going of
 
 ```bash
 myownllm preload text                       # pull the text-mode model
-myownllm preload text vision code           # pull all three
-myownllm preload text vision --track        # also persist as tracked modes
+myownllm preload text transcribe            # pull both end-user modes
+myownllm preload text transcribe --track    # also persist as tracked modes
 myownllm preload text --no-warm             # skip post-pull warm-up call
 myownllm preload text --json                # NDJSON event output
 ```
@@ -946,8 +934,8 @@ myownllm models unkeep qwen2.5:32b
 **Mode override** — force a specific model for a mode regardless of provider recommendations. Override models are implicitly kept.
 
 ```bash
-myownllm models override code qwen2.5-coder:14b
-myownllm models override code --clear
+myownllm models override text qwen3.6:14b
+myownllm models override text --clear
 ```
 
 In the GUI: open the Models panel → click "change" next to any mode → pick from any model any of your providers mentions.
@@ -984,7 +972,7 @@ myownllm providers use "Example"
 myownllm families --json | jq '.[].name'
 myownllm families use qwen3
 myownllm status --json | jq '{provider: .active_provider, family: .active_family, recommendations}'
-myownllm run --mode code --quiet
+myownllm run --quiet
 ```
 
 Operations are idempotent. `myownllm providers add` with an existing name updates the URL. `myownllm providers use` is always safe to re-run. Scripts don't need to check first.
@@ -1019,7 +1007,7 @@ The `manifests/` cache stores one entry per URL. When a manifest reached via an 
   "model_cleanup_days": 1,
   "kept_models": ["qwen3.6:35b"],
   "mode_overrides": {
-    "code": "qwen3.5:9b",
+    "text": "qwen3.6:14b",
     "transcribe": null
   },
   "api": {

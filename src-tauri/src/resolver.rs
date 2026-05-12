@@ -26,7 +26,17 @@ use tokio::time::Duration;
 use crate::hardware::HardwareProfile;
 
 pub const VIRTUAL_PREFIX: &str = "myownllm-";
-pub const KNOWN_MODES: &[&str] = &["text", "vision", "code", "transcribe", "diarize"];
+/// Modes the resolver knows how to look up against a manifest. `text` and
+/// `transcribe` are the two end-user surfaces; `diarize` is internal to the
+/// transcription pipeline (opt-in via the GUI), not a public virtual ID.
+pub const KNOWN_MODES: &[&str] = &["text", "transcribe", "diarize"];
+
+/// Virtual model IDs exposed to OpenAI-compatible clients via `/v1/models`,
+/// paired with the mode each one resolves to. Keep this list narrow: bare
+/// `myownllm` is the default chat model, `myownllm-transcribe` is the ASR
+/// surface. Internal modes (`diarize`) are not advertised.
+pub const PUBLIC_VIRTUAL_IDS: &[(&str, &str)] =
+    &[("myownllm", "text"), ("myownllm-transcribe", "transcribe")];
 const DEFAULT_TTL_MIN: f64 = 360.0;
 const FALLBACK_MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/manifests/default.json";
@@ -413,9 +423,15 @@ pub fn tracked_modes() -> Result<Vec<String>> {
     Ok(modes)
 }
 
-/// Translate a virtual model ID (e.g. "myownllm-text") to its current resolved tag.
-/// Returns the input unchanged if it doesn't look like a virtual ID.
+/// Translate a virtual model ID (e.g. "myownllm" or "myownllm-transcribe") to
+/// its current resolved tag. Returns the input unchanged if it doesn't look
+/// like a virtual ID.
 pub async fn translate_virtual(requested: &str) -> Result<String> {
+    for (id, mode) in PUBLIC_VIRTUAL_IDS {
+        if requested == *id {
+            return resolve(mode).await;
+        }
+    }
     if let Some(mode) = requested.strip_prefix(VIRTUAL_PREFIX) {
         if KNOWN_MODES.contains(&mode) {
             return resolve(mode).await;

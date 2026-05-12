@@ -420,9 +420,9 @@ struct ModelEntry {
 
 async fn api_models() -> impl IntoResponse {
     let mut data = Vec::new();
-    for mode in crate::resolver::KNOWN_MODES {
+    for (id, mode) in crate::resolver::PUBLIC_VIRTUAL_IDS {
         data.push(ModelEntry {
-            id: format!("{}{}", crate::resolver::VIRTUAL_PREFIX, mode),
+            id: (*id).to_string(),
             label: format!("myownllm · {mode}"),
         });
     }
