@@ -195,16 +195,18 @@ pub const REGISTRY: &[ModelSpec] = &[
             min_bytes: 4_000_000,
         }],
     },
-    // wespeaker-voxceleb-resnet34-LM — 25 MB, 256-d L2-normalized speaker
-    // embeddings via 3D-Speaker's ungated ONNX mirror. The "capable
-    // hardware" embedder.
+    // wespeaker-voxceleb-resnet34-LM — 26.5 MB, 256-d L2-normalized speaker
+    // embeddings via the ungated onnx-community mirror. The "capable
+    // hardware" embedder. (The sherpa-onnx-3d-speaker copy started
+    // returning HTTP 401 — gated or renamed — so we point at the
+    // onnx-community export which is public.)
     ModelSpec {
         name: "wespeaker-r34",
         kind: ModelKind::Diarize,
         artifacts: &[Artifact {
             filename: "embedder.onnx",
-            url: "https://huggingface.co/csukuangfj/sherpa-onnx-3d-speaker/resolve/main/wespeaker_voxceleb_resnet34_LM.onnx",
-            approx_bytes: 25_000_000,
+            url: "https://huggingface.co/onnx-community/wespeaker-voxceleb-resnet34-LM/resolve/main/onnx/model.onnx",
+            approx_bytes: 27_000_000,
             min_bytes: 18_000_000,
         }],
     },
