@@ -904,7 +904,20 @@ fn run_session(
         params.set_print_timestamps(false);
         params.set_no_context(false);
         params.set_single_segment(true);
+        // Abort whisper mid-decode if the user clicks Stop. Without this,
+        // `state.full()` blocks for several seconds per chunk on CPU-only
+        // builds (Windows + larger models hit this hardest), so pressing
+        // Stop appeared to do nothing until the in-flight chunk finished.
+        // The eager-cancel check at the top of the loop only catches
+        // between-chunk cancels.
+        let abort_cancel = cancel.clone();
+        params.set_abort_callback_safe(move || abort_cancel.load(Ordering::Relaxed));
         if let Err(e) = state.full(params, &samples) {
+            // Aborts come back as Err — if cancel is set, the user
+            // stopped us; bail without logging or remarking on it.
+            if cancel.load(Ordering::SeqCst) {
+                break;
+            }
             eprintln!("whisper full failed: {e}");
             let _ = std::fs::remove_file(&next_path);
             next_seq += 1;
@@ -1087,7 +1100,17 @@ fn run_drain(
         params.set_print_timestamps(false);
         params.set_no_context(false);
         params.set_single_segment(true);
+        // Mirror the abort callback wired up in run_session — see the
+        // matching block there for the rationale. Drain mode hits this
+        // even harder because the whole point of a drain is to chew
+        // through a possibly-large backlog, and the user has to be able
+        // to walk away from one.
+        let abort_cancel = cancel.clone();
+        params.set_abort_callback_safe(move || abort_cancel.load(Ordering::Relaxed));
         if let Err(e) = state.full(params, &samples) {
+            if cancel.load(Ordering::SeqCst) {
+                break;
+            }
             eprintln!("whisper full failed: {e}");
             let _ = std::fs::remove_file(&next_path);
             next_seq += 1;
