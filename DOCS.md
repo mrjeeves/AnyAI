@@ -810,13 +810,27 @@ The updater stages the new binary at `~/.myownllm/updates/<version>/`, verifies 
 
 **Disable:**
 
+Three ways, from most to least durable:
+
+```bash
+myownllm update disable   # persistent: flips auto_update.enabled = false in config
+myownllm update enable    # turn it back on
+```
+
+The GUI's **Settings → Updates** tab has an "Automatic updates" toggle that does
+the same thing. The "Check for updates" button there keeps working when
+auto-update is disabled — a disabled toggle only stops the *background* checks,
+not your ability to manually pull an update.
+
 ```jsonc
 // ~/.myownllm/config.json (defaults shown)
 "auto_update": {
   "enabled": true,
   "channel": "stable",          // "stable" | "beta"
   "auto_apply": "patch",        // "patch" | "minor" | "all" | "none"
-  "check_interval_hours": 6
+  "check_interval_hours": 6,
+  "stable_url": null,           // optional override; falls back to build-time default
+  "beta_url": null              // optional override; falls back to build-time default
 }
 ```
 
@@ -824,7 +838,34 @@ The updater stages the new binary at `~/.myownllm/updates/<version>/`, verifies 
 MYOWNLLM_AUTOUPDATE=0 myownllm serve   # one-shot opt-out
 ```
 
-`myownllm update status` shows the current version, install kind, and any pending update.
+`myownllm update status` shows the current version, install kind, the active
+release-feed URL (with a `(custom)` marker if redirected), and any pending update.
+
+### Pointing at your own release host
+
+If you're shipping a private fork or vendoring MyOwnLLM behind a corporate
+mirror, redirect the update feed without forking the source. You have two
+layers:
+
+1. **Per-machine (config):** set `auto_update.stable_url` and / or
+   `auto_update.beta_url` in `~/.myownllm/config.json` to your own URLs.
+   The endpoints must speak the GitHub releases JSON shape — for `stable_url`,
+   return a single release object; for `beta_url`, return an array (newest
+   first). Each release needs a `tag_name` and an `assets` array of
+   `{name, browser_download_url}` pointing at the binary tarballs plus a
+   `SHA256SUMS` sidecar.
+
+2. **Build-time defaults:** when you rebuild the binary, set these env
+   vars and they're baked in as the fallback if no config override exists:
+
+   ```bash
+   MYOWNLLM_RELEASE_URL_STABLE=https://releases.example.com/myownllm/latest \
+   MYOWNLLM_RELEASE_URL_BETA=https://releases.example.com/myownllm/beta \
+     cargo build --release
+   ```
+
+   This mirrors how `providers/preset.json` lets you ship build-time provider
+   defaults — same idea, different config key.
 
 ---
 
@@ -969,7 +1010,9 @@ The `manifests/` cache stores one entry per URL. When a manifest reached via an 
     "enabled": true,
     "channel": "stable",
     "auto_apply": "patch",
-    "check_interval_hours": 6
+    "check_interval_hours": 6,
+    "stable_url": null,
+    "beta_url": null
   },
   "providers": [
     { "name": "MyOwnLLM Default", "url": "https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/manifests/default.json" },

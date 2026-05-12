@@ -52,6 +52,7 @@ COMMANDS:
   import <url>  Import config from URL or file
   export        Export config
   update        Update to the latest release (one shot: check + download + apply)
+                Subcommands: status | check | apply | enable | disable
 
 FLAGS (run):
   --mode <text|vision|code|transcribe>

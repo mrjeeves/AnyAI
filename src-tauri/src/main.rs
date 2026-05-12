@@ -367,6 +367,15 @@ fn update_apply_now(app: tauri::AppHandle) -> Result<(), String> {
     app.restart()
 }
 
+/// Toggle `auto_update.enabled` from the GUI's Updates settings tab. The
+/// background watcher reads the config on each tick, so the new value takes
+/// effect on the next tick without needing a restart.
+#[tauri::command]
+fn update_set_enabled(enabled: bool) -> Result<self_update::UpdateStatus, String> {
+    self_update::set_enabled(enabled).map_err(|e| e.to_string())?;
+    self_update::status().map_err(|e| e.to_string())
+}
+
 /// WebKitGTK's DMA-BUF zero-copy renderer produces scrambled / torn frames
 /// on Raspberry Pi GPUs under Wayland — the window draws but content is
 /// unreadable, looking like the graphics "don't fit on screen." Disabling
@@ -462,6 +471,7 @@ fn main() {
             update_status,
             update_check_now,
             update_apply_now,
+            update_set_enabled,
             remote_ui_status,
             remote_ui_set_enabled,
             remote_ui_qr,

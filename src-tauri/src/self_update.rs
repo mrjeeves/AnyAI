@@ -22,8 +22,21 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const RELEASE_API_STABLE: &str = "https://api.github.com/repos/mrjeeves/MyOwnLLM/releases/latest";
-const RELEASE_API_BETA: &str = "https://api.github.com/repos/mrjeeves/MyOwnLLM/releases";
+// Build-time overridable defaults. A vendor can point the same binary at their
+// own release host by setting these env vars at compile time:
+//   MYOWNLLM_RELEASE_URL_STABLE=https://example.com/releases/latest cargo build
+// At runtime, `auto_update.stable_url` / `auto_update.beta_url` in config.json
+// take precedence over these defaults, so end users can also redirect without
+// rebuilding.
+pub(crate) fn default_release_api_stable() -> &'static str {
+    option_env!("MYOWNLLM_RELEASE_URL_STABLE")
+        .unwrap_or("https://api.github.com/repos/mrjeeves/MyOwnLLM/releases/latest")
+}
+pub(crate) fn default_release_api_beta() -> &'static str {
+    option_env!("MYOWNLLM_RELEASE_URL_BETA")
+        .unwrap_or("https://api.github.com/repos/mrjeeves/MyOwnLLM/releases")
+}
+
 const USER_AGENT: &str = concat!("myownllm-self-update/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,6 +270,14 @@ pub struct UpdateStatus {
     /// Unix seconds of the last successful check, if any.
     pub last_check_unix: Option<i64>,
     pub pending: Option<PendingUpdate>,
+    /// Effective release-feed URL for the active channel. Reflects, in priority
+    /// order: `auto_update.stable_url`/`beta_url` in config → the build-time
+    /// `MYOWNLLM_RELEASE_URL_*` override → the GitHub default.
+    pub release_url: String,
+    /// True when `release_url` is not the project's GitHub default — i.e. the
+    /// binary was rebuilt with `MYOWNLLM_RELEASE_URL_*` set, or the user
+    /// overrode it in `~/.myownllm/config.json`.
+    pub release_url_overridden: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -289,17 +310,45 @@ pub fn status() -> Result<UpdateStatus> {
         InstallKind::Raw => "raw",
         InstallKind::PackageManager => "package_manager",
     };
+    let channel = au["channel"].as_str().unwrap_or("stable").to_string();
+    let release_url = resolve_release_url(au, &channel);
+    let release_url_overridden = release_url != github_default_release_url(&channel);
 
     Ok(UpdateStatus {
         current_version: env!("CARGO_PKG_VERSION").to_string(),
         install_kind: install_kind.to_string(),
         enabled: au["enabled"].as_bool().unwrap_or(true),
-        channel: au["channel"].as_str().unwrap_or("stable").to_string(),
+        channel,
         auto_apply: au["auto_apply"].as_str().unwrap_or("patch").to_string(),
         check_interval_hours: au["check_interval_hours"].as_f64().unwrap_or(6.0),
         last_check_unix: read_last_check(),
         pending: read_pending_or_clean()?,
+        release_url,
+        release_url_overridden,
     })
+}
+
+/// The MyOwnLLM project's own GitHub release endpoints, used to detect when
+/// the effective release URL has been redirected away from upstream.
+fn github_default_release_url(channel: &str) -> &'static str {
+    if channel == "beta" {
+        "https://api.github.com/repos/mrjeeves/MyOwnLLM/releases"
+    } else {
+        "https://api.github.com/repos/mrjeeves/MyOwnLLM/releases/latest"
+    }
+}
+
+/// Persist `auto_update.enabled`. Used by the CLI (`update enable`/`disable`)
+/// and the GUI toggle so both surfaces share one code path.
+pub fn set_enabled(enabled: bool) -> Result<()> {
+    let mut cfg = crate::resolver::load_config_value()?;
+    let au = cfg
+        .get_mut("auto_update")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("config missing auto_update"))?;
+    au.insert("enabled".to_string(), Value::Bool(enabled));
+    crate::resolver::save_config_value(&cfg)?;
+    Ok(())
 }
 
 /// Read `~/.myownllm/updates/pending.json` and return it only if it actually
@@ -449,15 +498,31 @@ fn detect_install_kind_from_path(path_str: &str) -> InstallKind {
 // ---------------------------------------------------------------------------
 
 async fn fetch_release(channel: &str) -> Result<Value> {
+    let cfg = crate::resolver::load_config_value().unwrap_or_else(|_| serde_json::json!({}));
+    fetch_release_at(channel, &resolve_release_url(&cfg["auto_update"], channel)).await
+}
+
+/// Resolve which release-feed URL to use. Order: explicit `auto_update.stable_url`
+/// / `auto_update.beta_url` in config → build-time `MYOWNLLM_RELEASE_URL_*`
+/// override → the project's GitHub releases endpoint.
+pub(crate) fn resolve_release_url(au: &Value, channel: &str) -> String {
+    let (key, fallback) = if channel == "beta" {
+        ("beta_url", default_release_api_beta())
+    } else {
+        ("stable_url", default_release_api_stable())
+    };
+    au.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+async fn fetch_release_at(channel: &str, url: &str) -> Result<Value> {
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .timeout(Duration::from_secs(15))
         .build()?;
-    let url = if channel == "beta" {
-        RELEASE_API_BETA
-    } else {
-        RELEASE_API_STABLE
-    };
     let resp = client.get(url).send().await?;
     if !resp.status().is_success() {
         return Err(anyhow!("releases endpoint returned {}", resp.status()));
@@ -983,6 +1048,17 @@ pub async fn cmd_update(args: &[String]) -> Result<()> {
             println!("Applied (or no pending update). The next process start runs the new binary.");
             Ok(())
         }
+        Some("enable") => {
+            set_enabled(true)?;
+            println!("auto_update.enabled = true (written to ~/.myownllm/config.json)");
+            Ok(())
+        }
+        Some("disable") => {
+            set_enabled(false)?;
+            println!("auto_update.enabled = false (written to ~/.myownllm/config.json)");
+            println!("Background self-update checks will not run. Use `myownllm update enable` to re-enable.");
+            Ok(())
+        }
         Some(unknown) => Err(anyhow!("unknown update subcommand: {unknown}")),
     }
 }
@@ -1081,7 +1157,8 @@ async fn run_update_now() -> Result<()> {
 
 async fn print_status() -> Result<()> {
     let kind = detect_install_kind();
-    println!("Current version : {}", env!("CARGO_PKG_VERSION"));
+    let s = status()?;
+    println!("Current version : {}", s.current_version);
     println!(
         "Install kind    : {}",
         match kind {
@@ -1089,7 +1166,21 @@ async fn print_status() -> Result<()> {
             InstallKind::PackageManager => "package-manager (self-update disabled)",
         }
     );
-    match read_pending_or_clean()? {
+    println!(
+        "Auto-update     : {}",
+        if s.enabled { "enabled" } else { "disabled" }
+    );
+    println!("Channel         : {}", s.channel);
+    println!(
+        "Release feed    : {}{}",
+        s.release_url,
+        if s.release_url_overridden {
+            " (custom)"
+        } else {
+            ""
+        }
+    );
+    match s.pending {
         Some(p) => println!("Pending         : {} staged at {}", p.version, p.staged_at),
         None => println!("Pending         : none"),
     }
@@ -1101,6 +1192,53 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::cmp::Ordering;
+
+    #[test]
+    fn resolve_release_url_falls_back_to_build_default_when_config_empty() {
+        let au = json!({});
+        assert_eq!(
+            resolve_release_url(&au, "stable"),
+            default_release_api_stable()
+        );
+        assert_eq!(resolve_release_url(&au, "beta"), default_release_api_beta());
+    }
+
+    #[test]
+    fn resolve_release_url_honors_config_override() {
+        let au = json!({
+            "stable_url": "https://mirror.example/releases/latest",
+            "beta_url":   "https://mirror.example/releases",
+        });
+        assert_eq!(
+            resolve_release_url(&au, "stable"),
+            "https://mirror.example/releases/latest"
+        );
+        assert_eq!(
+            resolve_release_url(&au, "beta"),
+            "https://mirror.example/releases"
+        );
+    }
+
+    #[test]
+    fn resolve_release_url_treats_unknown_channel_as_stable() {
+        let au = json!({ "stable_url": "https://mirror.example/x" });
+        assert_eq!(
+            resolve_release_url(&au, "weekly-experimental"),
+            "https://mirror.example/x"
+        );
+    }
+
+    #[test]
+    fn resolve_release_url_ignores_empty_string_override() {
+        // A blank override in config.json (`"stable_url": ""`) is a
+        // misconfiguration, not an intent to break updates — fall through to
+        // the compile-time default rather than firing a request at "".
+        let au = json!({ "stable_url": "" });
+        assert_eq!(
+            resolve_release_url(&au, "stable"),
+            default_release_api_stable()
+        );
+    }
 
     #[test]
     fn compare_semver_orders_versions() {

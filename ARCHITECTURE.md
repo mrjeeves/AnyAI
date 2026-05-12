@@ -164,12 +164,16 @@ Config (in `~/.myownllm/config.json`):
     "enabled": true,
     "channel": "stable",          // "stable" | "beta"
     "auto_apply": "patch",        // "patch" | "minor" | "all" | "none"
-    "check_interval_hours": 6
+    "check_interval_hours": 6,
+    "stable_url": null,           // optional override; falls back to build-time default
+    "beta_url": null              // optional override; falls back to build-time default
   }
 }
 ```
 
-Disabling: `auto_update.enabled = false`, or `MYOWNLLM_AUTOUPDATE=0`. When MyOwnLLM detects a package-manager install, the updater logs a one-line note and stays out of the way regardless of config.
+Disabling: `myownllm update disable`, the "Automatic updates" toggle in the GUI's Settings → Updates tab, `auto_update.enabled = false` in config, or `MYOWNLLM_AUTOUPDATE=0` for a one-shot opt-out. When MyOwnLLM detects a package-manager install, the updater logs a one-line note and stays out of the way regardless of config.
+
+Redirecting the release feed: set `auto_update.stable_url` / `auto_update.beta_url` in config, or bake new defaults into a build with the `MYOWNLLM_RELEASE_URL_STABLE` / `MYOWNLLM_RELEASE_URL_BETA` env vars at compile time (resolved via `option_env!` in `self_update.rs`, the same pattern `providers/preset.json` uses for shipping build-time provider defaults).
 
 ## Why no extra HTTP framework?
 
