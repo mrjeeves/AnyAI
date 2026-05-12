@@ -72,7 +72,7 @@ The current GUI keeps audio capture local to the host machine; the LAN remote vi
 |   |   |
 |---|---|
 | **Three wire formats, one server** | OpenAI on `:1473`, plus Ollama and Anthropic. Point Cursor, Continue, Aider, Cline, Zed, Open WebUI, opencode, OpenClaw, OpenClaude or your own scripts at it and it just works. |
-| **Virtual model IDs** | `myownllm-text`, `myownllm-vision`, `myownllm-code`, `myownllm-transcribe`. Stable names; the right tag for your hardware auto-resolves. |
+| **Virtual model IDs** | `myownllm` and `myownllm-transcribe`. Stable names; the right tag for your hardware auto-resolves. |
 | **Manifests, not config** | A JSON file at a URL is the source of truth. `imports` compose merged catalogs across publishers — no coordination required. |
 | **Runs on a Pi 5** | Default manifest ships Gemma 4 edge variants (`e2b` / `e4b`), Apache-2.0, ~7.6 tok/s on a Pi 5. Same manifest gives a 4090 the 4090 tag. |
 | **Desktop GUI** | Tauri + Svelte 5. Two singleton slots (chat-model, transcription) with conversation folders, in-place rename, crash-recoverable state. |
