@@ -1,7 +1,10 @@
 <script lang="ts">
   import { onDestroy, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { open as openDialog } from "@tauri-apps/plugin-dialog";
+  import {
+    open as openDialog,
+    save as saveDialog,
+  } from "@tauri-apps/plugin-dialog";
   import ModeBar from "./ModeBar.svelte";
   import StatusBar from "./StatusBar.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
@@ -25,6 +28,8 @@
     loadConversation,
     saveConversation,
     newConversation,
+    undoTalkingPoints,
+    downloadTalkingPoints,
     type Conversation,
     type TranscriptSegment,
   } from "../conversations";
@@ -47,6 +52,7 @@
     onRequestStopChat,
     onRequestStartRecording,
     onRequestActivateTalkingPoints,
+    onRequestRegenerateTalkingPoints,
   } = $props<{
     activeModel: string;
     activeMode: Mode;
@@ -73,6 +79,12 @@
      *  check against the chat slot and forwards to the chat-slot
      *  store. */
     onRequestActivateTalkingPoints: () => void;
+    /** Run a one-shot regenerate. App resolves the chat model + checks
+     *  the slot; the returned promise resolves to `null` on success or
+     *  an error message to surface inline. */
+    onRequestRegenerateTalkingPoints: (
+      conversationId: string,
+    ) => Promise<string | null>;
   }>();
 
   /** Mirror of `models::ModelInfo` in src-tauri. */
@@ -93,6 +105,15 @@
    *  Drives the inline progress text on the toggle itself. */
   let diarizePullStatus = $state("");
   let talkingPoints = $state<string[]>([]);
+  /** One-step undo buffer for talking points. Populated when the user
+   *  regenerates: the prior bullets stash here so the Undo button can
+   *  swap them back. Sourced from `conversation.talking_points_prev`. */
+  let talkingPointsPrev = $state<string[]>([]);
+  /** Inline error/status copy for the regenerate + download flows.
+   *  Distinct from `transcribeError` so a TP-side failure doesn't paint
+   *  over a record/upload error and vice-versa. */
+  let tpActionStatus = $state("");
+  let tpRegenBusy = $state(false);
   let sessionName = $state("");
   let settingsTab = $state<SettingsTab | null>(null);
   let transcribeError = $state("");
@@ -127,6 +148,8 @@
       speakerLabels = {};
       diarizeEnabled = false;
       talkingPoints = [];
+      talkingPointsPrev = [];
+      tpActionStatus = "";
       sessionName = "";
       return;
     }
@@ -138,6 +161,8 @@
       speakerLabels = c.speaker_labels ?? {};
       diarizeEnabled = c.diarize_enabled ?? false;
       talkingPoints = c.talking_points ?? [];
+      talkingPointsPrev = c.talking_points_prev ?? [];
+      tpActionStatus = "";
       sessionName = c.title === "New chat" ? "" : c.title;
     });
     return () => {
@@ -158,6 +183,8 @@
     speakerLabels = {};
     diarizeEnabled = false;
     talkingPoints = [];
+    talkingPointsPrev = [];
+    tpActionStatus = "";
     sessionName = "";
     if (transcribeUi.active && transcribeUi.conversationId === conversationId) {
       stopRecording().then(() => {
@@ -665,12 +692,106 @@
       .then((c) => {
         if (cancelled || !c) return;
         talkingPoints = c.talking_points ?? [];
+        talkingPointsPrev = c.talking_points_prev ?? [];
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
   });
+
+  /** Hand-roll a markdown-safe filename from the session title so the save
+   *  dialog defaults to something the user actually recognises. Falls back
+   *  to "talking-points" so we never produce an empty default. */
+  function defaultDownloadName(): string {
+    const raw = (sessionName.trim() || activeConversation?.title || "talking-points");
+    const safe = raw.replace(/[^A-Za-z0-9 _-]+/g, " ").trim().replace(/\s+/g, "-");
+    return (safe || "talking-points").slice(0, 60) + ".md";
+  }
+
+  async function undoTp() {
+    const id = conversationId;
+    if (!id) return;
+    tpActionStatus = "";
+    try {
+      const c = await undoTalkingPoints(id);
+      if (c) {
+        activeConversation = c;
+        talkingPoints = c.talking_points ?? [];
+        talkingPointsPrev = c.talking_points_prev ?? [];
+      }
+    } catch (e) {
+      tpActionStatus = `Undo failed: ${e}`;
+    }
+  }
+
+  async function regenTp() {
+    const id = conversationId;
+    if (!id) return;
+    if (tpRegenBusy) return;
+    if (transcript.length === 0) {
+      tpActionStatus = "No transcript yet to summarise.";
+      return;
+    }
+    tpRegenBusy = true;
+    tpActionStatus = "Regenerating talking points…";
+    try {
+      const err = await onRequestRegenerateTalkingPoints(id);
+      if (err) {
+        tpActionStatus = err;
+      } else {
+        tpActionStatus = "";
+      }
+      // Refresh from disk regardless — even on error a partial update may
+      // have landed, and on success this picks up the new bullets + the
+      // archived `prev` for the Undo button.
+      const c = await loadConversation(id);
+      if (c) {
+        activeConversation = c;
+        talkingPoints = c.talking_points ?? [];
+        talkingPointsPrev = c.talking_points_prev ?? [];
+      }
+    } finally {
+      tpRegenBusy = false;
+    }
+  }
+
+  async function downloadTp() {
+    const id = conversationId;
+    if (!id) return;
+    if (talkingPoints.length === 0) {
+      tpActionStatus = "No talking points to download yet.";
+      return;
+    }
+    tpActionStatus = "";
+    let dest: string | null;
+    try {
+      dest = await saveDialog({
+        title: "Download talking points",
+        defaultPath: defaultDownloadName(),
+        filters: [{ name: "Markdown", extensions: ["md"] }],
+      });
+    } catch (e) {
+      tpActionStatus = `Save dialog failed: ${e}`;
+      return;
+    }
+    if (!dest) return;
+    try {
+      await downloadTalkingPoints(id, dest);
+      tpActionStatus = `Saved to ${dest}`;
+    } catch (e) {
+      tpActionStatus = `Download failed: ${e}`;
+    }
+  }
+
+  // Show Regenerate when the slot is free *or* held by our own live TP loop
+  // (so the user can stop+regen). We disable the button while a regen call
+  // is in flight to avoid double-firing.
+  let canRegenerate = $derived(
+    transcript.length > 0 && chatSlot.kind === null && !tpRegenBusy,
+  );
+  let canUndo = $derived(talkingPointsPrev.length > 0 && !tpRegenBusy);
+  let canDownload = $derived(talkingPoints.length > 0);
 </script>
 
 <div class="transcribe-shell">
@@ -787,7 +908,44 @@
             {chatSlot.status === "paused" ? "paused" : "live"}
           </span>
         {/if}
+        <span class="tp-toolbar">
+          {#if canUndo}
+            <button
+              class="tp-tool"
+              onclick={undoTp}
+              title="Swap back to the previous talking points"
+            >
+              Undo
+            </button>
+          {/if}
+          {#if transcript.length > 0}
+            <button
+              class="tp-tool"
+              onclick={regenTp}
+              disabled={!canRegenerate}
+              title={chatSlot.kind !== null
+                ? "Stop the current chat or live Talking Points to regenerate"
+                : tpRegenBusy
+                  ? "Regenerating…"
+                  : "Regenerate a fresh summary from the whole transcript"}
+            >
+              {tpRegenBusy ? "Regenerating…" : "Regenerate"}
+            </button>
+          {/if}
+          {#if canDownload}
+            <button
+              class="tp-tool"
+              onclick={downloadTp}
+              title="Save the talking points as a Markdown file"
+            >
+              Download
+            </button>
+          {/if}
+        </span>
       </header>
+      {#if tpActionStatus}
+        <div class="tp-status" role="status">{tpActionStatus}</div>
+      {/if}
       <div class="pane-body" use:stickToBottom={talkingPoints}>
         {#if isMyTalkingPoints}
           {#if talkingPoints.length > 0}
@@ -1127,6 +1285,41 @@
     text-transform: uppercase;
     letter-spacing: .06em;
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .tp-toolbar {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: .3rem;
+  }
+  .tp-tool {
+    background: none;
+    border: 1px solid #2a2a3a;
+    color: #ccc;
+    padding: .25rem .55rem;
+    border-radius: 5px;
+    font-size: .72rem;
+    font-family: inherit;
+    cursor: pointer;
+    transition: border-color .12s, background .12s, color .12s;
+  }
+  .tp-tool:hover:not(:disabled) {
+    border-color: #4a3a7a;
+    background: #1a1730;
+    color: #fff;
+  }
+  .tp-tool:disabled {
+    opacity: .45;
+    cursor: not-allowed;
+  }
+  .tp-status {
+    padding: .35rem .85rem;
+    font-size: .72rem;
+    color: #b8b8d4;
+    background: #161624;
+    border-bottom: 1px solid #1a1a28;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    line-height: 1.5;
   }
   .tp-dot {
     width: 7px; height: 7px; border-radius: 50%;
