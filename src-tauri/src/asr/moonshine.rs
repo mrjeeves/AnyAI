@@ -116,7 +116,7 @@ impl AsrBackend for MoonshineBackend {
 
         let encoder = Session::builder()
             .map_err(|e| anyhow!("ort builder: {e}"))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .with_optimization_level(GraphOptimizationLevel::Level1)
             .map_err(|e| anyhow!("ort opt level: {e}"))?
             .with_intra_threads(intra_threads())
             .map_err(|e| anyhow!("ort threads: {e}"))?
@@ -126,7 +126,7 @@ impl AsrBackend for MoonshineBackend {
 
         let decoder = Session::builder()
             .map_err(|e| anyhow!("ort builder: {e}"))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .with_optimization_level(GraphOptimizationLevel::Level1)
             .map_err(|e| anyhow!("ort opt level: {e}"))?
             .with_intra_threads(intra_threads())
             .map_err(|e| anyhow!("ort threads: {e}"))?
