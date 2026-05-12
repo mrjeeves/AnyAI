@@ -1,72 +1,65 @@
+<div align="center">
+
 # MyOwnLLM
 
-> A local API surface for local AI. Self-host the JSON, set it, forget it.
+### A local API surface for local AI.<br>Self-host the JSON, set it, forget it.
+
+[**myownllm.net**](https://myownllm.net) — installers, screenshots, the pitch
+
+[Docs](DOCS.md) · [Architecture](ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md) · [License](LICENSE)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platforms](https://img.shields.io/badge/platforms-macOS_·_Linux_·_Windows_·_Pi_5-2ea44f.svg)](DOCS.md#installation)
 [![OpenAI-compatible](https://img.shields.io/badge/OpenAI-compatible-10a37f.svg)](DOCS.md#api-server)
+[![Ollama-compatible](https://img.shields.io/badge/Ollama-compatible-ff7a59.svg)](DOCS.md#api-server)
+[![Anthropic-compatible](https://img.shields.io/badge/Anthropic-compatible-d97757.svg)](DOCS.md#api-server)
 
-This is the entire README, I promise. Everything else lives in [DOCS.md](DOCS.md) — somewhere between picking a model, downloading it, hosting it, speaking four wire formats, shipping a desktop app, transcribing meetings, and updating itself, the scope got away from me. Please keep reading. I made this for you.
+</div>
+
+---
+
+A single binary turns whatever machine it lands on — a Pi 5, a laptop, a workstation — into a local OpenAI-compatible endpoint. A JSON manifest (yours, your team's, or one you trust) decides which model runs where. Clients keep speaking OpenAI; the hardware-shaped substitution happens underneath.
 
 ## Install
 
-**macOS / Linux**
+The fast path is [**myownllm.net**](https://myownllm.net) — signed installers for every platform.
 
-```bash
+Or one line in a shell:
+
+```sh
+# macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/scripts/install.sh | sh
-```
 
-**Windows**
-
-```powershell
+# Windows
 irm https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/scripts/install.ps1 | iex
 ```
 
-Run `myownllm` to open the GUI. That's it for setup.
+Then:
 
-> Power users: `myownllm serve` starts the headless API server, and `myownllm run` opens a terminal chat. See the [CLI](#cli) section below.
+```sh
+myownllm          # opens the GUI
+myownllm serve    # headless API on :1473
+myownllm run      # terminal chat
+```
 
-## Features
+## Highlights
 
-**API**
-- OpenAI-compatible HTTP API on `127.0.0.1:1473` — drop into Cursor / Continue / Aider / Cline / Zed / Open WebUI / LibreChat / opencode / OpenClaw / OpenClaude / anything that speaks OpenAI
-- Also speaks the Ollama wire format (port 11434) and Anthropic's wire format, so clients that only speak those just work
-- Virtual model IDs: `myownllm-text`, `myownllm-vision`, `myownllm-code`, `myownllm-transcribe` — one stable name per mode, the actual model auto-resolves to the best tag for your hardware
-- Streaming, tool use, vision input, JSON mode — passes through whatever the underlying model supports
-
-**Models**
-- Static JSON manifest decides which model runs where — your machine, your team's machine, a publisher you trust
-- JSON `import`s let an org or community compose merged catalogs without coordinating servers
-- Automatic hardware-tier resolution — same manifest gives a Pi 5 the right tag and a 4090 the right tag
-- Default manifest ships Gemma 4's edge variants (`e2b` / `e4b`) — agentic, multimodal, Apache-2.0, ~7.6 tok/s on a Pi 5
-- Per-mode TTL eviction so disks don't fill up with models you tried once
-- Background pre-pull of mode-relevant models so a switch into transcribe / vision "just works"
-
-**Desktop GUI** (Tauri + Svelte 5)
-- Two singleton slots: one chat-model, one transcription — pause/stop controls live on the mode buttons themselves
-- Conversation sidebar with folders, drag-to-organise, rename in place
-- Live transcription with Moonshine (Pi 5, English) and Parakeet TDT 0.6B v3 (16+ GB Mac / x86, 25 langs) — ~1 s end-to-end, mic-pause keeps draining the backlog
-- **Speaker diarization** — opt-in "Identify speakers" toggle on the transcribe pane; pyannote-segmentation-3.0 + speaker embeddings + online clustering. English-only on Pi 5 today; everything else multilingual.
-- **Talking Points** — continuously summarises a live transcript into a bullet list, claims the chat-model slot while running
-- Auto-titled conversations, persistent across sessions, recoverable after a crash
-- LAN remote: open the GUI from your phone on the same network, single-user lock with kick-and-hide
-
-**Operations**
-- Self-updating binary — checks GitHub on launch, stages quietly, applies on next start
-- `myownllm status` shows provider, hardware tier, ollama state, update status in one screen
-- Graceful degradation: no network, no problem — last good manifest is cached and kept
-- Crash-resilient transcription buffer — chunks land on disk before the ASR backend sees them, so a force-quit can be drained on next launch
-- Scriptable end to end — every CLI subcommand returns parseable text or `--json`
-
-**Providers & Families**
-- Provider = a manifest URL. Family = a curated bundle inside it (e.g. `gemma4`, `qwen3-coder`).
-- Switch providers, families, or per-mode overrides without touching client config
-- Publish your own manifest — anyone pointing at the URL gets your picks
-- See [DOCS.md › Provider system](DOCS.md#provider-system)
+|   |   |
+|---|---|
+| **Three wire formats, one server** | OpenAI on `:1473`, plus Ollama and Anthropic. Point Cursor, Continue, Aider, Cline, Zed, Open WebUI, opencode, OpenClaw, OpenClaude or your own scripts at it and it just works. |
+| **Virtual model IDs** | `myownllm-text`, `myownllm-vision`, `myownllm-code`, `myownllm-transcribe`. Stable names; the right tag for your hardware auto-resolves. |
+| **Manifests, not config** | A JSON file at a URL is the source of truth. `imports` compose merged catalogs across publishers — no coordination required. |
+| **Runs on a Pi 5** | Default manifest ships Gemma 4 edge variants (`e2b` / `e4b`), Apache-2.0, ~7.6 tok/s on a Pi 5. Same manifest gives a 4090 the 4090 tag. |
+| **Live transcription** | Moonshine on Pi 5, Parakeet TDT 0.6B v3 elsewhere, ~1 s end-to-end. Opt-in speaker diarization via pyannote-seg-3.0. |
+| **Talking Points** | Continuously summarises a live transcript into a bullet list while you talk. |
+| **Desktop GUI** | Tauri + Svelte 5. Two singleton slots (chat-model, transcription) with conversation folders, in-place rename, crash-recoverable state. |
+| **LAN remote** | Open the GUI from your phone on the same network. Single-user lock with kick-and-hide. |
+| **Self-updating** | Stages quietly on launch, applies on next start. Last good manifest stays cached for offline runs. |
+| **Scriptable end-to-end** | Every CLI subcommand returns parseable text or `--json`. |
 
 ## CLI
 
-```bash
+```sh
 myownllm                 # GUI
 myownllm serve           # API server
 myownllm run             # terminal chat
@@ -77,18 +70,21 @@ myownllm providers       # list / switch provider
 myownllm update          # check / apply / configure self-update
 ```
 
+Full reference: [DOCS.md › CLI](DOCS.md#cli).
+
 ## Build from source
 
-```bash
+```sh
 git clone https://github.com/mrjeeves/MyOwnLLM && cd MyOwnLLM
 just setup && just build
 ```
 
-## Everything else
+Repo layout, dev loop, and commit style live in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-- [DOCS.md](DOCS.md) — full CLI, manifest format, client configs, provider/family system, auto-update, lifecycle, scripting, repackaging
+## More
+
+- [**myownllm.net**](https://myownllm.net) — installers, screenshots, the pitch
+- [DOCS.md](DOCS.md) — manifest format, client configs, provider/family system, auto-update, lifecycle, scripting, repackaging
 - [ARCHITECTURE.md](ARCHITECTURE.md) — internals, modules, data flow
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+- [CONTRIBUTING.md](CONTRIBUTING.md) — setup, repo layout, commit style
+- [LICENSE](LICENSE) — MIT
