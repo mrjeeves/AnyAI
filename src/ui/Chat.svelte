@@ -115,7 +115,13 @@
   });
 
   $effect(() => {
-    // Scroll to bottom when messages change
+    // Re-run on every streaming delta: the thinking <details> is collapsed
+    // by default, but when the user expands it the container grows as new
+    // tokens arrive, and we want them to keep reading along.
+    void messages.length;
+    const last = messages[messages.length - 1];
+    void last?.content?.length;
+    void last?.thinking?.length;
     if (messagesEl) {
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
@@ -469,8 +475,11 @@
       <div class="message {msg.role}">
         <div class="bubble">
           {#if msg.thinking}
-            <details class="thinking-block" open={msg.streaming}>
-              <summary>{msg.streaming && !msg.content ? "Thinking…" : "Thoughts"}</summary>
+            {@const isThinking = msg.streaming && !msg.content}
+            <details class="thinking-block">
+              <summary class:shimmer={isThinking}>
+                {isThinking ? "Thinking…" : "Thoughts"}
+              </summary>
               <div class="thinking-content">{msg.thinking}</div>
             </details>
           {/if}
@@ -591,6 +600,26 @@
     width: .8em;
   }
   .thinking-block[open] summary::before { content: "▾ "; }
+  /* Shimmer the summary while the model is still in its reasoning phase,
+     so users know work is happening even though the block stays collapsed. */
+  .thinking-block summary.shimmer {
+    background: linear-gradient(
+      90deg,
+      #666 0%,
+      #ddd 50%,
+      #666 100%
+    );
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+    animation: thinking-shimmer 2s linear infinite;
+  }
+  @keyframes thinking-shimmer {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
   .thinking-content {
     margin-top: .35rem;
     color: #888;
