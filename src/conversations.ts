@@ -6,6 +6,7 @@ import {
   readDir,
   remove,
   rename,
+  stat,
   type DirEntry,
 } from "@tauri-apps/plugin-fs";
 import { homeDir } from "@tauri-apps/api/path";
@@ -496,6 +497,160 @@ export async function downloadTalkingPoints(
   }
   const md = await readTextFile(mdPath);
   await invoke("write_text_to_path", { path: destPath, contents: md });
+}
+
+/** One reclaimable orphan file in the conversation tree. Either a
+ *  talking-points sidecar `.md` left behind after its sibling JSON
+ *  was removed manually, or a non-conversation file the user dropped
+ *  into the folder. The Storage tab's "Clean now" popup lists these
+ *  by path + size so the user can see exactly what they're deleting. */
+export interface ConversationOrphan {
+  /** Absolute path of the orphan file. */
+  path: string;
+  /** Display path relative to the conversations root, POSIX-style. */
+  relPath: string;
+  size_bytes: number;
+}
+
+/** Match a conversation JSON or its talking-points sidecar. The
+ *  `<id>.json` / `<id>.talking-points.md` / `<id>.talking-points.prev.md`
+ *  trio is the only shape `saveConversation` writes; anything else
+ *  in the tree is fair game for the cleanup pass. */
+function classifyConversationFile(name: string): {
+  kind: "json" | "tp-md" | "tp-prev-md" | "other";
+  id: string | null;
+} {
+  if (name.endsWith(".talking-points.prev.md")) {
+    return { kind: "tp-prev-md", id: name.slice(0, -".talking-points.prev.md".length) };
+  }
+  if (name.endsWith(".talking-points.md")) {
+    return { kind: "tp-md", id: name.slice(0, -".talking-points.md".length) };
+  }
+  if (name.endsWith(".json")) {
+    return { kind: "json", id: name.slice(0, -".json".length) };
+  }
+  return { kind: "other", id: null };
+}
+
+/** Walk the conversations tree and gather files that don't belong to
+ *  any live conversation. Two flavors:
+ *    1. Talking-points sidecars whose `.json` sibling no longer
+ *       exists. Sidecars are supposed to travel with the JSON via
+ *       `saveConversation` / `moveConversation` / `deleteConversation`,
+ *       so a stray one means the user (or a crashed save) left it
+ *       behind.
+ *    2. Files the user dropped into the conversation folder by hand
+ *       that don't match the conversation schema (PDFs, screenshots,
+ *       etc.). Surfaced so the file-manager view stays organized —
+ *       per the "folder is the representation" invariant the schema
+ *       relies on.
+ *  Files inside `.`-prefixed dirs are ignored (matches `walkTree`'s
+ *  skip rule for `.DS_Store`, `.git`, …). */
+async function readDirRecursive(
+  absDir: string,
+  relDir: string,
+): Promise<Array<{ absPath: string; relPath: string; name: string; isFile: boolean }>> {
+  const out: Array<{ absPath: string; relPath: string; name: string; isFile: boolean }> = [];
+  let entries: DirEntry[];
+  try {
+    entries = await readDir(absDir);
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    if (!e.name) continue;
+    if (e.name.startsWith(".")) continue;
+    const abs = `${absDir}/${e.name}`;
+    const rel = relDir ? `${relDir}/${e.name}` : e.name;
+    if (e.isDirectory) {
+      const child = await readDirRecursive(abs, rel);
+      out.push(...child);
+    } else if (e.isFile) {
+      out.push({ absPath: abs, relPath: rel, name: e.name, isFile: true });
+    }
+  }
+  return out;
+}
+
+async function fileSizeBytes(absPath: string): Promise<number> {
+  try {
+    return (await stat(absPath)).size;
+  } catch {
+    return 0;
+  }
+}
+
+export async function listConversationOrphans(): Promise<ConversationOrphan[]> {
+  let dir: string;
+  try {
+    dir = await conversationsDir();
+  } catch {
+    return [];
+  }
+  if (!(await exists(dir))) return [];
+
+  const files = await readDirRecursive(dir, "");
+
+  // Group files by directory so we can resolve "<id>.json exists in
+  // this same folder?" without a cross-tree scan. Sidecars always
+  // live alongside their JSON — a moved JSON drags its sidecars
+  // with it.
+  const jsonIdsByDir = new Map<string, Set<string>>();
+  for (const f of files) {
+    const cls = classifyConversationFile(f.name);
+    if (cls.kind !== "json" || !cls.id) continue;
+    const parentRel = f.relPath.includes("/")
+      ? f.relPath.slice(0, f.relPath.lastIndexOf("/"))
+      : "";
+    let bucket = jsonIdsByDir.get(parentRel);
+    if (!bucket) {
+      bucket = new Set();
+      jsonIdsByDir.set(parentRel, bucket);
+    }
+    bucket.add(cls.id);
+  }
+
+  const orphans: ConversationOrphan[] = [];
+  for (const f of files) {
+    const cls = classifyConversationFile(f.name);
+    const parentRel = f.relPath.includes("/")
+      ? f.relPath.slice(0, f.relPath.lastIndexOf("/"))
+      : "";
+    if (cls.kind === "json") continue;
+    if (cls.kind === "tp-md" || cls.kind === "tp-prev-md") {
+      if (cls.id && jsonIdsByDir.get(parentRel)?.has(cls.id)) continue;
+      orphans.push({
+        path: f.absPath,
+        relPath: f.relPath,
+        size_bytes: await fileSizeBytes(f.absPath),
+      });
+      continue;
+    }
+    // `other` — any non-conversation file in the tree.
+    orphans.push({
+      path: f.absPath,
+      relPath: f.relPath,
+      size_bytes: await fileSizeBytes(f.absPath),
+    });
+  }
+  return orphans;
+}
+
+/** Remove every orphan `listConversationOrphans` would surface.
+ *  Returns the freed bytes. Errors on individual files are swallowed
+ *  so a single permission glitch doesn't abort the whole pass. */
+export async function clearConversationOrphans(): Promise<number> {
+  const orphans = await listConversationOrphans();
+  let freed = 0;
+  for (const o of orphans) {
+    try {
+      await remove(o.path);
+      freed += o.size_bytes;
+    } catch {
+      // Best-effort.
+    }
+  }
+  return freed;
 }
 
 /**

@@ -100,6 +100,32 @@ export async function runCleanup(): Promise<string[]> {
   return evicted;
 }
 
+/** Read-only mirror of `pruneNow`: returns the tags + sizes the next
+ *  prune would evict, without touching disk. Used by the Storage tab's
+ *  "Clean now" confirmation popup so users can see exactly which models
+ *  will be deleted (and how much disk they'll get back) before
+ *  committing. */
+export async function previewPruneTargets(): Promise<Array<{ name: string; size: number }>> {
+  const [config, status, pulled] = await Promise.all([
+    loadConfig(),
+    readStatusCache(),
+    invoke<OllamaModel[]>("ollama_list_models").catch(() => [] as OllamaModel[]),
+  ]);
+  const keepSet = new Set(config.kept_models);
+  const overrideSet = new Set(
+    Object.values(config.mode_overrides).filter((v): v is string => typeof v === "string")
+  );
+  const sizeByName = new Map(pulled.map((m) => [m.name, m.size] as const));
+  const targets: Array<{ name: string; size: number }> = [];
+  for (const [tag, info] of Object.entries(status)) {
+    if (info.recommended_by.length > 0) continue;
+    if (keepSet.has(tag)) continue;
+    if (overrideSet.has(tag)) continue;
+    targets.push({ name: tag, size: sizeByName.get(tag) ?? 0 });
+  }
+  return targets;
+}
+
 /** Immediately evict all unrecommended, non-kept, non-override models (respects keep/override). */
 export async function pruneNow(): Promise<string[]> {
   const config = await loadConfig();

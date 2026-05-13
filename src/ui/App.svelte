@@ -23,6 +23,7 @@
     deleteFolder,
     getActiveConversationId,
     setActiveConversationId,
+    clearConversationOrphans,
     type ConversationMeta,
     type FolderMeta,
   } from "../conversations";
@@ -176,8 +177,35 @@
       activeMode = config.active_mode;
       activeFamilyName = config.active_family;
 
-      // Background cleanup of stale models
-      runCleanup().catch(() => {});
+      // Background auto-cleanups. Each pass is gated by its toggle in
+      // Settings → Storage so users can opt out per area; defaults are
+      // all on so existing installs see the same disk-tidying behaviour
+      // they did before the cleanup system was centralized. Errors are
+      // swallowed — a cleanup hiccup must never block startup.
+      if (config.auto_cleanup?.models !== false) {
+        runCleanup().catch(() => {});
+      }
+      if (config.auto_cleanup?.legacy !== false) {
+        invoke<number>("legacy_models_remove_all").catch(() => {});
+      }
+      if (config.auto_cleanup?.conversations !== false) {
+        clearConversationOrphans().catch(() => {});
+      }
+      if (config.auto_cleanup?.updates !== false) {
+        // Rust's `apply_pending_if_any` already swept the Windows .old
+        // binary when the same toggle was on; this picks up the OTHER
+        // update leftover — staged-update dirs under
+        // `~/.myownllm/updates/<version>/` that aren't the current
+        // pending version. The list helper filters out the in-flight
+        // version so a freshly-staged update isn't deleted from under
+        // the apply path.
+        invoke<number>("update_leftovers_clear").catch(() => {});
+      }
+      // The transcribe-buffer pass runs AFTER `probeAndResumeBacklog`
+      // (see below) so the resume probe gets first pick of any orphaned
+      // chunks. The clear command itself skips dirs owned by a live
+      // session, so once the resumed stream is registered it survives
+      // the sweep.
 
       const manifest = await getActiveManifest();
       const picked = pickFamily(manifest, config.active_family);
@@ -350,7 +378,16 @@
       // After everything else is wired, see if a previous MyOwnLLM process
       // left a transcribe buffer behind. Fire-and-forget — failure
       // shouldn't block the app from coming up.
-      probeAndResumeBacklog().catch(() => {});
+      probeAndResumeBacklog()
+        .then(() => {
+          if (config.auto_cleanup?.transcribe_buffer !== false) {
+            // Resume probe registers the chosen stream as a live session
+            // before this fires, so `clear_buffer_orphans` will skip it
+            // and only wipe the leftover orphans the probe didn't pick.
+            return invoke<number>("transcribe_buffer_clear").catch(() => 0);
+          }
+        })
+        .catch(() => {});
     } catch (e) {
       // Surface the silenced startup error. Without this it's invisible:
       // the catch sets `error` and falls into the chat view with

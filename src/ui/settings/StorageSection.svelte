@@ -3,23 +3,15 @@
   import { invoke } from "@tauri-apps/api/core";
   import { mkdir, exists } from "@tauri-apps/plugin-fs";
   import { loadConfig, saveConfig } from "../../config";
-  import type { HardwareProfile, OllamaModel } from "../../types";
+  import { previewPruneTargets, pruneNow } from "../../model-lifecycle";
+  import {
+    listConversationOrphans,
+    clearConversationOrphans,
+    type ConversationOrphan,
+  } from "../../conversations";
+  import type { HardwareProfile, OllamaModel, AutoCleanupConfig } from "../../types";
 
-  /** Mirror of `models::ModelInfo` in src-tauri/src/models.rs.
-   *  Storage tab sums installed sizes across ASR + diarize alongside
-   *  the Ollama total. */
-  interface ModelInfo {
-    name: string;
-    kind: string;
-    installed: boolean;
-    installed_size_bytes: number | null;
-  }
-
-  /** Mirror of `models::LegacyDirInfo`. Represents a directory left
-   *  behind by a deprecated runtime (whisper today, future
-   *  retirements later). Surfaced as a reclaim card so users
-   *  upgrading from older versions can free the disk through the
-   *  UI rather than having to `rm -rf` by hand. */
+  /** Mirror of `models::LegacyDirInfo`. */
   interface LegacyDirInfo {
     id: string;
     label: string;
@@ -27,6 +19,34 @@
     size_bytes: number;
     exists: boolean;
   }
+
+  /** Mirror of `transcribe::OrphanStream`. */
+  interface OrphanStream {
+    stream_id: string;
+    size_bytes: number;
+  }
+
+  /** Mirror of `self_update::UpdateLeftover`. */
+  interface UpdateLeftover {
+    id: string;
+    label: string;
+    path: string;
+    size_bytes: number;
+  }
+
+  /** A line item shown inside the "Clean now" confirmation popup.
+   *  Sections produce these from their per-area listing endpoints —
+   *  same shape regardless of whether the source is a model tag, a
+   *  legacy dir, a transcribe orphan, etc. */
+  interface CleanupItem {
+    label: string;
+    sublabel?: string;
+    size_bytes: number;
+  }
+
+  /** Per-section key. Drives both the auto-cleanup toggle in config
+   *  and the active "Clean now" confirmation modal. */
+  type SectionKey = "models" | "transcribe_buffer" | "legacy" | "updates" | "conversations";
 
   type Tab = "providers" | "families" | "models" | "storage" | "updates";
 
@@ -42,56 +62,86 @@
   let diskFreeGb = $state<number | null>(null);
   let dirExists = $state<boolean | null>(null);
   let loading = $state(true);
-  /** Bytes parked under `~/.myownllm/transcribe-buffer/`. > 0 when the
-   *  ASR backend fell behind realtime and audio is spilling to disk;
-   *  the inference loop drains the dir as it catches up. The card
-   *  stays hidden when there's nothing pending. */
-  let transcribeBacklogBytes = $state(0);
-  /** Leftover dirs from deprecated runtimes that still consume disk
-   *  on upgraded installs. Only entries with `exists: true && size_bytes > 0`
-   *  render; otherwise hidden so a clean install doesn't see stale
-   *  reclaim buttons. */
+
+  /** Per-section state. Each section reports its current reclaim
+   *  candidates and total reclaimable bytes; the toggle reflects the
+   *  live config value so flipping it persists immediately. */
+  let modelsReclaim = $state<{ items: CleanupItem[]; bytes: number }>({ items: [], bytes: 0 });
+  let transcribeOrphans = $state<OrphanStream[]>([]);
+  let transcribeBytes = $state(0);
   let legacyDirs = $state<LegacyDirInfo[]>([]);
-  /** While a reclaim is in flight, the entry's id sits here so the
-   *  button can show a spinner / disabled state. */
-  let reclaiming = $state<string | null>(null);
-  let reclaimError = $state("");
+  let legacyBytes = $state(0);
+  let updateLeftovers = $state<UpdateLeftover[]>([]);
+  let updateBytes = $state(0);
+  let conversationOrphans = $state<ConversationOrphan[]>([]);
+  let conversationBytes = $state(0);
+
+  /** Live mirror of `config.auto_cleanup`. Default-filled so older
+   *  configs that predate the field don't crash the toggles. */
+  let autoCleanup = $state<AutoCleanupConfig>({
+    models: true,
+    transcribe_buffer: true,
+    legacy: true,
+    updates: true,
+    conversations: true,
+  });
+
+  /** Inline confirmation modal state. Open when a "Clean now" button
+   *  has surfaced its target list; closed otherwise. */
+  let confirmOpen = $state<{
+    section: SectionKey;
+    title: string;
+    items: CleanupItem[];
+    bytes: number;
+  } | null>(null);
+  let cleaning = $state(false);
+  let cleanError = $state("");
+  /** Last-cleaned summary, shown briefly after a successful pass. */
+  let lastCleaned = $state<{ section: SectionKey; bytes: number } | null>(null);
 
   async function refreshStorage(): Promise<void> {
-    const [pulled, asr, diarize, hw, config, backlog, legacy] = await Promise.all([
-      invoke<OllamaModel[]>("ollama_list_models").catch(() => [] as OllamaModel[]),
-      invoke<ModelInfo[]>("asr_models_list").catch(() => [] as ModelInfo[]),
-      invoke<ModelInfo[]>("diarize_models_list").catch(() => [] as ModelInfo[]),
-      invoke<HardwareProfile>("detect_hardware").catch(() => null),
-      loadConfig(),
-      invoke<number>("transcribe_buffer_size_bytes").catch(() => 0),
-      invoke<LegacyDirInfo[]>("legacy_models_list").catch(() => [] as LegacyDirInfo[]),
-    ]);
-    // Local-runtime models live under ~/.myownllm/models/, not in
-    // Ollama's library, so the on-disk total has to sum every
-    // backend or it under-reports every transcribe / diarize
-    // install. Only count installed entries with a known size —
-    // pending downloads and unknown-size rows would inflate the
-    // total without representing real bytes on disk.
+    const [pulled, hw, config, orphans, legacy, updateList, modelTargets, convOrphans] =
+      await Promise.all([
+        invoke<OllamaModel[]>("ollama_list_models").catch(() => [] as OllamaModel[]),
+        invoke<HardwareProfile>("detect_hardware").catch(() => null),
+        loadConfig(),
+        invoke<OrphanStream[]>("transcribe_buffer_orphans").catch(() => [] as OrphanStream[]),
+        invoke<LegacyDirInfo[]>("legacy_models_list").catch(() => [] as LegacyDirInfo[]),
+        invoke<UpdateLeftover[]>("update_leftovers_list").catch(() => [] as UpdateLeftover[]),
+        previewPruneTargets().catch(() => [] as Array<{ name: string; size: number }>),
+        listConversationOrphans().catch(() => [] as ConversationOrphan[]),
+      ]);
+
     const ollamaBytes = pulled.reduce((acc, m) => acc + m.size, 0);
-    const localInstalled = [...asr, ...diarize].filter(
-      (m) => m.installed && (m.installed_size_bytes ?? 0) > 0,
-    );
-    const localBytes = localInstalled.reduce(
-      (acc, m) => acc + (m.installed_size_bytes ?? 0),
-      0,
-    );
-    // Legacy bytes count toward the disk total — they ARE on disk
-    // and the user is paying for them — but not toward `modelCount`,
-    // which represents currently-usable models.
-    const legacyBytes = legacy
-      .filter((d) => d.exists && d.size_bytes > 0)
-      .reduce((acc, d) => acc + d.size_bytes, 0);
-    totalBytes = ollamaBytes + localBytes + legacyBytes;
-    modelCount = pulled.length + localInstalled.length;
+    totalBytes = ollamaBytes;
+    modelCount = pulled.length;
     diskFreeGb = hw?.disk_free_gb ?? null;
-    transcribeBacklogBytes = backlog;
-    legacyDirs = legacy;
+
+    modelsReclaim = {
+      items: modelTargets.map((t) => ({ label: t.name, size_bytes: t.size })),
+      bytes: modelTargets.reduce((acc, t) => acc + t.size, 0),
+    };
+
+    transcribeOrphans = orphans;
+    transcribeBytes = orphans.reduce((acc, o) => acc + o.size_bytes, 0);
+
+    legacyDirs = legacy.filter((d) => d.exists && d.size_bytes > 0);
+    legacyBytes = legacyDirs.reduce((acc, d) => acc + d.size_bytes, 0);
+
+    updateLeftovers = updateList;
+    updateBytes = updateList.reduce((acc, u) => acc + u.size_bytes, 0);
+
+    conversationOrphans = convOrphans;
+    conversationBytes = convOrphans.reduce((acc, o) => acc + o.size_bytes, 0);
+
+    autoCleanup = {
+      models: config.auto_cleanup?.models ?? true,
+      transcribe_buffer: config.auto_cleanup?.transcribe_buffer ?? true,
+      legacy: config.auto_cleanup?.legacy ?? true,
+      updates: config.auto_cleanup?.updates ?? true,
+      conversations: config.auto_cleanup?.conversations ?? true,
+    };
+
     conversationDir = config.conversation_dir ?? "";
     savedConvDir = conversationDir;
     if (conversationDir) {
@@ -107,25 +157,120 @@
     }
   });
 
-  async function reclaimLegacy(id: string): Promise<void> {
-    if (reclaiming) return;
-    reclaiming = id;
-    reclaimError = "";
+  /** Flip an auto-cleanup toggle and persist it. The on-disk config is
+   *  the source of truth: startup reads it to decide which passes to
+   *  run, and the Storage tab's view here just mirrors what's saved. */
+  async function toggleAuto(section: SectionKey): Promise<void> {
+    autoCleanup = { ...autoCleanup, [section]: !autoCleanup[section] };
     try {
-      await invoke("legacy_models_remove", { id });
-      await refreshStorage();
+      const config = await loadConfig();
+      config.auto_cleanup = { ...autoCleanup };
+      await saveConfig(config);
     } catch (e) {
-      reclaimError = String(e);
-    } finally {
-      reclaiming = null;
+      // Roll back the local mirror so the toggle position matches disk.
+      autoCleanup = { ...autoCleanup, [section]: !autoCleanup[section] };
+      console.warn("auto-cleanup persist failed:", e);
     }
   }
 
-  function backlogSeconds(bytes: number): number {
-    // 16 kHz mono f32 → 64 KB per second of audio. We round to the
-    // nearest second; the goal is "you have ~12 s pending", not lab-grade
-    // precision.
-    return Math.round(bytes / (16000 * 4));
+  function openConfirm(section: SectionKey): void {
+    cleanError = "";
+    if (section === "models") {
+      confirmOpen = {
+        section,
+        title: "Clean up unrecommended models",
+        items: modelsReclaim.items,
+        bytes: modelsReclaim.bytes,
+      };
+    } else if (section === "transcribe_buffer") {
+      confirmOpen = {
+        section,
+        title: "Clear transcription buffer",
+        items: transcribeOrphans.map((o) => ({
+          label: o.stream_id,
+          sublabel: "orphan stream",
+          size_bytes: o.size_bytes,
+        })),
+        bytes: transcribeBytes,
+      };
+    } else if (section === "legacy") {
+      confirmOpen = {
+        section,
+        title: "Reclaim legacy runtime data",
+        items: legacyDirs.map((d) => ({
+          label: d.label,
+          sublabel: d.path,
+          size_bytes: d.size_bytes,
+        })),
+        bytes: legacyBytes,
+      };
+    } else if (section === "updates") {
+      confirmOpen = {
+        section,
+        title: "Clean update leftovers",
+        items: updateLeftovers.map((u) => ({
+          label: u.label,
+          sublabel: u.path,
+          size_bytes: u.size_bytes,
+        })),
+        bytes: updateBytes,
+      };
+    } else {
+      confirmOpen = {
+        section,
+        title: "Clean orphan conversation files",
+        items: conversationOrphans.map((o) => ({
+          label: o.relPath,
+          size_bytes: o.size_bytes,
+        })),
+        bytes: conversationBytes,
+      };
+    }
+  }
+
+  function closeConfirm(): void {
+    if (cleaning) return;
+    confirmOpen = null;
+    cleanError = "";
+  }
+
+  async function runClean(): Promise<void> {
+    if (!confirmOpen || cleaning) return;
+    const target = confirmOpen;
+    cleaning = true;
+    cleanError = "";
+    try {
+      let freed = target.bytes;
+      switch (target.section) {
+        case "models":
+          await pruneNow();
+          break;
+        case "transcribe_buffer":
+          freed = await invoke<number>("transcribe_buffer_clear");
+          break;
+        case "legacy":
+          freed = await invoke<number>("legacy_models_remove_all");
+          break;
+        case "updates":
+          freed = await invoke<number>("update_leftovers_clear");
+          break;
+        case "conversations":
+          freed = await clearConversationOrphans();
+          break;
+      }
+      lastCleaned = { section: target.section, bytes: freed };
+      confirmOpen = null;
+      await refreshStorage();
+      // Hide the toast after a short beat so a follow-up clean doesn't
+      // see a stale "freed X" from a previous pass.
+      setTimeout(() => {
+        if (lastCleaned?.section === target.section) lastCleaned = null;
+      }, 4000);
+    } catch (e) {
+      cleanError = String(e);
+    } finally {
+      cleaning = false;
+    }
   }
 
   function bytesLabel(bytes: number): string {
@@ -144,9 +289,6 @@
       const config = await loadConfig();
       config.conversation_dir = trimmed;
       await saveConfig(config);
-      // Best-effort directory creation so future writes don't ENOENT.
-      // Failure is non-fatal — the user may be pointing at a network share
-      // they'll mount later, or a path their OS will create lazily.
       try { await mkdir(trimmed, { recursive: true }); } catch {}
       try { dirExists = await exists(trimmed); } catch { dirExists = null; }
       savedConvDir = trimmed;
@@ -165,13 +307,81 @@
   }
 
   const isDirty = $derived(conversationDir.trim() !== savedConvDir);
+
+  /** Per-section static copy. Pulled out so the markup below can render
+   *  every section with the same shape — title, blurb, current size,
+   *  toggle, and clean-now button — without duplicating microcopy. */
+  const sectionMeta: Record<SectionKey, { title: string; blurb: string }> = {
+    models: {
+      title: "Models",
+      blurb:
+        "Auto-cleanup removes Ollama models the active provider no longer recommends, " +
+        "after they’ve been unused for the configured threshold. Pinned models and " +
+        "mode overrides are always kept.",
+    },
+    transcribe_buffer: {
+      title: "Transcription buffer",
+      blurb:
+        "Pending audio chunks parked under ~/.myownllm/transcribe-buffer/ when ASR fell " +
+        "behind realtime. Live recordings are always preserved; only orphan streams from " +
+        "previous crashes are touched.",
+    },
+    legacy: {
+      title: "Legacy runtime data",
+      blurb:
+        "Directories left behind by deprecated runtimes (e.g. Whisper from before v0.2.6). " +
+        "Safe to delete — the new backends don’t use them.",
+    },
+    updates: {
+      title: "Update leftovers",
+      blurb:
+        "Old binaries from completed self-updates and staged update archives for versions " +
+        "no longer pending. The current pending update is always preserved.",
+    },
+    conversations: {
+      title: "Conversation data",
+      blurb:
+        "Talking-points sidecars whose chat file was removed by hand, and stray files " +
+        "dropped into the conversation tree that don’t belong to any chat. Conversation " +
+        "JSONs are never touched.",
+    },
+  };
+
+  function sectionBytes(section: SectionKey): number {
+    switch (section) {
+      case "models": return modelsReclaim.bytes;
+      case "transcribe_buffer": return transcribeBytes;
+      case "legacy": return legacyBytes;
+      case "updates": return updateBytes;
+      case "conversations": return conversationBytes;
+    }
+  }
+
+  function sectionCount(section: SectionKey): number {
+    switch (section) {
+      case "models": return modelsReclaim.items.length;
+      case "transcribe_buffer": return transcribeOrphans.length;
+      case "legacy": return legacyDirs.length;
+      case "updates": return updateLeftovers.length;
+      case "conversations": return conversationOrphans.length;
+    }
+  }
+
+  const sections: SectionKey[] = [
+    "models",
+    "transcribe_buffer",
+    "legacy",
+    "updates",
+    "conversations",
+  ];
 </script>
 
 <div class="section">
   <div class="head">
     <p class="lede">
-      Where MyOwnLLM's data lives on this machine. Models are managed by Ollama;
-      conversations and artifacts live under <code>~/.myownllm/</code> by default.
+      Where MyOwnLLM's data lives on this machine. Each area below has its own
+      auto-cleanup toggle and a "Clean now" button — cleanups all live here so
+      nothing happens silently in the background unless you've opted in.
     </p>
   </div>
 
@@ -179,10 +389,10 @@
     <p class="loading">Loading…</p>
   {:else}
     <div class="cards scroll-fade">
-      <div class="card">
+      <div class="card summary">
         <div class="card-row">
           <div class="card-info">
-            <div class="card-title">Models</div>
+            <div class="card-title">Installed models</div>
             <div class="card-meta">
               {modelCount === 0 ? "no models pulled" : `${modelCount} pulled · ${gbLabel(totalBytes)}`}
               {#if diskFreeGb != null}
@@ -196,55 +406,55 @@
         </div>
       </div>
 
-      {#if transcribeBacklogBytes > 0}
-        <div class="card">
+      {#each sections as key (key)}
+        {@const meta = sectionMeta[key]}
+        {@const bytes = sectionBytes(key)}
+        {@const count = sectionCount(key)}
+        {@const nothingToClean = count === 0}
+        <div class="card cleanup-card">
           <div class="card-row">
             <div class="card-info">
-              <div class="card-title">Transcription backlog</div>
-              <div class="card-meta">
-                <span class="warn">
-                  {bytesLabel(transcribeBacklogBytes)}
-                  ({backlogSeconds(transcribeBacklogBytes)} s of audio)
-                </span>
-                pending ASR inference under
-                <code>~/.myownllm/transcribe-buffer/</code>.
-                Drains automatically while MyOwnLLM is open.
+              <div class="card-title">{meta.title}</div>
+              <div class="card-meta">{meta.blurb}</div>
+              <div class="card-stat">
+                {#if nothingToClean}
+                  <span class="dim">Nothing to clean.</span>
+                {:else}
+                  <span class="warn">{bytesLabel(bytes)}</span>
+                  reclaimable · {count} {count === 1 ? "item" : "items"}
+                {/if}
+                {#if lastCleaned?.section === key}
+                  <span class="ok"> · freed {bytesLabel(lastCleaned.bytes)}</span>
+                {/if}
               </div>
             </div>
+          </div>
+
+          <div class="controls">
+            <label class="toggle" title="Auto-cleanup on startup">
+              <input
+                type="checkbox"
+                checked={autoCleanup[key]}
+                onchange={() => toggleAuto(key)}
+              />
+              <span class="track" class:on={autoCleanup[key]}>
+                <span class="thumb"></span>
+              </span>
+              <span class="toggle-label">Auto-cleanup</span>
+            </label>
+            <button
+              class="clean-btn"
+              disabled={nothingToClean}
+              onclick={() => openConfirm(key)}
+            >
+              Clean now
+            </button>
           </div>
         </div>
-      {/if}
-
-      {#each legacyDirs as legacy (legacy.id)}
-        {#if legacy.exists && legacy.size_bytes > 0}
-          <div class="card">
-            <div class="card-row">
-              <div class="card-info">
-                <div class="card-title">{legacy.label}</div>
-                <div class="card-meta">
-                  <span class="warn">{bytesLabel(legacy.size_bytes)}</span>
-                  under <code>{legacy.path}</code>.
-                  Left over from a previous MyOwnLLM version that used a
-                  different backend — safe to delete.
-                </div>
-              </div>
-              <button
-                class="link-btn"
-                disabled={reclaiming !== null}
-                onclick={() => reclaimLegacy(legacy.id)}
-              >
-                {reclaiming === legacy.id ? "Reclaiming…" : "Reclaim disk →"}
-              </button>
-            </div>
-          </div>
-        {/if}
       {/each}
-      {#if reclaimError}
-        <p class="reclaim-err">{reclaimError}</p>
-      {/if}
 
       <div class="card">
-        <div class="card-title">Conversations &amp; artifacts</div>
+        <div class="card-title">Conversations &amp; artifacts folder</div>
         <p class="card-meta">
           Saved chats and any files generated during them. Defaults to a folder under
           <code>~/.myownllm/</code>; change it to a synced folder if you want them backed up.
@@ -280,13 +490,54 @@
       </div>
     </div>
   {/if}
+
+  {#if confirmOpen}
+    <div class="confirm-overlay" onclick={closeConfirm} role="presentation"></div>
+    <div class="confirm" role="dialog" aria-label={confirmOpen.title}>
+      <h3>{confirmOpen.title}</h3>
+      {#if confirmOpen.items.length === 0}
+        <p class="confirm-info">Nothing to clean up right now.</p>
+      {:else}
+        <p class="confirm-lead">
+          The following will be deleted:
+        </p>
+        <ul class="confirm-items">
+          {#each confirmOpen.items as item}
+            <li>
+              <div class="item-label">{item.label}</div>
+              {#if item.sublabel}
+                <div class="item-sublabel">{item.sublabel}</div>
+              {/if}
+              <div class="item-size">{bytesLabel(item.size_bytes)}</div>
+            </li>
+          {/each}
+        </ul>
+        <p class="confirm-total">
+          Total: <strong>{bytesLabel(confirmOpen.bytes)}</strong>
+          across {confirmOpen.items.length} {confirmOpen.items.length === 1 ? "item" : "items"}
+        </p>
+      {/if}
+      {#if cleanError}
+        <p class="confirm-error">{cleanError}</p>
+      {/if}
+      <div class="confirm-actions">
+        <button class="cancel" disabled={cleaning} onclick={closeConfirm}>Cancel</button>
+        <button
+          class="clean"
+          disabled={cleaning || confirmOpen.items.length === 0}
+          onclick={runClean}
+        >
+          {cleaning ? "Cleaning…" : "Clean"}
+        </button>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
   .section { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   .head { padding: .75rem 1rem; border-bottom: 1px solid #1e1e1e; flex-shrink: 0; }
   .lede { font-size: .78rem; color: #888; line-height: 1.5; }
-  .lede code { font-family: monospace; font-size: .76rem; color: #aaa; background: #1a1a22; padding: 0 .25rem; border-radius: 3px; }
 
   .cards { flex: 1; overflow-y: scroll; padding: .75rem; display: flex; flex-direction: column; gap: .6rem; min-height: 0; --scroll-fade-bg: #111; }
   .card {
@@ -296,6 +547,8 @@
     padding: .75rem .9rem;
     display: flex; flex-direction: column; gap: .35rem;
   }
+  .card.cleanup-card { gap: .6rem; }
+  .card.summary { background: #15151c; }
   .card-row {
     display: flex; align-items: center; gap: .75rem;
   }
@@ -303,8 +556,48 @@
   .card-title { font-size: .9rem; font-weight: 600; color: #e8e8e8; }
   .card-meta { font-size: .76rem; color: #888; line-height: 1.5; }
   .card-meta .dim { color: #555; }
-  .card-meta .warn { color: #ffd166; font-weight: 600; }
+  .card-stat { font-size: .76rem; color: #888; margin-top: .25rem; }
+  .card-stat .dim { color: #555; }
+  .card-stat .warn { color: #ffd166; font-weight: 600; }
+  .card-stat .ok { color: #6a6; }
   code { font-family: monospace; font-size: .76rem; color: #aaa; background: #1a1a22; padding: 0 .25rem; border-radius: 3px; }
+
+  .controls {
+    display: flex; align-items: center; gap: .75rem;
+    padding-top: .35rem;
+    border-top: 1px dashed #1e1e1e;
+  }
+
+  .toggle {
+    display: inline-flex; align-items: center; gap: .5rem;
+    font-size: .78rem; color: #aaa; cursor: pointer;
+    user-select: none;
+  }
+  .toggle input { position: absolute; opacity: 0; pointer-events: none; }
+  .toggle .track {
+    position: relative;
+    width: 32px; height: 18px;
+    background: #2a2a2a; border-radius: 9px;
+    transition: background .15s ease;
+  }
+  .toggle .track.on { background: #4a4ada; }
+  .toggle .thumb {
+    position: absolute; top: 2px; left: 2px;
+    width: 14px; height: 14px;
+    background: #d0d0d0; border-radius: 50%;
+    transition: transform .15s ease;
+  }
+  .toggle .track.on .thumb { transform: translateX(14px); background: #fff; }
+  .toggle-label { font-size: .78rem; color: #aaa; }
+
+  .clean-btn {
+    margin-left: auto;
+    padding: .35rem .7rem;
+    background: #2a2a2a; border: 1px solid #3a3a3a;
+    color: #ccc; border-radius: 6px; font-size: .78rem; cursor: pointer;
+  }
+  .clean-btn:hover:not(:disabled) { background: #333; color: #fff; }
+  .clean-btn:disabled { opacity: .35; cursor: default; }
 
   .link-btn {
     background: none; border: 1px solid #2a2a3a; color: #6e6ef7;
@@ -331,12 +624,83 @@
   .path-meta .err { color: #f88; }
   .path-meta .dim { color: #555; }
 
-  .reclaim-err {
-    margin: 0;
-    padding: 0 .25rem;
-    color: #f88;
-    font-size: .75rem;
-  }
-
   .loading { padding: 1.5rem; text-align: center; color: #555; font-size: .82rem; }
+
+  .confirm-overlay {
+    position: fixed; inset: 0; background: rgba(0, 0, 0, .65); z-index: 30;
+  }
+  .confirm {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: min(440px, 92vw);
+    max-height: 80vh;
+    background: #161616; border: 1px solid #2a2a2a; border-radius: 10px;
+    padding: 1rem 1.1rem; z-index: 31;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, .6);
+    display: flex; flex-direction: column;
+  }
+  .confirm h3 { font-size: .9rem; font-weight: 600; margin-bottom: .55rem; }
+  .confirm-lead {
+    font-size: .78rem; color: #aaa; margin-bottom: .55rem;
+  }
+  .confirm-info {
+    font-size: .78rem; color: #888; margin-bottom: .55rem;
+  }
+  .confirm-items {
+    list-style: none;
+    background: #0d0d0d; border: 1px solid #1f1f1f;
+    border-radius: 6px; padding: .35rem;
+    margin: 0 0 .55rem 0;
+    display: flex; flex-direction: column; gap: .15rem;
+    overflow-y: auto;
+    max-height: 40vh;
+  }
+  .confirm-items li {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    grid-template-rows: auto auto;
+    column-gap: .5rem;
+    padding: .35rem .5rem;
+    border-radius: 4px;
+    background: #131318;
+  }
+  .item-label {
+    grid-column: 1; grid-row: 1;
+    font-family: monospace;
+    font-size: .8rem; color: #e8e8e8;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .item-sublabel {
+    grid-column: 1; grid-row: 2;
+    font-size: .68rem; color: #666;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .item-size {
+    grid-column: 2; grid-row: 1 / span 2;
+    align-self: center;
+    font-size: .74rem; color: #ffd166; font-variant-numeric: tabular-nums;
+  }
+  .confirm-total {
+    font-size: .78rem; color: #ccc;
+    margin: 0 0 .85rem 0;
+  }
+  .confirm-total strong { color: #ffd166; }
+  .confirm-error {
+    font-size: .75rem; color: #f88; background: #2a1a1a;
+    padding: .4rem .6rem; border-radius: 5px; margin-bottom: .55rem;
+    word-break: break-word;
+  }
+  .confirm-actions { display: flex; justify-content: flex-end; gap: .5rem; }
+  .confirm-actions button {
+    padding: .4rem .9rem; border-radius: 6px; font-size: .8rem;
+    cursor: pointer; border: 1px solid transparent;
+  }
+  .confirm-actions button:disabled { opacity: .5; cursor: default; }
+  .confirm-actions .cancel {
+    background: #1e1e1e; color: #ccc; border-color: #2a2a2a;
+  }
+  .confirm-actions .cancel:hover:not(:disabled) { background: #252525; }
+  .confirm-actions .clean {
+    background: #5a4a24; color: #ffe6b3; border-color: #7a6434;
+  }
+  .confirm-actions .clean:hover:not(:disabled) { background: #6a5a2c; }
 </style>

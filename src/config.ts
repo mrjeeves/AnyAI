@@ -1,6 +1,13 @@
 import { readTextFile, writeTextFile, exists, mkdir } from "@tauri-apps/plugin-fs";
 import { homeDir } from "@tauri-apps/api/path";
-import type { Config, ApiConfig, AutoUpdateConfig, RemoteUiConfig, MicConfig } from "./types";
+import type {
+  Config,
+  ApiConfig,
+  AutoUpdateConfig,
+  AutoCleanupConfig,
+  RemoteUiConfig,
+  MicConfig,
+} from "./types";
 
 async function configPath(): Promise<string> {
   const home = await homeDir();
@@ -35,6 +42,14 @@ const DEFAULT_REMOTE_UI: RemoteUiConfig = {
   port: 1474,
 };
 
+const DEFAULT_AUTO_CLEANUP: AutoCleanupConfig = {
+  models: true,
+  transcribe_buffer: true,
+  legacy: true,
+  updates: true,
+  conversations: true,
+};
+
 const DEFAULT_MIC: MicConfig = {
   device_name: "",
   sample_rate: 16000,
@@ -53,6 +68,7 @@ const DEFAULT_CONFIG: Config = {
   tracked_modes: ["text"],
   // Filled at first load via defaultConversationDir() — needs an async homeDir().
   conversation_dir: "",
+  auto_cleanup: { ...DEFAULT_AUTO_CLEANUP },
   api: { ...DEFAULT_API },
   auto_update: { ...DEFAULT_AUTO_UPDATE },
   remote_ui: { ...DEFAULT_REMOTE_UI },
@@ -98,6 +114,10 @@ function mergeDefaults(raw: Record<string, unknown>): Config {
     auto_update: {
       ...DEFAULT_AUTO_UPDATE,
       ...((raw as { auto_update?: Partial<AutoUpdateConfig> }).auto_update ?? {}),
+    },
+    auto_cleanup: {
+      ...DEFAULT_AUTO_CLEANUP,
+      ...((raw as { auto_cleanup?: Partial<AutoCleanupConfig> }).auto_cleanup ?? {}),
     },
     remote_ui: {
       ...DEFAULT_REMOTE_UI,
