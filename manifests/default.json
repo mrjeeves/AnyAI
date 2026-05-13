@@ -30,7 +30,7 @@
   "families": {
     "gemma4": {
       "label": "Gemma 4",
-      "description": "Google Gemma 4 (Apache-2.0) — multimodal open models with agentic skills, multi-step planning, and audio-visual processing. The e2b/e4b edge variants use per-layer activations: ~2 GB / ~3 GB resident at runtime despite a larger on-disk footprint, which keeps Pi 5, NVIDIA Jetson Orin Nano, and 8 GB Macs comfortably inside their memory budget alongside the ASR worker. The 26B MoE and 31B dense tiers scale up for workstation-class hardware. Every tier pairs with Moonshine on Pi-class hardware and Parakeet TDT on capable hardware so the same machine can run text + audio together.",
+      "description": "Google's open-weight models. A solid all-rounder for chat, writing, and everyday questions — and the family with the widest size range, from phone-class models that run on a Raspberry Pi up to workstation-class options that crunch through long, complex tasks.",
       "default_mode": "text",
       "modes": {
         "text": {
@@ -49,7 +49,7 @@
     },
     "qwen3.6": {
       "label": "Qwen 3.6",
-      "description": "Alibaba Qwen 3.6 — strong multilingual + reasoning. The 3.6 release ships at 14B / 27B / 35B; smaller hardware tiers fall back to Qwen 3.5 (0.6B / 1.7B / 4B / 8B). Every tier pairs with Moonshine on Pi-class hardware and Parakeet TDT on capable hardware so the same machine can run text + audio together.",
+      "description": "Alibaba's reasoning-focused models. Especially strong at math, code, and multilingual conversation. Pick the bigger options if you want it to \"think hard\" before answering; pick the smaller ones for quick, snappy chat.",
       "default_mode": "text",
       "modes": {
         "text": {
