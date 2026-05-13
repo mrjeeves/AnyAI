@@ -160,6 +160,7 @@
                 mode,
                 config.mode_overrides,
                 config.active_family,
+                config.family_overrides,
               );
               if (tag) lockSet.add(tag);
             } catch {}

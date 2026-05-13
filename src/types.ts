@@ -197,8 +197,23 @@ export interface Config {
   active_family: string;
   active_mode: Mode;
   model_cleanup_days: number;
+  /** Family names for which the user has dismissed the
+   *  "switching with auto-cleanup on" confirmation in the family
+   *  detail view's per-tier picker. Per-family rather than per-tier
+   *  because the user's intent is "I know how I use this family —
+   *  stop asking." Sticky; the user can clear individual entries
+   *  if/when we surface a control for it. */
+  cleanup_warning_suppressed_families: string[];
   kept_models: string[];
   mode_overrides: Partial<Record<Mode, string | null>>;
+  /** Per-family-per-mode user override of the hardware-picked tier.
+   *  Outer key is family name, inner key is mode, value is the
+   *  selected model tag. Set by the family detail view's "Switch to"
+   *  action on a non-recommended tier; cleared by "Un-switch", which
+   *  reverts that (family, mode) pair to the hardware tier walk. Wins
+   *  over `mode_overrides` (which is the older flat, global per-mode
+   *  override) so a per-family choice always beats a global one. */
+  family_overrides: Record<string, Partial<Record<Mode, string | null>>>;
   tracked_modes: Mode[];
   /** Where MyOwnLLM persists conversations and generated artifacts. Defaults to
    *  `~/.myownllm/conversations/`. Stored as an absolute path so exported

@@ -147,7 +147,14 @@
     manifest: Awaited<ReturnType<typeof getActiveManifest>>,
     config: Awaited<ReturnType<typeof loadConfig>>,
   ): string {
-    const r = resolveModelEx(hw, manifest, mode, config.mode_overrides, config.active_family);
+    const r = resolveModelEx(
+      hw,
+      manifest,
+      mode,
+      config.mode_overrides,
+      config.active_family,
+      config.family_overrides,
+    );
     return r.runtime !== "ollama" ? `${r.runtime}:${r.model}` : r.model;
   }
 
@@ -217,6 +224,7 @@
         activeMode,
         config.mode_overrides,
         activeFamilyName,
+        config.family_overrides,
       );
       activeModel =
         activeResolved.runtime !== "ollama"
@@ -233,6 +241,7 @@
         "transcribe",
         config.mode_overrides,
         activeFamilyName,
+        config.family_overrides,
       );
       pendingAsrModel =
         transcribeResolved.runtime !== "ollama" ? transcribeResolved.model : "";
@@ -276,6 +285,7 @@
           "text",
           config.mode_overrides,
           activeFamilyName,
+          config.family_overrides,
         ).model);
         firstRunAsrModel = asrPresent ? "" : pendingAsrModel;
         firstRunAsrRuntime = asrPresent ? "" : pendingAsrRuntime;
@@ -500,7 +510,14 @@
     manifest: Awaited<ReturnType<typeof getActiveManifest>>,
     config: Awaited<ReturnType<typeof loadConfig>>,
   ) {
-    const r = resolveModelEx(hw, manifest, "transcribe", config.mode_overrides, activeFamilyName);
+    const r = resolveModelEx(
+      hw,
+      manifest,
+      "transcribe",
+      config.mode_overrides,
+      activeFamilyName,
+      config.family_overrides,
+    );
     // Ollama-runtime transcribe is unsupported; any non-Ollama runtime
     // (moonshine / parakeet) needs the local ONNX model on disk.
     if (r.runtime === "ollama" || !r.model) return;
@@ -729,6 +746,7 @@
       "text",
       config.mode_overrides,
       activeFamilyName,
+      config.family_overrides,
     );
     if (resolved.runtime !== "ollama" || !resolved.model) {
       // Talking Points needs an Ollama text-runtime model; the
@@ -781,6 +799,7 @@
       "text",
       config.mode_overrides,
       activeFamilyName,
+      config.family_overrides,
     );
     if (resolved.runtime !== "ollama" || !resolved.model) {
       return "No chat model configured — pick a text family in Settings.";

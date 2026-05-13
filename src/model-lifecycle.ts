@@ -221,7 +221,14 @@ export async function lookupModelUsage(
     for (const [familyName, family] of Object.entries(manifest.families ?? {})) {
       for (const mode of ALL_MODES) {
         if (!family.modes[mode]) continue;
-        const resolved = resolveModel(hardware, manifest, mode, config.mode_overrides, familyName);
+        const resolved = resolveModel(
+          hardware,
+          manifest,
+          mode,
+          config.mode_overrides,
+          familyName,
+          config.family_overrides,
+        );
         if (
           provider.name === config.active_provider &&
           familyName === config.active_family &&
