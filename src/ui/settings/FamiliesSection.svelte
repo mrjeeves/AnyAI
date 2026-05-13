@@ -84,6 +84,25 @@
   let downloading = $state<Set<string>>(new Set());
   /** Tag → last error from a failed pull. Cleared when a retry starts. */
   let downloadError = $state<Record<string, string>>({});
+  /** Tag → in-flight delete. Mirrors `downloading` so the row can show a
+   *  spinner / disabled state while the Tauri delete call is running. */
+  let deleting = $state<Set<string>>(new Set());
+  /** Tag → last error from a failed delete. Cleared when a retry starts. */
+  let deleteError = $state<Record<string, string>>({});
+
+  /** Delete-tier confirmation modal. Opens when the user clicks the
+   *  trash button on an installed tier that isn't the family's
+   *  hardware-recommended pick and isn't the currently-effective
+   *  tier — the safe-to-delete population. `sizeBytes` carries the
+   *  on-disk size so the modal can quote how much disk gets freed
+   *  rather than just "delete this thing". */
+  let deleteConfirm = $state<{
+    familyLabel: string;
+    modeLabel: string;
+    model: string;
+    runtime: ModelRuntime;
+    sizeBytes: number;
+  } | null>(null);
 
   /** Switch-tier confirmation modal. Opens on Switch / Un-switch when
    *  the change would actually swap the resolved tag for that
@@ -300,6 +319,57 @@
       const next = new Set(downloading);
       next.delete(model);
       downloading = next;
+    }
+  }
+
+  /** Opens the delete-confirm modal for a tier. Callers gate this on
+   *  "installed && not recommended && not current" so the user can
+   *  never delete the model that's keeping the family alive or the
+   *  resolver's safety-net pick. */
+  function requestDeleteTier(
+    familyLabel: string,
+    modeLabel: string,
+    model: string,
+    runtime: ModelRuntime,
+    sizeBytes: number,
+  ) {
+    deleteError = { ...deleteError, [model]: "" };
+    deleteConfirm = { familyLabel, modeLabel, model, runtime, sizeBytes };
+  }
+
+  function cancelDelete() {
+    if (deleteConfirm && deleting.has(deleteConfirm.model)) return;
+    deleteConfirm = null;
+  }
+
+  /** Carry out the delete after the user confirms. Routes by runtime
+   *  the same way ModelsSection's row-level delete does: Ollama tags
+   *  go through `ollama_delete_model`, local-runtime ASR models
+   *  through `asr_model_remove`. Other runtimes shouldn't reach this
+   *  path (the trash button is only shown for the supported set), but
+   *  surface a clear error if they do rather than silently no-op. */
+  async function confirmDelete() {
+    if (!deleteConfirm) return;
+    const c = deleteConfirm;
+    if (deleting.has(c.model)) return;
+    deleteError = { ...deleteError, [c.model]: "" };
+    deleting = new Set([...deleting, c.model]);
+    try {
+      if (c.runtime === "ollama") {
+        await invoke("ollama_delete_model", { name: c.model });
+      } else if (c.runtime === "moonshine" || c.runtime === "parakeet") {
+        await invoke("asr_model_remove", { name: c.model });
+      } else {
+        throw new Error(`Delete for runtime "${c.runtime}" is managed elsewhere.`);
+      }
+      deleteConfirm = null;
+      await load();
+    } catch (e) {
+      deleteError = { ...deleteError, [c.model]: String(e) };
+    } finally {
+      const next = new Set(deleting);
+      next.delete(c.model);
+      deleting = next;
     }
   }
 
@@ -601,9 +671,12 @@
                   {@const sz = tierSize(modeSpec, tier.model, tier.disk_mb)}
                   {@const downloadable = tierRt === "ollama" || tierRt === "moonshine" || tierRt === "parakeet"}
                   {@const isDownloading = downloading.has(tier.model)}
+                  {@const isDeleting = deleting.has(tier.model)}
                   {@const dlErr = downloadError[tier.model]}
+                  {@const delErr = deleteError[tier.model]}
                   {@const smart = smartnessLabel(tierIdx, modeSpec.tiers.length)}
                   {@const memHint = memoryHint(tier)}
+                  {@const canDelete = downloadable && sz.installed && !recommended && !current}
                   <div
                     class="tier"
                     class:current
@@ -639,9 +712,29 @@
                       {#if dlErr}
                         <div class="tier-err">Download failed: {dlErr}</div>
                       {/if}
+                      {#if delErr}
+                        <div class="tier-err">Delete failed: {delErr}</div>
+                      {/if}
                     </div>
                     <div class="tier-actions">
-                      {#if downloadable && !sz.installed}
+                      {#if canDelete}
+                        <button
+                          class="tier-btn delete-btn"
+                          disabled={isDeleting}
+                          onclick={() =>
+                            requestDeleteTier(
+                              picked.family.label,
+                              modeSpec.label || modeName,
+                              tier.model,
+                              tierRt,
+                              sz.bytes,
+                            )}
+                          title="Free up {gbLabel(sz.bytes)} by removing this model from disk. Re-pulled on demand if you Switch to it later."
+                          aria-label="Delete {tier.model}"
+                        >
+                          {#if isDeleting}…{:else}🗑 Delete{/if}
+                        </button>
+                      {:else if downloadable && !sz.installed}
                         <button
                           class="tier-btn"
                           disabled={isDownloading}
@@ -747,6 +840,33 @@
           Turn off auto-cleanup &amp; {isUnswitch ? "un-switch" : "switch"}
         </button>
         <button class="cs-cancel" onclick={cancelSwitch}>Cancel</button>
+      </div>
+    </div>
+  {/if}
+
+  {#if deleteConfirm}
+    {@const dc = deleteConfirm}
+    {@const inFlight = deleting.has(dc.model)}
+    <div class="confirm-overlay" onclick={cancelDelete} role="presentation"></div>
+    <div class="confirm" role="dialog" aria-label="Confirm model delete">
+      <h3>Delete this model?</h3>
+      <p class="confirm-lead">
+        Removes <code>{dc.model}</code> — the {dc.familyLabel}
+        <strong>{dc.modeLabel}</strong> tier — from disk.
+      </p>
+      <p class="confirm-warn">
+        Frees about <strong>{gbLabel(dc.sizeBytes)}</strong>. You can
+        re-download it any time by clicking Download on this tier, or
+        the app will pull it again automatically if you Switch to it
+        later.
+      </p>
+      <div class="confirm-actions confirm-stack">
+        <button class="cs-danger" disabled={inFlight} onclick={confirmDelete}>
+          {inFlight ? "Deleting…" : "Delete"}
+        </button>
+        <button class="cs-cancel" disabled={inFlight} onclick={cancelDelete}>
+          Cancel
+        </button>
       </div>
     </div>
   {/if}
@@ -1023,6 +1143,8 @@
   .switch-btn:hover:not(:disabled) { color: #c4c4ff; border-color: #3a3a55; background: #1f1f33; }
   .unswitch-btn { color: #d4a64a; border-color: #3a2f1a; }
   .unswitch-btn:hover:not(:disabled) { color: #e6c068; background: #1f1812; border-color: #4a3a1a; }
+  .delete-btn { color: #f88; border-color: #3a1f1f; }
+  .delete-btn:hover:not(:disabled) { color: #faa; background: #2a1414; border-color: #4a2424; }
 
   .detail-footer {
     flex-shrink: 0;
@@ -1089,6 +1211,9 @@
   }
   .cs-primary { background: #6e6ef7; color: #fff; border-color: #6e6ef7; }
   .cs-primary:hover { background: #5a5ae0; }
+  .cs-danger { background: #5a2424; color: #ffd6d6; border-color: #7a3434; }
+  .cs-danger:hover:not(:disabled) { background: #6a2c2c; }
+  .cs-danger:disabled { opacity: .5; cursor: default; }
   .cs-secondary {
     background: #1a1a22; color: #d8d8d8; border-color: #2a2a3a;
   }
