@@ -41,6 +41,10 @@
       "allow": [{ "path": "$HOME/.myownllm" }, { "path": "$HOME/.myownllm/**" }]
     },
     {
+      "identifier": "fs:allow-stat",
+      "allow": [{ "path": "$HOME/.myownllm" }, { "path": "$HOME/.myownllm/**" }]
+    },
+    {
       "identifier": "http:default",
       "allow": [
         { "url": "http://127.0.0.1:*/*" },

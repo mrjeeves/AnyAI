@@ -264,6 +264,106 @@ pub fn buffer_size_bytes() -> u64 {
     walk(&root)
 }
 
+/// One orphan stream the Storage tab can clean up. Surfaced so the
+/// "Clean now" confirmation can list what would be deleted, with
+/// sizes, before the user commits.
+#[derive(Debug, Serialize, Clone)]
+pub struct OrphanStream {
+    pub stream_id: String,
+    pub size_bytes: u64,
+}
+
+/// Enumerate orphan stream directories under
+/// `~/.myownllm/transcribe-buffer/`. Live sessions are filtered out
+/// — only dirs `clear_buffer_orphans` would touch are returned.
+pub fn list_buffer_orphans() -> Vec<OrphanStream> {
+    let root = match buffer_root() {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    let entries = match std::fs::read_dir(&root) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let live = sessions();
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let stream_id = match path.file_name().and_then(|s| s.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        if live.contains_key(&stream_id) {
+            continue;
+        }
+        out.push(OrphanStream {
+            stream_id,
+            size_bytes: dir_size_bytes(&path),
+        });
+    }
+    out
+}
+
+/// Wipe everything under `~/.myownllm/transcribe-buffer/` that isn't
+/// owned by an in-flight session. Live sessions keep their per-stream
+/// dirs; orphaned dirs from previous crashes (the rows
+/// `list_pending_streams` surfaces) are removed. Returns the number of
+/// bytes reclaimed so the caller can show a confirmation. The Storage
+/// tab's "Clean now" + startup auto-cleanup both route through here.
+pub fn clear_buffer_orphans() -> u64 {
+    let root = match buffer_root() {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+    let entries = match std::fs::read_dir(&root) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    let mut freed: u64 = 0;
+    let live = sessions();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let stream_id = match path.file_name().and_then(|s| s.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        if live.contains_key(&stream_id) {
+            continue;
+        }
+        let size = dir_size_bytes(&path);
+        if std::fs::remove_dir_all(&path).is_ok() {
+            freed = freed.saturating_add(size);
+        }
+    }
+    freed
+}
+
+fn dir_size_bytes(path: &Path) -> u64 {
+    let mut total = 0u64;
+    let entries = match std::fs::read_dir(path) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    for entry in entries.flatten() {
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.is_dir() {
+            total = total.saturating_add(dir_size_bytes(&entry.path()));
+        } else {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    total
+}
+
 /// `_meta.json` written into a session's chunk dir on start so a
 /// later drain-only resumption can recover the runtime + model name
 /// without the user having to remember.

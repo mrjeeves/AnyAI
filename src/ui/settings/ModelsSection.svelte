@@ -6,7 +6,6 @@
     keepModel,
     unkeepModel,
     setModeOverride,
-    pruneNow,
     recomputeRecommendedSet,
     lookupModelUsage,
     type ModelUsage,
@@ -22,8 +21,6 @@
 
   let models = $state<ModelMeta[]>([]);
   let loading = $state(true);
-  let pruning = $state(false);
-  let prunedList = $state<string[]>([]);
   let tab = $state<"installed" | "overrides">("installed");
 
   let hardware = $state<HardwareProfile | null>(null);
@@ -181,13 +178,6 @@
   async function toggleKeep(name: string, kept: boolean) {
     if (kept) await unkeepModel(name);
     else await keepModel(name);
-    await reload();
-  }
-
-  async function prune() {
-    pruning = true;
-    prunedList = await pruneNow();
-    pruning = false;
     await reload();
   }
 
@@ -352,17 +342,9 @@
   <div class="h-tabs">
     <button class:active={tab === "installed"} onclick={() => (tab = "installed")}>Installed</button>
     <button class:active={tab === "overrides"} onclick={() => (tab = "overrides")}>Mode overrides</button>
-    {#if tab === "installed"}
-      <button class="prune-btn" onclick={prune} disabled={pruning}>
-        {pruning ? "Cleaning…" : "Clean up"}
-      </button>
-    {/if}
   </div>
 
   {#if tab === "installed"}
-    {#if prunedList.length > 0}
-      <div class="notice">Removed: {prunedList.join(", ")}</div>
-    {/if}
     {#if loading}
       <div class="loading">Loading…</div>
     {:else if models.length === 0}
@@ -592,25 +574,12 @@
 <style>
   .section { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   .h-tabs { display: flex; align-items: center; border-bottom: 1px solid #1e1e1e; flex-shrink: 0; gap: .25rem; padding-right: .5rem; }
-  .h-tabs button:not(.prune-btn) {
+  .h-tabs button {
     padding: .55rem; background: none; border: none; color: #666;
     font-size: .8rem; cursor: pointer; border-bottom: 2px solid transparent;
+    flex: 0 0 auto; padding-left: 1rem; padding-right: 1rem;
   }
-  .h-tabs button:not(.prune-btn).active { color: #e8e8e8; border-bottom-color: #6e6ef7; }
-  .h-tabs button:not(.prune-btn):not(.active):not(.prune-btn) { flex: 0 0 auto; padding-left: 1rem; padding-right: 1rem; }
-  .h-tabs button:not(.prune-btn).active { flex: 0 0 auto; padding-left: 1rem; padding-right: 1rem; }
-  .h-tabs > button:not(.prune-btn):first-child { padding-left: 1rem; }
-  .prune-btn {
-    margin-left: auto;
-    padding: .3rem .7rem; background: #2a2a2a; border: 1px solid #3a3a3a;
-    color: #ccc; border-radius: 6px; font-size: .75rem; cursor: pointer;
-  }
-  .prune-btn:hover:not(:disabled) { background: #333; }
-  .prune-btn:disabled { opacity: .4; cursor: default; }
-  .notice {
-    padding: .5rem 1rem; background: #1a2a1a; font-size: .78rem; color: #6a6;
-    border-bottom: 1px solid #1e1e1e;
-  }
+  .h-tabs button.active { color: #e8e8e8; border-bottom-color: #6e6ef7; }
   .loading, .empty { padding: 2rem; text-align: center; color: #555; font-size: .85rem; }
   .list { flex: 1; overflow-y: scroll; padding: .5rem; display: flex; flex-direction: column; gap: .25rem; min-height: 0; --scroll-fade-bg: #111; }
   .model-row {

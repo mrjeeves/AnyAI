@@ -414,10 +414,24 @@ pub fn legacy_remove(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Reclaim every entry in `LEGACY_RUNTIME_DIRS` that still has bytes
+/// on disk. Returns the freed bytes so the Storage tab can show a
+/// post-clean confirmation. Errors on individual entries are swallowed
+/// — a partial clean is more useful than a hard failure.
+pub fn legacy_remove_all() -> u64 {
+    let mut freed: u64 = 0;
+    for info in legacy_list() {
+        if info.exists && info.size_bytes > 0 && legacy_remove(&info.id).is_ok() {
+            freed = freed.saturating_add(info.size_bytes);
+        }
+    }
+    freed
+}
+
 /// Recursive size of a directory tree in bytes. Errors collapse to 0
 /// — the Storage tab uses this for a "you can reclaim X" hint, not
 /// for billing.
-fn dir_size_bytes(path: &std::path::Path) -> u64 {
+pub fn dir_size_bytes(path: &std::path::Path) -> u64 {
     let entries = match std::fs::read_dir(path) {
         Ok(e) => e,
         Err(_) => return 0,

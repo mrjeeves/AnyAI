@@ -69,11 +69,29 @@ impl ApplyPolicy {
 /// Apply any staged update for the current process before it starts doing real
 /// work. Idempotent. Errors are logged and swallowed: an update problem must
 /// not prevent the binary from starting.
+///
+/// The leftover-binary sweep is gated on `auto_cleanup.updates` so users who
+/// opted out of automatic cleanup in the Storage tab keep their .old binary
+/// around until they hit "Clean now". Default is on, so existing installs see
+/// no behavior change.
 pub fn apply_pending_if_any() {
-    cleanup_old_replaced_binary();
+    if auto_cleanup_updates_enabled() {
+        cleanup_old_replaced_binary();
+    }
     if let Err(e) = apply_pending() {
         eprintln!("self-update: apply skipped: {e}");
     }
+}
+
+fn auto_cleanup_updates_enabled() -> bool {
+    let cfg = match crate::resolver::load_config_value() {
+        Ok(c) => c,
+        Err(_) => return true,
+    };
+    cfg.get("auto_cleanup")
+        .and_then(|v| v.get("updates"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
 }
 
 /// Apply pending and surface the error. Used by the GUI's "Restart to apply"
@@ -970,6 +988,108 @@ fn cleanup_old_replaced_binary() {
             let _ = std::fs::remove_file(&old);
         }
     }
+}
+
+/// One reclaimable update leftover. Used by the Storage tab to itemize
+/// what "Clean now" on the Updates section will delete.
+#[derive(Debug, serde::Serialize, Clone)]
+pub struct UpdateLeftover {
+    /// Stable id the UI passes back to `update_leftovers_remove` — `"old-binary"`
+    /// for the Windows side-swap file, `"staged:<version>"` for a downloaded
+    /// staging dir.
+    pub id: String,
+    pub label: String,
+    pub path: String,
+    pub size_bytes: u64,
+}
+
+#[cfg(windows)]
+fn file_size_bytes(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// Enumerate update leftovers safe to reclaim:
+///   - Windows: `<exe>.old` from the side-swap.
+///   - All platforms: staged-update dirs under `~/.myownllm/updates/<version>/`
+///     that AREN'T the version pointed at by a live `pending.json`. Once an
+///     update is applied the staged dir is dead weight; only the in-flight
+///     pending dir is worth keeping around.
+pub fn list_update_leftovers() -> Vec<UpdateLeftover> {
+    let mut out: Vec<UpdateLeftover> = Vec::new();
+
+    #[cfg(windows)]
+    if let Ok(exe) = std::env::current_exe() {
+        let old = old_binary_path(&exe);
+        if old.exists() {
+            out.push(UpdateLeftover {
+                id: "old-binary".to_string(),
+                label: "Previous binary (.old)".to_string(),
+                path: old.to_string_lossy().into_owned(),
+                size_bytes: file_size_bytes(&old),
+            });
+        }
+    }
+
+    let updates_dir = match crate::myownllm_dir() {
+        Ok(d) => d.join("updates"),
+        Err(_) => return out,
+    };
+    if !updates_dir.exists() {
+        return out;
+    }
+
+    // Anything pending.json still references is in-flight — leave it alone.
+    let pending_version: Option<String> = std::fs::read_to_string(updates_dir.join("pending.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| {
+            v.get("version")
+                .and_then(|s| s.as_str())
+                .map(str::to_string)
+        });
+
+    if let Ok(entries) = std::fs::read_dir(&updates_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = match path.file_name().and_then(|s| s.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            if pending_version.as_deref() == Some(name.as_str()) {
+                continue;
+            }
+            out.push(UpdateLeftover {
+                id: format!("staged:{name}"),
+                label: format!("Staged update v{name}"),
+                path: path.to_string_lossy().into_owned(),
+                size_bytes: crate::models::dir_size_bytes(&path),
+            });
+        }
+    }
+
+    out
+}
+
+/// Remove every leftover `list_update_leftovers` would surface. Returns
+/// the freed bytes for confirmation in the Storage tab. Tolerant of
+/// individual failures.
+pub fn clear_update_leftovers() -> u64 {
+    let mut freed: u64 = 0;
+    for item in list_update_leftovers() {
+        let path = Path::new(&item.path);
+        let removed = if path.is_dir() {
+            std::fs::remove_dir_all(path).is_ok()
+        } else {
+            std::fs::remove_file(path).is_ok()
+        };
+        if removed {
+            freed = freed.saturating_add(item.size_bytes);
+        }
+    }
+    freed
 }
 
 // ---------------------------------------------------------------------------

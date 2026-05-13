@@ -177,6 +177,21 @@ export interface MicConfig {
   auto_gain_control: boolean;
 }
 
+/** Per-section auto-cleanup toggles. Each flag gates a startup
+ *  cleanup pass for that storage area; the Storage tab pairs the
+ *  toggle with a "Clean now" button so the user can run the same
+ *  pass on demand. All flags default to `true` to preserve the
+ *  pre-centralisation behavior (models + updates were cleaned
+ *  silently; legacy / transcribe / conversations were exposed as
+ *  per-item reclaims or background drains). */
+export interface AutoCleanupConfig {
+  models: boolean;
+  transcribe_buffer: boolean;
+  legacy: boolean;
+  updates: boolean;
+  conversations: boolean;
+}
+
 export interface Config {
   active_provider: string;
   active_family: string;
@@ -189,6 +204,7 @@ export interface Config {
    *  `~/.myownllm/conversations/`. Stored as an absolute path so exported
    *  configs are readable, though new machines re-default on first load. */
   conversation_dir: string;
+  auto_cleanup: AutoCleanupConfig;
   api: ApiConfig;
   auto_update: AutoUpdateConfig;
   remote_ui: RemoteUiConfig;

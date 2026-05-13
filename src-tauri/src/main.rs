@@ -409,6 +409,43 @@ fn legacy_models_remove(id: String) -> Result<(), String> {
     models::legacy_remove(&id).map_err(|e| e.to_string())
 }
 
+/// Reclaim every legacy runtime directory at once. Used by the
+/// Storage tab's "Clean now" button on the Legacy section and by
+/// the startup auto-cleanup pass when the toggle is on.
+#[tauri::command]
+fn legacy_models_remove_all() -> u64 {
+    models::legacy_remove_all()
+}
+
+/// Orphan stream dirs under `~/.myownllm/transcribe-buffer/` —
+/// per-stream chunk folders not owned by a live session. Used by
+/// the Storage tab to itemize what "Clean now" on the Transcription
+/// buffer section will delete.
+#[tauri::command]
+fn transcribe_buffer_orphans() -> Vec<transcribe::OrphanStream> {
+    transcribe::list_buffer_orphans()
+}
+
+/// Wipe orphan stream dirs. Returns the freed bytes for the
+/// confirmation toast. Live sessions are preserved.
+#[tauri::command]
+fn transcribe_buffer_clear() -> u64 {
+    transcribe::clear_buffer_orphans()
+}
+
+/// Reclaimable update leftovers — staged update dirs and the
+/// Windows `.old` side-swap binary.
+#[tauri::command]
+fn update_leftovers_list() -> Vec<self_update::UpdateLeftover> {
+    self_update::list_update_leftovers()
+}
+
+/// Wipe every update leftover and return the freed bytes.
+#[tauri::command]
+fn update_leftovers_clear() -> u64 {
+    self_update::clear_update_leftovers()
+}
+
 #[tauri::command]
 fn audio_input_devices() -> Result<Vec<transcribe::AudioInputDevice>, String> {
     transcribe::list_input_devices().map_err(|e| e.to_string())
@@ -575,6 +612,11 @@ fn main() {
             diarize_model_present,
             legacy_models_list,
             legacy_models_remove,
+            legacy_models_remove_all,
+            transcribe_buffer_orphans,
+            transcribe_buffer_clear,
+            update_leftovers_list,
+            update_leftovers_clear,
             audio_input_devices,
             write_text_to_path,
         ])
