@@ -30,7 +30,7 @@
   "families": {
     "gemma4": {
       "label": "Gemma 4",
-      "description": "Google's open-weight models. A solid all-rounder for chat, writing, and everyday questions — and the family with the widest size range, from phone-class models that run on a Raspberry Pi up to workstation-class options that crunch through long, complex tasks.",
+      "description": "Google's general-purpose chat models. A safe default — handles writing, summarising, and everyday questions well.",
       "default_mode": "text",
       "modes": {
         "text": {
@@ -49,7 +49,7 @@
     },
     "qwen3.6": {
       "label": "Qwen 3.6",
-      "description": "Alibaba's reasoning-focused models. Especially strong at math, code, and multilingual conversation. Pick the bigger options if you want it to \"think hard\" before answering; pick the smaller ones for quick, snappy chat.",
+      "description": "Alibaba's models — best for math, coding, and conversations in non-English languages.",
       "default_mode": "text",
       "modes": {
         "text": {

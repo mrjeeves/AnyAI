@@ -743,16 +743,25 @@ fn build_backends(
     model_name: &str,
     diarize_composite: Option<&str>,
     on_stage: &dyn Fn(&str),
+    cancel: &AtomicBool,
 ) -> Result<Backends> {
-    on_stage(&format!("Loading {} model…", runtime));
+    // The ASR backend pushes its own per-stage heartbeats now
+    // ("Loading Moonshine encoder…" / "decoder…" / "tokenizer…"); the
+    // bare "Loading X model…" preamble used to be the only signal
+    // here, but on hardware where one of those sub-loads stalls the
+    // user sees the same generic message for minutes and can't tell
+    // whether anything is wrong.
     let mut asr = asr::make_backend(runtime, model_name)?;
-    asr.warm_up()?;
+    asr.warm_up(on_stage, cancel)?;
     let caps = asr.caps();
 
+    if cancel.load(Ordering::Relaxed) {
+        return Err(anyhow!("ASR warm-up cancelled"));
+    }
+
     let diarize = if let Some(name) = diarize_composite {
-        on_stage("Loading speaker models…");
         let mut d = diarize::make_backend("pyannote-diarize", name)?;
-        d.warm_up()?;
+        d.warm_up(on_stage, cancel)?;
         Some(d)
     } else {
         None
@@ -781,7 +790,7 @@ fn run_session(
         );
     };
     let (mut asr, mut diarize, caps) =
-        build_backends(runtime, model_name, diarize_composite, &stage)?;
+        build_backends(runtime, model_name, diarize_composite, &stage, &cancel)?;
 
     let buffer_dir = chunk_buffer_dir(stream_id)?;
     if let Ok(entries) = std::fs::read_dir(&buffer_dir) {
@@ -1092,7 +1101,7 @@ fn run_drain(
         );
     };
     let (mut asr, mut diarize, caps) =
-        build_backends(runtime, model_name, diarize_composite, &stage)?;
+        build_backends(runtime, model_name, diarize_composite, &stage, &cancel)?;
     let buffer_dir = chunk_buffer_dir(stream_id)?;
 
     let mut next_seq: u64 = lowest_pending_seq(&buffer_dir).unwrap_or(1);
@@ -1252,7 +1261,7 @@ fn run_upload(
         );
     };
     let (mut asr, mut diarize, caps) =
-        build_backends(runtime, model_name, diarize_composite, &stage)?;
+        build_backends(runtime, model_name, diarize_composite, &stage, &cancel)?;
 
     let file = File::open(file_path).map_err(|e| anyhow!("open audio file: {e}"))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
