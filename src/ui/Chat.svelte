@@ -83,6 +83,12 @@
   let streaming = $state(false);
   let activeStreamId = $state<string | null>(null);
   let settingsTab = $state<SettingsTab | null>(null);
+  /** When the StatusBar's "{family} · {model}" button is clicked, this
+   *  carries the active family name so SettingsPanel opens the Family
+   *  tab straight into that family's tier ladder (per-tier Switch /
+   *  Un-switch) instead of the list. Cleared alongside `settingsTab`
+   *  whenever the panel closes. */
+  let settingsDetailFamily = $state<string | null>(null);
   let messagesEl: HTMLElement;
 
   /** Loaded conversation snapshot. We keep the full record (id + metadata)
@@ -385,6 +391,7 @@
     activeConversation = null;
     messages = [];
     settingsTab = null;
+    settingsDetailFamily = null;
     await onProviderChange();
   }
 
@@ -433,7 +440,10 @@
     family={activeFamily}
     {sidebarOpen}
     {onToggleSidebar}
-    onOpenSettings={(tab) => (settingsTab = tab)}
+    onOpenSettings={(tab, opts) => {
+      settingsTab = tab;
+      settingsDetailFamily = opts?.detailFamily ?? null;
+    }}
   />
 
   {#if tpHoldsSlot}
@@ -529,7 +539,11 @@
   {#if settingsTab}
     <SettingsPanel
       initialTab={settingsTab}
-      onClose={() => (settingsTab = null)}
+      initialDetailFamily={settingsDetailFamily}
+      onClose={() => {
+        settingsTab = null;
+        settingsDetailFamily = null;
+      }}
       onChanged={handleProviderChange}
     />
   {/if}
