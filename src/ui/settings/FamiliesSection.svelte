@@ -15,9 +15,15 @@
     OllamaModel,
   } from "../../types";
 
-  let { onChanged, onClose } = $props<{
+  let { onChanged, onClose, initialDetailFamily = null } = $props<{
     onChanged: () => void;
     onClose: () => void;
+    /** Optional family name to open directly into the detail view (rather
+     *  than the list). Used by the chat StatusBar's "{family} · {model}"
+     *  button to drop the user straight into the tier ladder for the
+     *  family they're already on, making per-tier Switch / Un-switch
+     *  discoverable without an extra click through the list. */
+    initialDetailFamily?: string | null;
   }>();
 
   /** Mirror of `models::ModelInfo` in src-tauri/src/models.rs. The
@@ -61,8 +67,16 @@
 
   /** When non-null, render the detail page for this family instead of the
    *  list. This is a navigation surface inside the Family tab — back button
-   *  takes the user to the list, the side-tabs take them out of the tab. */
-  let detailFamily = $state<string | null>(null);
+   *  takes the user to the list, the side-tabs take them out of the tab.
+   *  Seeded from `initialDetailFamily` so a deep-link from the chat
+   *  StatusBar lands directly on the tier ladder; the Back button then
+   *  walks the user out to the family list as usual. The Settings panel
+   *  is mounted fresh each open (`{#if settingsTab}` in Chat.svelte), so
+   *  capturing the initial prop value is exactly what we want — we don't
+   *  need to track later prop changes.
+   */
+  // svelte-ignore state_referenced_locally
+  let detailFamily = $state<string | null>(initialDetailFamily ?? null);
 
   /** Tag → in-flight download. Per-tag rather than per-tier so the same
    *  tag appearing in multiple modes / tier ladders shows a spinner

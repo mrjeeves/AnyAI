@@ -23,10 +23,16 @@
 
   let {
     initialTab = "families",
+    initialDetailFamily = null,
     onClose,
     onChanged,
   } = $props<{
     initialTab?: Tab;
+    /** Optional family name to open into the Families tab's detail view
+     *  on mount (skips the list). Only honoured when `initialTab` lands
+     *  on the Families tab — otherwise it's ignored to keep the routing
+     *  predictable from other deep-links. */
+    initialDetailFamily?: string | null;
     onClose: () => void;
     onChanged: () => void;
   }>();
@@ -77,7 +83,7 @@
 
     <div class="content">
       {#if active === "families"}
-        <FamiliesSection {onChanged} {onClose} />
+        <FamiliesSection {onChanged} {onClose} {initialDetailFamily} />
       {:else if active === "providers"}
         <ProvidersSection {onChanged} />
       {:else if active === "models"}

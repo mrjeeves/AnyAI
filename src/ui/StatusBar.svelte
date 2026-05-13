@@ -8,7 +8,13 @@
     family: string;
     sidebarOpen: boolean;
     onToggleSidebar: () => void;
-    onOpenSettings: (tab: "providers" | "families" | "models" | "storage" | "updates") => void;
+    /** `opts.detailFamily` opens the Families tab straight into that
+     *  family's tier ladder (Switch / Un-switch / Download per tier).
+     *  Only honoured when `tab === "families"`. */
+    onOpenSettings: (
+      tab: "providers" | "families" | "models" | "storage" | "updates",
+      opts?: { detailFamily?: string },
+    ) => void;
   }>();
 
   // If the update dot is showing, the user almost certainly clicked the
@@ -16,6 +22,19 @@
   // don't have to dig through the sidebar to find what they came for.
   function openSettings() {
     onOpenSettings(updateUi.available ? "updates" : "providers");
+  }
+
+  /** Click handler for the "{family} · {model}" pill. When we know the
+   *  active family, land the user directly on its tier ladder so
+   *  switching the model is one click away. Without an active family
+   *  (provider not picked yet, manifest unresolved, etc.) fall back to
+   *  the family list so they can still pick one. */
+  function openFamily() {
+    if (family) {
+      onOpenSettings("families", { detailFamily: family });
+    } else {
+      onOpenSettings("families");
+    }
   }
 </script>
 
@@ -34,7 +53,7 @@
       />
     </svg>
   </button>
-  <button class="provider-btn" onclick={() => onOpenSettings("families")} title="Change family / model">
+  <button class="provider-btn" onclick={openFamily} title="Switch the model used for this family">
     <span class="dot"></span>
     {#if family}
       <span class="family-name">{family}</span>
