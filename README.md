@@ -42,7 +42,9 @@ Or one line in a shell:
 ```sh
 # macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/scripts/install.sh | sh
+```
 
+```sh
 # Windows
 irm https://raw.githubusercontent.com/mrjeeves/MyOwnLLM/main/scripts/install.ps1 | iex
 ```
