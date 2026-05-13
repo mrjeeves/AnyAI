@@ -81,7 +81,8 @@ impl AsrBackend for ParakeetBackend {
         }
     }
 
-    fn warm_up(&mut self) -> Result<()> {
+    fn warm_up(&mut self, on_stage: &dyn Fn(&str), _cancel: &AtomicBool) -> Result<()> {
+        on_stage("Loading Parakeet model…");
         let model_path = self.artifact_path("model.onnx")?;
         let tokens_path = self.artifact_path("tokens.txt")?;
         if !model_path.exists() {

@@ -104,31 +104,60 @@ impl AsrBackend for MoonshineBackend {
         }
     }
 
-    fn warm_up(&mut self) -> Result<()> {
+    fn warm_up(&mut self, on_stage: &dyn Fn(&str), cancel: &AtomicBool) -> Result<()> {
         let enc_path = self.artifact_path("encoder.onnx")?;
         let dec_path = self.artifact_path("decoder.onnx")?;
         let tok_path = self.artifact_path("tokenizer.json")?;
-        for p in [&enc_path, &dec_path, &tok_path] {
-            if !p.exists() {
-                return Err(anyhow!("Moonshine artifact missing: {}", p.display()));
-            }
+
+        on_stage("Verifying Moonshine files…");
+        // Pre-flight: not just "exists" but "has plausibly the right
+        // number of bytes". A truncated download (network drop on
+        // first pull, cancelled-mid-stream) leaves a 0-byte or
+        // partial .onnx file behind that passes the `exists()` check
+        // but causes `commit_from_file` to hang for minutes inside
+        // ORT trying to make sense of the malformed protobuf. Bailing
+        // here with a clear error lets the user re-pull instead.
+        check_file_plausible(&enc_path, MIN_ENCODER_BYTES, "encoder")?;
+        check_file_plausible(&dec_path, MIN_DECODER_BYTES, "decoder")?;
+        check_file_plausible(&tok_path, MIN_TOKENIZER_BYTES, "tokenizer")?;
+        if cancel.load(Ordering::Relaxed) {
+            return Err(anyhow!("Moonshine warm-up cancelled"));
         }
 
+        // ORT graph optimization is set to `Disable` (was Level1 in
+        // #113, originally Level3 before that). Even Level1's
+        // constant-folding pass can stall for minutes inside
+        // `commit_from_file` on the quantized merged-decoder ONNX
+        // when run on memory-constrained Apple Silicon (reported on
+        // an M-series 8 GB laptop). The model is already INT8 from
+        // the upstream export, so the runtime wins from graph
+        // optimization are minimal anyway. `with_intra_threads(1)`
+        // for the same reason — the ORT thread-pool init was
+        // hypothesised as a second source of stalls under memory
+        // pressure; single-thread is the safest baseline. We can
+        // walk these back up tier-by-tier if perf becomes a
+        // problem, but correctness ("Record actually works") wins
+        // over a marginal latency improvement here.
+        on_stage("Loading Moonshine encoder…");
         let encoder = Session::builder()
             .map_err(|e| anyhow!("ort builder: {e}"))?
-            .with_optimization_level(GraphOptimizationLevel::Level1)
+            .with_optimization_level(GraphOptimizationLevel::Disable)
             .map_err(|e| anyhow!("ort opt level: {e}"))?
-            .with_intra_threads(intra_threads())
+            .with_intra_threads(1)
             .map_err(|e| anyhow!("ort threads: {e}"))?
             .commit_from_file(&enc_path)
             .map_err(|e| anyhow!("loading {}: {e}", enc_path.display()))
             .with_context(|| "warm_up moonshine encoder".to_string())?;
 
+        if cancel.load(Ordering::Relaxed) {
+            return Err(anyhow!("Moonshine warm-up cancelled"));
+        }
+        on_stage("Loading Moonshine decoder…");
         let decoder = Session::builder()
             .map_err(|e| anyhow!("ort builder: {e}"))?
-            .with_optimization_level(GraphOptimizationLevel::Level1)
+            .with_optimization_level(GraphOptimizationLevel::Disable)
             .map_err(|e| anyhow!("ort opt level: {e}"))?
-            .with_intra_threads(intra_threads())
+            .with_intra_threads(1)
             .map_err(|e| anyhow!("ort threads: {e}"))?
             .commit_from_file(&dec_path)
             .map_err(|e| anyhow!("loading {}: {e}", dec_path.display()))
@@ -167,6 +196,10 @@ impl AsrBackend for MoonshineBackend {
             }
         }
 
+        if cancel.load(Ordering::Relaxed) {
+            return Err(anyhow!("Moonshine warm-up cancelled"));
+        }
+        on_stage("Loading Moonshine tokenizer…");
         let tokenizer = Tokenizer::from_file(&tok_path)
             .map_err(|e| anyhow!("loading tokenizer {}: {e}", tok_path.display()))?;
 
@@ -357,12 +390,34 @@ impl MoonshineBackend {
     }
 }
 
-/// Threads to give the ORT CPU EP. Same conservative cap as the
-/// other backends — leave a core for the chat model and the
-/// ingest thread.
-fn intra_threads() -> usize {
-    let n = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(2);
-    n.saturating_sub(1).clamp(1, 4)
+/// Minimum plausible size for a fully-downloaded Moonshine encoder
+/// (~30 MB INT8 ONNX export). Mirrors `min_bytes` in
+/// `src-tauri/src/models.rs` for the same artifact so we catch a
+/// truncated download here instead of letting it stall inside
+/// `commit_from_file`.
+const MIN_ENCODER_BYTES: u64 = 15_000_000;
+const MIN_DECODER_BYTES: u64 = 20_000_000;
+const MIN_TOKENIZER_BYTES: u64 = 500_000;
+
+/// Verify an artifact file is present and at least `min_bytes` long.
+/// `commit_from_file` on a truncated ONNX file enters a slow
+/// protobuf-parsing path that looks identical to "ORT is loading the
+/// model" but never returns. Catching the truncation here surfaces a
+/// clear error the user can act on (delete + re-download).
+fn check_file_plausible(path: &std::path::Path, min_bytes: u64, label: &str) -> Result<()> {
+    let meta = std::fs::metadata(path).map_err(|e| {
+        anyhow!(
+            "Moonshine {label} file is missing or unreadable at {}: {e}",
+            path.display()
+        )
+    })?;
+    if meta.len() < min_bytes {
+        return Err(anyhow!(
+            "Moonshine {label} at {} looks truncated ({} bytes, expected ≥ {}). Delete it from Settings → Models and re-download.",
+            path.display(),
+            meta.len(),
+            min_bytes,
+        ));
+    }
+    Ok(())
 }

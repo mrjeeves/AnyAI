@@ -91,7 +91,15 @@ pub trait AsrBackend: Send {
     /// Load model files into memory and prepare any per-session
     /// state. Called once before the first `process_chunk`. Slow:
     /// running `ort::Session::load` happens here.
-    fn warm_up(&mut self) -> Result<()>;
+    ///
+    /// `on_stage` reports the current sub-step ("Loading Moonshine
+    /// encoder…") so the UI can localise where a long load is parked
+    /// — `commit_from_file` on ONNX runtime is uncancellable and can
+    /// take a long time on constrained hardware, so granular progress
+    /// is the only honest UX we have during warm-up. `cancel` is
+    /// poked between sub-steps so a Stop click can still exit
+    /// cleanly even if the current sub-step has to finish first.
+    fn warm_up(&mut self, on_stage: &dyn Fn(&str), cancel: &AtomicBool) -> Result<()>;
 
     /// Decode one chunk's worth of 16 kHz mono f32 samples. `chunk_t0_ms`
     /// is the chunk's start time relative to session start — the

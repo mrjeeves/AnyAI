@@ -57,7 +57,11 @@ pub struct SpeakerTurn {
 /// `PyannoteOrtBackend` — Sortformer is reserved (see `models.rs`).
 pub trait DiarizeBackend: Send {
     /// Load all model files. Slow; called on a worker thread.
-    fn warm_up(&mut self) -> Result<()>;
+    /// `on_stage` reports the current sub-step (segmenter, embedder)
+    /// so the UI shows which side is loading. `cancel` is checked
+    /// between sub-steps so Stop can interrupt before the next load
+    /// fires even if `commit_from_file` itself is blocking.
+    fn warm_up(&mut self, on_stage: &dyn Fn(&str), cancel: &AtomicBool) -> Result<()>;
 
     /// Process one chunk of 16 kHz mono f32 audio with its absolute
     /// session-relative timestamp. Returns the speaker turns the
@@ -122,8 +126,13 @@ impl PyannoteOrtBackend {
 }
 
 impl DiarizeBackend for PyannoteOrtBackend {
-    fn warm_up(&mut self) -> Result<()> {
+    fn warm_up(&mut self, on_stage: &dyn Fn(&str), cancel: &AtomicBool) -> Result<()> {
+        on_stage("Loading speaker segmenter…");
         self.segmenter.warm_up()?;
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(anyhow::anyhow!("diarize warm-up cancelled"));
+        }
+        on_stage("Loading speaker embedder…");
         self.embedder.warm_up()?;
         Ok(())
     }
