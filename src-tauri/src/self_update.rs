@@ -1039,11 +1039,14 @@ pub fn list_update_leftovers() -> Vec<UpdateLeftover> {
     }
 
     // Anything pending.json still references is in-flight — leave it alone.
-    let pending_version: Option<String> =
-        std::fs::read_to_string(updates_dir.join("pending.json"))
-            .ok()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .and_then(|v| v.get("version").and_then(|s| s.as_str()).map(str::to_string));
+    let pending_version: Option<String> = std::fs::read_to_string(updates_dir.join("pending.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| {
+            v.get("version")
+                .and_then(|s| s.as_str())
+                .map(str::to_string)
+        });
 
     if let Ok(entries) = std::fs::read_dir(&updates_dir) {
         for entry in entries.flatten() {
