@@ -55,6 +55,19 @@ pub async fn resolve_with_hardware(
 ) -> Result<String> {
     let config = load_config_value()?;
 
+    let active_family = config["active_family"].as_str().unwrap_or("");
+
+    // Per-family override wins over the flat `mode_overrides` so a
+    // user's tier choice for one family doesn't bleed into another.
+    // Mirror of the precedence in `src/manifest.ts::resolveModelEx`.
+    if !active_family.is_empty() {
+        if let Some(over) = config["family_overrides"][active_family][mode].as_str() {
+            if !over.is_empty() {
+                return Ok(over.to_string());
+            }
+        }
+    }
+
     if let Some(over) = config["mode_overrides"][mode].as_str() {
         if !over.is_empty() {
             return Ok(over.to_string());
@@ -66,7 +79,6 @@ pub async fn resolve_with_hardware(
         None => active_provider_url(&config).unwrap_or_else(|| FALLBACK_MANIFEST_URL.to_string()),
     };
 
-    let active_family = config["active_family"].as_str().unwrap_or("");
     let manifest = fetch_or_load_manifest(&manifest_url).await?;
     resolve_in_manifest(&manifest, hw, mode, active_family)
 }

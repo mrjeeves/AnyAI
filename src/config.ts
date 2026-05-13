@@ -63,8 +63,10 @@ const DEFAULT_CONFIG: Config = {
   active_family: "gemma4",
   active_mode: "text",
   model_cleanup_days: 1,
+  cleanup_warning_suppressed_families: [],
   kept_models: [],
   mode_overrides: {},
+  family_overrides: {},
   tracked_modes: ["text"],
   // Filled at first load via defaultConversationDir() — needs an async homeDir().
   conversation_dir: "",
@@ -128,7 +130,12 @@ function mergeDefaults(raw: Record<string, unknown>): Config {
       ...((raw as { mic?: Partial<MicConfig> & { whisper_model?: string } }).mic ?? {}),
     },
     mode_overrides: (raw as { mode_overrides?: Config["mode_overrides"] }).mode_overrides ?? {},
+    family_overrides:
+      (raw as { family_overrides?: Config["family_overrides"] }).family_overrides ?? {},
     kept_models: (raw as { kept_models?: string[] }).kept_models ?? [],
+    cleanup_warning_suppressed_families:
+      (raw as { cleanup_warning_suppressed_families?: string[] })
+        .cleanup_warning_suppressed_families ?? [],
     tracked_modes: (raw as { tracked_modes?: Config["tracked_modes"] }).tracked_modes ?? [],
     providers: (raw as { providers?: Config["providers"] }).providers ?? DEFAULT_CONFIG.providers,
   };

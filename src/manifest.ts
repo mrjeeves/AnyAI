@@ -252,6 +252,7 @@ export function resolveModelEx(
   mode: Mode,
   modeOverrides?: Partial<Record<Mode, string | null>>,
   familyName?: string,
+  familyOverrides?: Record<string, Partial<Record<Mode, string | null>>>,
 ): ResolvedModel {
   const picked = pickFamily(manifest, familyName);
   const family = picked?.family;
@@ -262,6 +263,18 @@ export function resolveModelEx(
   const exactSpec = family ? modeFor(manifest, family, mode) : undefined;
   const modeLevelRuntime: ModelRuntime =
     exactSpec?.runtime ?? defaultRuntimeFor(mode);
+
+  // Per-family override wins over the flat global `mode_overrides`. The
+  // family detail view's "Switch to" action writes here so a user's
+  // tier choice for gemma4 text doesn't bleed into qwen3 text. Keyed by
+  // the resolved family name (`picked.name`) so the override applies
+  // regardless of whether the caller passed the canonical name or a
+  // stale alias.
+  const famKey = picked?.name ?? familyName;
+  const famOverride = famKey ? familyOverrides?.[famKey]?.[mode] : null;
+  if (famOverride) {
+    return { model: famOverride, runtime: modeLevelRuntime, tier: null, override: true };
+  }
 
   const override = modeOverrides?.[mode];
   if (override) {
@@ -391,8 +404,9 @@ export function resolveModel(
   mode: Mode,
   modeOverrides?: Partial<Record<Mode, string | null>>,
   familyName?: string,
+  familyOverrides?: Record<string, Partial<Record<Mode, string | null>>>,
 ): string {
-  return resolveModelEx(hardware, manifest, mode, modeOverrides, familyName).model;
+  return resolveModelEx(hardware, manifest, mode, modeOverrides, familyName, familyOverrides).model;
 }
 
 /** All model tags recommended by a manifest across every family/mode/tier. */

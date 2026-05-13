@@ -67,6 +67,7 @@
             "transcribe",
             config.mode_overrides,
             config.active_family,
+            config.family_overrides,
           );
           transcribeTag = r.runtime !== "ollama" ? r.model : "";
         } catch {}
