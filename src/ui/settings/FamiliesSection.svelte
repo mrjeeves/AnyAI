@@ -160,6 +160,63 @@
     return { bytes: 0, installed: false };
   }
 
+  /** Bucket a tier into a user-friendly relative-capability label based on
+   *  its position in the family's ladder (top = smartest, bottom =
+   *  lightest). End users don't think about "B parameters" or
+   *  "MoE vs dense" — they want to know "is this the smart slow one or
+   *  the quick light one?" Five buckets covers every ladder length we
+   *  ship today (longest is 7 tiers in the Gemma 4 + Qwen lines) without
+   *  collapsing to identical labels. */
+  function smartnessLabel(index: number, total: number): {
+    label: string;
+    rank: 1 | 2 | 3 | 4 | 5;
+  } {
+    if (total <= 1) return { label: "Only option", rank: 3 };
+    if (index === 0) return { label: "Most capable", rank: 5 };
+    if (index === total - 1) return { label: "Lightest", rank: 1 };
+    const ratio = index / (total - 1);
+    if (ratio < 0.34) return { label: "Strong", rank: 4 };
+    if (ratio < 0.66) return { label: "Balanced", rank: 3 };
+    return { label: "Light", rank: 2 };
+  }
+
+  /** Per-GPU-class headroom defaults — kept in sync with manifest.ts so
+   *  the displayed "Needs ~N GB" matches the resolver's actual threshold
+   *  when the manifest doesn't declare a tier-specific
+   *  `min_unified_ram_gb`. */
+  const DEFAULT_HEADROOM_GB: Record<string, number> = {
+    apple: 5,
+    none: 2,
+    nvidia: 1,
+    amd: 1,
+  };
+
+  /** User-meaningful memory hint for a tier — one number, in the kind of
+   *  memory the user's machine actually uses. Apple Silicon and no-GPU
+   *  hosts share RAM with the model, so we show the unified threshold
+   *  (already includes OS / paired-ASR headroom). Discrete GPUs show
+   *  VRAM (the bytes that matter on those hosts; the system RAM fallback
+   *  is a resolver implementation detail the user doesn't need to
+   *  see). */
+  function memoryHint(tier: ManifestTier): string {
+    if (!hardware || !manifest) {
+      const fallback = tier.min_unified_ram_gb ?? tier.min_ram_gb ?? tier.min_vram_gb ?? 0;
+      return fallback > 0 ? `~${fallback} GB memory` : "any";
+    }
+    const gpu = hardware.gpu_type;
+    const unified = gpu === "apple" || gpu === "none";
+    if (unified) {
+      const headroom = manifest.headroom_gb?.[gpu] ?? DEFAULT_HEADROOM_GB[gpu] ?? 2;
+      const need = tier.min_unified_ram_gb ?? (tier.min_ram_gb ?? 0) + headroom;
+      return need > 0 ? `Needs ~${need} GB RAM` : "Runs on tiny machines";
+    }
+    // Discrete GPU host (nvidia/amd).
+    if (tier.min_vram_gb > 0) {
+      return `Needs ~${tier.min_vram_gb} GB VRAM`;
+    }
+    return tier.min_ram_gb ? `Needs ~${tier.min_ram_gb} GB RAM` : "Runs on tiny machines";
+  }
+
   async function activate(name: string) {
     await setActiveFamily(name);
     invalidateConfigCache();
@@ -425,6 +482,12 @@
         {@const isActive = name === activeFamily}
         {@const effective = effectiveTagFor(name, activeMode)}
         {@const overridden = hasFamilyOverride(name, activeMode)}
+        {@const activeModeSpec = modeFor(manifest, family, activeMode)}
+        {@const effectiveTier = activeModeSpec?.tiers.find((t) => t.model === effective)}
+        {@const effectiveIdx = activeModeSpec?.tiers.findIndex((t) => t.model === effective) ?? -1}
+        {@const effectiveSmart = activeModeSpec && effectiveIdx >= 0
+          ? smartnessLabel(effectiveIdx, activeModeSpec.tiers.length)
+          : null}
         <button class="row" class:active={isActive} onclick={() => (detailFamily = name)}>
           <div class="row-main">
             <div class="row-titles">
@@ -432,7 +495,9 @@
                 {#if isActive}<span class="check">✓</span>{/if}
                 {family.label}
               </span>
-              <span class="row-key">{name}</span>
+              {#if effectiveSmart}
+                <span class="row-rank rank-{effectiveSmart.rank}">{effectiveSmart.label}</span>
+              {/if}
             </div>
             {#if family.description}
               <p class="row-desc">{family.description}</p>
@@ -440,14 +505,17 @@
             {#if effective}
               <p class="row-picked">
                 {#if overridden}
-                  Switched to <code>{effective}</code>
+                  <strong>Switched to</strong>
                 {:else}
-                  Picks <code>{effective}</code> for your hardware
+                  <strong>Recommended for your hardware</strong>
+                {/if}
+                {#if effectiveTier}
+                  · <span class="dim">{memoryHint(effectiveTier)}</span>
                 {/if}
                 {#if pulledSizes[effective] || localSizes[effective]}
                   · <span class="dim">{gbLabel(pulledSizes[effective] ?? localSizes[effective])} on disk</span>
-                {:else}
-                  · <span class="dim">not pulled</span>
+                {:else if effectiveTier?.disk_mb}
+                  · <span class="dim">~{gbLabel(effectiveTier.disk_mb * 1024 * 1024)} to download</span>
                 {/if}
               </p>
             {/if}
@@ -525,7 +593,7 @@
                 {/if}
               </div>
               <div class="tier-list" aria-label="{picked.family.label} {modeName} tiers">
-                {#each modeSpec.tiers as tier}
+                {#each modeSpec.tiers as tier, tierIdx}
                   {@const recommended = tier.model === recommendedModel}
                   {@const current = tier.model === effectiveModel}
                   {@const switched = current && overridden}
@@ -534,6 +602,8 @@
                   {@const downloadable = tierRt === "ollama" || tierRt === "moonshine" || tierRt === "parakeet"}
                   {@const isDownloading = downloading.has(tier.model)}
                   {@const dlErr = downloadError[tier.model]}
+                  {@const smart = smartnessLabel(tierIdx, modeSpec.tiers.length)}
+                  {@const memHint = memoryHint(tier)}
                   <div
                     class="tier"
                     class:current
@@ -543,26 +613,28 @@
                   >
                     <div class="tier-main">
                       <div class="tier-row1">
-                        <span class="tier-model">{tier.model}</span>
+                        <span class="tier-rank rank-{smart.rank}" title="Relative capability inside the {picked.family.label} family. Top of the ladder = most capable; bottom = lightest and fastest.">
+                          {smart.label}
+                        </span>
                         {#if switched}
-                          <span class="tier-badge switched-badge" title="You picked this tier as the override for this family + mode.">✓ Switched to</span>
+                          <span class="tier-badge switched-badge" title="You picked this option for this family.">✓ Switched to</span>
                         {:else if recommended && current}
-                          <span class="tier-badge rec-badge" title="The hardware-recommended tier — and what the app is using.">✓ Recommended · in use</span>
+                          <span class="tier-badge rec-badge" title="Best fit for your hardware — and what the app is using.">✓ Recommended · in use</span>
                         {:else if recommended}
-                          <span class="tier-badge rec-badge soft" title="What the resolver would pick from the tier ladder for your hardware. Click Switch on this row to un-switch back to it.">★ Recommended</span>
+                          <span class="tier-badge rec-badge soft" title="Best fit for your hardware. Click Switch on this row to revert to it.">★ Recommended</span>
                         {/if}
                       </div>
                       <div class="tier-row2">
-                        <span class="tier-spec">
-                          ≥ {tier.min_vram_gb} GB VRAM · ≥ {tier.min_ram_gb ?? 0} GB RAM
-                        </span>
+                        <span class="tier-mem">{memHint}</span>
+                        <span class="tier-sep" aria-hidden="true">·</span>
                         <span class="tier-size" class:dim={!sz.installed}>
                           {#if sz.bytes > 0}
-                            {gbLabel(sz.bytes)}{#if !sz.installed}<span class="dl-hint"> · not yet downloaded</span>{:else}<span class="ok-hint"> · on disk</span>{/if}
+                            {gbLabel(sz.bytes)} {#if !sz.installed}<span class="dl-hint">to download</span>{:else}<span class="ok-hint">on disk</span>{/if}
                           {:else}
-                            —
+                            tiny
                           {/if}
                         </span>
+                        <span class="tier-model-tag" title="Internal model tag — for reference only">{tier.model}</span>
                       </div>
                       {#if dlErr}
                         <div class="tier-err">Download failed: {dlErr}</div>
@@ -703,12 +775,29 @@
   .row:hover { background: #181820; border-color: #2a2a2a; }
   .row.active { border-color: #6e6ef7; background: #181828; }
   .row-main { flex: 1; display: flex; flex-direction: column; gap: .2rem; min-width: 0; }
-  .row-titles { display: flex; align-items: baseline; gap: .55rem; }
+  .row-titles { display: flex; align-items: baseline; gap: .55rem; flex-wrap: wrap; }
   .row-title { font-size: .92rem; font-weight: 600; color: #e8e8e8; }
-  .row-key { font-family: monospace; font-size: .72rem; color: #555; }
+  .row-rank {
+    font-size: .65rem;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    padding: 0 .4rem;
+    border-radius: 4px;
+    border: 1px solid;
+    line-height: 1.5;
+  }
+  /* Capability ramp: rank-5 (most capable) is the strongest accent;
+   * rank-1 (lightest) is the dimmest. Same palette is reused on the
+   * detail-view tier rows. */
+  .rank-5 { color: #b3b3ff; background: #1a1a2a; border-color: #2a2a55; }
+  .rank-4 { color: #a3a8ff; background: #181826; border-color: #28284a; }
+  .rank-3 { color: #8888aa; background: #16161e; border-color: #22222e; }
+  .rank-2 { color: #777; background: #14141a; border-color: #1d1d24; }
+  .rank-1 { color: #666; background: #121218; border-color: #1a1a20; }
   .row-desc { font-size: .76rem; color: #888; line-height: 1.45; }
   .row-picked { font-size: .73rem; color: #888; }
-  .row-picked .dim { color: #555; }
+  .row-picked strong { color: #aaa; font-weight: 500; }
+  .row-picked .dim { color: #666; }
   .chevron {
     color: #555;
     font-size: 1.2rem;
@@ -842,42 +931,64 @@
     display: flex;
     align-items: center;
     gap: .6rem;
-    padding: .5rem .85rem;
+    padding: .55rem .85rem;
     font-size: .76rem;
     border-top: 1px solid #181820;
   }
   .tier:first-child { border-top: none; }
-  .tier-main { flex: 1; display: flex; flex-direction: column; gap: .2rem; min-width: 0; }
+  .tier-main { flex: 1; display: flex; flex-direction: column; gap: .25rem; min-width: 0; }
   .tier-row1 {
-    display: flex; align-items: baseline; gap: .55rem; flex-wrap: wrap;
+    display: flex; align-items: center; gap: .55rem; flex-wrap: wrap;
   }
   .tier-row2 {
-    display: flex; align-items: center; gap: .6rem; flex-wrap: wrap;
+    display: flex; align-items: center; gap: .35rem; flex-wrap: wrap;
+    font-size: .76rem;
   }
-  .tier-spec { color: #555; font-size: .72rem; }
-  .tier-model {
-    font-family: monospace; color: #aaa;
+  /* Capability pill — same palette ramp as the family-list `.row-rank`.
+   * Uses `.tier-rank.rank-N` to compose with the existing `.rank-N`
+   * classes defined above. The pill sits at the head of the row so the
+   * user reads "Most capable" / "Lightest" first — that's the question
+   * end users actually want answered. */
+  .tier-rank {
+    font-size: .68rem;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    padding: .1rem .5rem;
+    border-radius: 5px;
+    border: 1px solid;
+    font-weight: 600;
+    line-height: 1.5;
+    flex-shrink: 0;
+  }
+  .tier-mem {
+    color: #ccc; font-size: .76rem;
+  }
+  .tier-sep { color: #444; }
+  .tier-size { color: #888; font-size: .74rem; }
+  .tier-size.dim { color: #555; font-style: italic; }
+  /* Raw model tag (e.g. `gemma4:e4b`) — kept visible so power users and
+   * docs can still reference it, but de-emphasised so it doesn't read
+   * as the headline. */
+  .tier-model-tag {
+    font-family: monospace; color: #555; font-size: .68rem;
+    margin-left: auto; padding-left: .5rem;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    font-size: .82rem;
+    max-width: 14rem;
   }
-  .tier-size { font-family: monospace; color: #888; font-size: .72rem; }
-  .tier-size.dim { color: #444; font-family: inherit; font-style: italic; }
   .tier-err { color: #f88; font-size: .7rem; margin-top: .15rem; }
 
   .tier.recommended { background: #15151c; }
-  .tier.recommended .tier-spec { color: #777; }
-  .tier.recommended .tier-model { color: #d8d8d8; }
+  .tier.recommended .tier-mem { color: #d8d8d8; }
   .tier.current {
     background: #16162a;
     border-left: 3px solid #6e6ef7;
   }
-  .tier.current .tier-spec { color: #888; }
-  .tier.current .tier-model { color: #e8e8e8; font-weight: 600; }
+  .tier.current .tier-mem { color: #e8e8e8; font-weight: 500; }
   .tier.switched {
     background: #1a1626;
     border-left: 3px solid #b3b3ff;
   }
-  .tier.switched .tier-model { color: #f0eaff; font-weight: 600; }
+  .tier.switched .tier-mem { color: #f0eaff; font-weight: 500; }
   .tier.hit-active { background: #181838; }
 
   .tier-badge {
