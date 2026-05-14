@@ -125,16 +125,12 @@ impl AsrBackend for MoonshineBackend {
             return Err(anyhow!("Moonshine warm-up cancelled"));
         }
 
-        // ORT graph optimization back at `Level3` (the crate default)
-        // now that the real cause of the "Loading encoder… forever"
-        // hang is fixed in `ort_setup` (load-dynamic dylib was never
-        // explicitly resolved — ABI mismatches were surfacing as FFI
-        // hangs instead of clean errors). PRs #113 / #120 had walked
-        // this down to `Level1` and then `Disable` as a workaround,
-        // but the constant-folding + transpose-rewrite passes are a
-        // real speed win on the quantized merged-decoder ONNX, so
-        // there's no reason to leave them off once the dylib problem
-        // is actually fixed.
+        // Encoder runs at `Level3` (the crate default) — full
+        // constant-folding + transpose-rewrite passes, no
+        // model-specific issues. The hang we used to see at this
+        // stage was the missing `ort::init_from(...)` call (#122),
+        // not optimisation level, so there's no reason to leave
+        // optimisation off here.
         on_stage(&format!(
             "Loading Moonshine encoder… ({})",
             ort_setup::status().diagnostic()
@@ -156,13 +152,34 @@ impl AsrBackend for MoonshineBackend {
         if cancel.load(Ordering::Relaxed) {
             return Err(anyhow!("Moonshine warm-up cancelled"));
         }
+        // Decoder pinned to `Level1`. The decoder_model_merged_quantized.onnx
+        // export from onnx-community has a quantisation layout that
+        // tickles ORT's Level2-plus QDQ optimiser into looking for a
+        // scale tensor that doesn't exist:
+        //
+        //   qdq_actions.cc:137 TransposeDQWeightsForMatMulNBits
+        //   Missing required scale: model.decoder.embed_tokens.weight_merged_0_scale
+        //   for node: model.decoder.embed_tokens.weight_transposed_DequantizeLinear
+        //
+        // The DequantizeLinear -> Transpose -> MatMul fuser tries to
+        // roll up into a `MatMulNBits` op and assumes there's a
+        // `_merged_0_scale` initializer paired with the dequantize
+        // weight; this export merged the scale somewhere else, so the
+        // fuser bails with the error above. The fuser only runs at
+        // `Level2` (extended) and higher, so `Level1` (basic constant-
+        // folding only) sidesteps it entirely. The decode loop runs the
+        // no-cache branch with at most 30 tokens per chunk anyway, so
+        // the Level2/3 wins would be marginal even if they worked.
+        //
+        // Encoder stays at `Level3` -- its graph doesn't trigger the
+        // same fuser.
         on_stage("Loading Moonshine decoder…");
         let dec_path_owned = dec_path.clone();
         let dec_threads = intra_threads();
         let decoder = ort_setup::load_session("Moonshine decoder", 90, move || {
             Session::builder()
                 .map_err(|e| anyhow!("ort builder: {e}"))?
-                .with_optimization_level(GraphOptimizationLevel::Level3)
+                .with_optimization_level(GraphOptimizationLevel::Level1)
                 .map_err(|e| anyhow!("ort opt level: {e}"))?
                 .with_intra_threads(dec_threads)
                 .map_err(|e| anyhow!("ort threads: {e}"))?
