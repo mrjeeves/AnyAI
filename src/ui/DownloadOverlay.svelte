@@ -139,7 +139,11 @@
         phase = "pulling";
         status = "Connecting to HuggingFace…";
         unlisten?.();
-        const chan = `myownllm://model-pull/asr/${modelName}`;
+        // Tauri rejects event names with chars outside `[A-Za-z0-9_/:-]`,
+        // and Parakeet's tag carries dots (`parakeet-tdt-0.6b-v3-int8`).
+        // Mirrors `channel_safe()` on the Rust side.
+        const safe = modelName.replace(/[^A-Za-z0-9\-:_]/g, "_");
+        const chan = `myownllm://model-pull/asr/${safe}`;
         console.debug("[DownloadOverlay] subscribing to", chan);
         unlisten = await listen<ModelPullEvent>(chan, (e) => {
           framesSeen += 1;

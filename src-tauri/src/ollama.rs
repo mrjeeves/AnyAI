@@ -386,7 +386,14 @@ fn fmt_bytes(n: u64) -> String {
 }
 
 pub async fn pull(model: &str, window: &tauri::WebviewWindow) -> Result<PullOutcome> {
-    let per_tag = format!("myownllm://ollama-pull/{model}");
+    // Sanitize the tag for the per-tag channel — Tauri rejects event
+    // names containing chars outside `[A-Za-z0-9_/:-]` and several
+    // Ollama tags carry `.` (`gemma3:4b-instruct-v1.5`). The JS side
+    // applies the same `channelSafe` so both ends agree.
+    let per_tag = format!(
+        "myownllm://ollama-pull/{}",
+        crate::models::channel_safe(model)
+    );
     let window_clone = window.clone();
     pull_with(model, move |evt| {
         // Per-tag channel for inline UIs (FamiliesSection's tier rows) that

@@ -509,14 +509,14 @@
         }
         downloads[model].status = "Connecting to Ollama…";
         downloads = { ...downloads, [model]: downloads[model] };
-        const chan = `myownllm://ollama-pull/${model}`;
+        const chan = `myownllm://ollama-pull/${channelSafe(model)}`;
         progressUnlisten[model] = await listen<OllamaPullEvent>(chan, (e) => {
           applyOllamaEvent(model, e.payload);
         });
         await invoke("ollama_pull", { model });
         await invoke("ollama_ensure_running").catch(() => {});
       } else if (runtime === "moonshine" || runtime === "parakeet") {
-        const chan = `myownllm://model-pull/asr/${model}`;
+        const chan = `myownllm://model-pull/asr/${channelSafe(model)}`;
         progressUnlisten[model] = await listen<ModelPullEvent>(chan, (e) => {
           applyAsrEvent(model, e.payload);
         });
@@ -567,6 +567,16 @@
     if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(1)} MB`;
     if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`;
     return `${n} B`;
+  }
+
+  /** Tauri rejects event names containing characters outside
+   *  `[A-Za-z0-9_/:-]`. Several model names carry `.` (Parakeet's
+   *  `parakeet-tdt-0.6b-v3-int8`, ollama tags like
+   *  `gemma3:4b-instruct-v1.5`) or `+` (diarize composites), which
+   *  would otherwise blow up the `listen()` call before any byte
+   *  streams. Mirrored 1:1 in `channel_safe()` on the Rust side. */
+  function channelSafe(s: string): string {
+    return s.replace(/[^A-Za-z0-9\-:_]/g, "_");
   }
 
   function formatRate(bps: number | null): string {
