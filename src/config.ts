@@ -61,13 +61,15 @@ const DEFAULT_MIC: MicConfig = {
 const DEFAULT_CONFIG: Config = {
   active_provider: "MyOwnLLM Default",
   active_family: "gemma4",
-  active_mode: "text",
+  // Fresh installs land on Transcribe; existing configs keep whatever
+  // active_mode they persisted (mergeDefaults overlays raw on top).
+  active_mode: "transcribe",
   model_cleanup_days: 1,
   cleanup_warning_suppressed_families: [],
   kept_models: [],
   mode_overrides: {},
   family_overrides: {},
-  tracked_modes: ["text"],
+  tracked_modes: ["transcribe"],
   // Filled at first load via defaultConversationDir() — needs an async homeDir().
   conversation_dir: "",
   auto_cleanup: { ...DEFAULT_AUTO_CLEANUP },

@@ -9,6 +9,7 @@
   import StatusBar from "./StatusBar.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
   import ConflictModal from "./ConflictModal.svelte";
+  import DownloadOverlay from "./DownloadOverlay.svelte";
   import type { SettingsTab } from "../update-state.svelte";
   import {
     transcribeUi,
@@ -40,9 +41,17 @@
     activeMode,
     activeFamily,
     supportedModes,
+    hardware,
     sidebarOpen,
     conversationId,
     newChatCounter,
+    textModelMissing,
+    asrModelMissing,
+    textModel,
+    asrModel,
+    asrRuntime,
+    onTextDownloaded,
+    onAsrDownloaded,
     onToggleSidebar,
     onModeChange,
     onProviderChange,
@@ -62,6 +71,17 @@
     sidebarOpen: boolean;
     conversationId: string | null;
     newChatCounter: number;
+    /** Left pane (transcription) is covered by a DownloadOverlay until
+     *  the ASR model is on disk. Right pane (talking points) is covered
+     *  by a separate overlay for the family's text/chat model, since TP
+     *  drives the chat LLM. Each side downloads independently. */
+    textModelMissing: boolean;
+    asrModelMissing: boolean;
+    textModel: string;
+    asrModel: string;
+    asrRuntime: string;
+    onTextDownloaded: () => void;
+    onAsrDownloaded: () => void;
     onToggleSidebar: () => void;
     onModeChange: (mode: Mode) => void;
     onProviderChange: () => void;
@@ -837,6 +857,18 @@
 
   <div class="split">
     <section class="pane left" aria-label="Live transcription">
+      {#if asrModelMissing && asrModel && asrRuntime}
+        <DownloadOverlay
+          kind="asr"
+          modelName={asrModel}
+          runtime={asrRuntime}
+          label="Transcription model"
+          description="Download the on-device speech-to-text model. Audio is transcribed locally — nothing is uploaded."
+          {hardware}
+          compact={true}
+          onComplete={onAsrDownloaded}
+        />
+      {/if}
       <header class="pane-head">
         <span class="pane-title">Transcription</span>
         {#if isMyRecording && !transcribeUi.paused}
@@ -931,6 +963,17 @@
     </section>
 
     <section class="pane right" aria-label="Talking points">
+      {#if textModelMissing && textModel}
+        <DownloadOverlay
+          kind="text"
+          modelName={textModel}
+          label="Talking Points model"
+          description="Download the {activeFamily} chat model to power live Talking Points. Optional — transcription works without it."
+          {hardware}
+          compact={true}
+          onComplete={onTextDownloaded}
+        />
+      {/if}
       <header class="pane-head">
         <span class="pane-title">Talking points</span>
         {#if isMyTalkingPoints}
@@ -1085,10 +1128,12 @@
       <button
         class="new-btn"
         onclick={pickAndUpload}
-        disabled={transcribeUi.active}
-        title={transcribeUi.active
-          ? "Stop the current session before uploading another file"
-          : "Transcribe an audio file"}
+        disabled={transcribeUi.active || asrModelMissing}
+        title={asrModelMissing
+          ? "Download the transcription model first"
+          : transcribeUi.active
+            ? "Stop the current session before uploading another file"
+            : "Transcribe an audio file"}
       >
         <span class="plus" aria-hidden="true">+</span> Upload
       </button>
@@ -1117,7 +1162,12 @@
       <button
         class="record-btn"
         onclick={startRec}
-        title={transcribeUi.active ? "Another recording is in progress — confirm to stop it first" : "Start recording"}
+        disabled={asrModelMissing}
+        title={asrModelMissing
+          ? "Download the transcription model first"
+          : transcribeUi.active
+            ? "Another recording is in progress — confirm to stop it first"
+            : "Start recording"}
       >
         <span class="rec-circle" aria-hidden="true"></span>
         Record
@@ -1164,6 +1214,10 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
+    /* Anchor for the per-pane DownloadOverlay (left = ASR model,
+       right = chat/Talking Points model). The overlay positions itself
+       absolute within this pane so each side downloads independently. */
+    position: relative;
   }
   .pane.left { border-right: 1px solid #1a1a1a; }
   .pane-head {
