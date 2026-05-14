@@ -5,6 +5,7 @@
   import { getActiveManifest, getActiveProvider, setActiveFamily } from "../../providers";
   import { resolveModel, modeFor, defaultRuntimeFor, tierRuntime } from "../../manifest";
   import { loadConfig, saveConfig, invalidateConfigCache } from "../../config";
+  import { scrollAffordance } from "../scroll-affordance";
   import type {
     HardwareProfile,
     Manifest,
@@ -929,7 +930,8 @@
         {/if}
       </div>
 
-      <div class="detail-body scroll-fade">
+      <div class="detail-body-wrap">
+      <div class="detail-body scroll-fade" use:scrollAffordance>
         {#if modes.length === 0}
           <p class="empty-note">This family declares no modes.</p>
         {:else}
@@ -1164,6 +1166,11 @@
           {/each}
         {/if}
       </div>
+      <div class="scroll-more-hint" aria-hidden="true">
+        <span class="scroll-more-chevron">⌄</span>
+        <span class="scroll-more-text">more below</span>
+      </div>
+      </div>
 
       <div class="detail-footer">
         {#if isActive}
@@ -1323,6 +1330,54 @@
   .detail-title { font-size: 1.05rem; font-weight: 600; color: #e8e8e8; }
   .detail-key { font-family: monospace; font-size: .78rem; color: #666; }
   .detail-desc { font-size: .82rem; color: #999; line-height: 1.5; }
+
+  .detail-body-wrap {
+    position: relative;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .scroll-more-hint {
+    position: absolute;
+    left: 50%;
+    bottom: .55rem;
+    transform: translateX(-50%);
+    display: inline-flex;
+    align-items: center;
+    gap: .3rem;
+    padding: .15rem .55rem .2rem;
+    border-radius: 999px;
+    background: rgba(110, 110, 247, .18);
+    border: 1px solid rgba(110, 110, 247, .4);
+    color: #b8b8ff;
+    font-size: .68rem;
+    line-height: 1;
+    letter-spacing: .02em;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity .18s ease;
+    box-shadow: 0 6px 14px rgba(0, 0, 0, .45);
+  }
+  /* Visible only while the inner scroll container reports that more
+   * content sits below the fold. The attribute is set by the
+   * scrollAffordance action at runtime, so Svelte's static CSS
+   * analyzer can't prove the rule is reachable — wrap the whole
+   * selector in :global() to keep it. */
+  :global(.detail-body[data-overflow-down="true"] + .scroll-more-hint) {
+    opacity: 1;
+    animation: scroll-hint-bob 1.6s ease-in-out infinite;
+  }
+  .scroll-more-chevron {
+    font-size: 1rem;
+    font-weight: 700;
+    line-height: .5;
+    transform: translateY(-2px);
+  }
+  @keyframes scroll-hint-bob {
+    0%, 100% { transform: translate(-50%, 0); }
+    50% { transform: translate(-50%, 3px); }
+  }
 
   .detail-body {
     flex: 1; overflow-y: auto; padding: .5rem .75rem 1rem;
