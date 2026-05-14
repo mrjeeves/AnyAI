@@ -69,11 +69,28 @@
   let rate = $state<number | null>(null);
   let lastSampleAt = 0;
   let lastSampleBytes = 0;
+  /** Tracks artifact progression for multi-file pulls (e.g. Moonshine
+   *  ships encoder + decoder + tokenizer). Surfaced inline so a user
+   *  whose first artifact finishes instantly (cached) still sees that
+   *  something happened, instead of an inert bar that vanishes. */
+  let artifactIndex = $state(0);
+  let artifactCount = $state(0);
+  /** Frame counter visible in dev tools — when set to 0 after a pull
+   *  the user can tell the listener never fired, vs. just looking at
+   *  an empty bar. */
+  let framesSeen = $state(0);
+  let pullStartedAt = 0;
 
   let unlisten: UnlistenFn | null = null;
+  let waitingTimer: ReturnType<typeof setInterval> | null = null;
+  /** Wall-clock seconds since the pull started — surfaced when no
+   *  progress frames have arrived yet so the user knows we're alive
+   *  but the backend hasn't streamed anything. */
+  let waitingSeconds = $state(0);
 
   onDestroy(() => {
     unlisten?.();
+    if (waitingTimer) clearInterval(waitingTimer);
   });
 
   async function start() {
@@ -86,6 +103,21 @@
     rate = null;
     lastSampleAt = 0;
     lastSampleBytes = 0;
+    artifactIndex = 0;
+    artifactCount = 0;
+    framesSeen = 0;
+    waitingSeconds = 0;
+    pullStartedAt = Date.now();
+    // Tick the "Waiting on backend…" counter while no frames have
+    // landed yet. Without this the bar is just an inert sliding band
+    // for however long the network handshake takes and the user has
+    // no way to tell whether the listener is even alive.
+    if (waitingTimer) clearInterval(waitingTimer);
+    waitingTimer = setInterval(() => {
+      if (framesSeen === 0) {
+        waitingSeconds = Math.round((Date.now() - pullStartedAt) / 1000);
+      }
+    }, 500);
     try {
       if (kind === "text") {
         const installed = await invoke<boolean>("ollama_installed");
@@ -95,7 +127,7 @@
           await invoke("ollama_install");
         }
         phase = "pulling";
-        status = "Starting download…";
+        status = "Connecting to Ollama…";
         unlisten?.();
         unlisten = await listen<OllamaPullEvent>(
           "ollama-pull-progress",
@@ -105,15 +137,21 @@
         await invoke("ollama_ensure_running").catch(() => {});
       } else {
         phase = "pulling";
-        status = "Starting download…";
+        status = "Connecting to HuggingFace…";
         unlisten?.();
         const chan = `myownllm://model-pull/asr/${modelName}`;
-        unlisten = await listen<ModelPullEvent>(chan, (e) =>
-          applyModelPull(e.payload),
-        );
+        console.debug("[DownloadOverlay] subscribing to", chan);
+        unlisten = await listen<ModelPullEvent>(chan, (e) => {
+          framesSeen += 1;
+          applyModelPull(e.payload);
+        });
         await invoke("asr_model_pull", { name: modelName });
       }
       phase = "done";
+      if (waitingTimer) {
+        clearInterval(waitingTimer);
+        waitingTimer = null;
+      }
       onComplete();
     } catch (e) {
       errorMsg = String(e);
@@ -121,6 +159,10 @@
     } finally {
       unlisten?.();
       unlisten = null;
+      if (waitingTimer) {
+        clearInterval(waitingTimer);
+        waitingTimer = null;
+      }
     }
   }
 
@@ -155,6 +197,15 @@
   }
 
   function applyModelPull(f: ModelPullEvent) {
+    // Reset the byte-rate sampler whenever we cross an artifact
+    // boundary — `f.bytes` snaps back to 0 for the next file, which
+    // would otherwise feed a negative delta into the rate calc.
+    if (f.artifact_index !== artifactIndex) {
+      lastSampleAt = 0;
+      lastSampleBytes = 0;
+    }
+    artifactIndex = f.artifact_index;
+    artifactCount = f.artifact_count;
     const now = Date.now();
     if (lastSampleAt && f.bytes >= lastSampleBytes) {
       const dt = (now - lastSampleAt) / 1000;
@@ -169,7 +220,7 @@
     }
     const artifactSuffix =
       f.artifact_count > 1
-        ? ` (artifact ${f.artifact_index + 1} of ${f.artifact_count})`
+        ? ` (file ${f.artifact_index + 1} of ${f.artifact_count})`
         : "";
     status = f.error
       ? `Failed: ${f.error}`
@@ -284,6 +335,10 @@
             {#if rate}
               · {formatRate(rate)}
             {/if}
+          </span>
+        {:else if framesSeen === 0 && phase === "pulling" && waitingSeconds > 0}
+          <span class="meta-bytes">
+            waiting on backend… {waitingSeconds}s
           </span>
         {/if}
       </div>

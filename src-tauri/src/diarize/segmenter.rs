@@ -109,24 +109,41 @@ impl Segmenter {
                 .with_context(|| format!("warm_up segmenter {model_name_owned}"))
         })?;
 
-        // Sherpa-onnx's export uses `waveform` as the input and
-        // `logits` as the output, but we suffix-match so a re-export
-        // (which is what we'd switch to if upstream patches the
-        // dynamic-shape issues) doesn't break us.
+        // Sniff I/O names against the canonical sherpa-onnx export
+        // (`waveform` → `logits`), but fall back to whatever the loaded
+        // graph actually declares so a re-export under a different
+        // naming convention doesn't blow up at first inference with
+        // `ort run: Invalid input name: waveform`. Some pyannote-3.0
+        // exports use `input_values` or `X` instead — neither matches
+        // the historical substring heuristic, which previously left
+        // the default `"waveform"` in place and 404'd every chunk.
+        let mut input_match: Option<String> = None;
         for input in session.inputs() {
             let n = input.name().to_lowercase();
             if n.contains("wave") || n.contains("audio") || n == "input" {
-                self.input_name = input.name().to_string();
+                input_match = Some(input.name().to_string());
                 break;
             }
         }
+        self.input_name = input_match
+            .or_else(|| session.inputs().first().map(|i| i.name().to_string()))
+            .unwrap_or_else(|| "waveform".to_string());
+
+        let mut output_match: Option<String> = None;
         for output in session.outputs() {
             let n = output.name().to_lowercase();
             if n.contains("logit") || n.contains("output") || n.contains("score") {
-                self.output_name = output.name().to_string();
+                output_match = Some(output.name().to_string());
                 break;
             }
         }
+        self.output_name = output_match
+            .or_else(|| session.outputs().first().map(|o| o.name().to_string()))
+            .unwrap_or_else(|| "logits".to_string());
+        eprintln!(
+            "[diarize] segmenter {}: in={} out={}",
+            self.model_name, self.input_name, self.output_name,
+        );
         self.session = Some(session);
         Ok(())
     }
