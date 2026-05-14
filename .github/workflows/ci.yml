@@ -50,6 +50,17 @@ jobs:
         if: runner.os == 'macOS'
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
+      # Belt-and-braces for macOS-14: `dtolnay/rust-toolchain`'s
+      # `components:` install has been flaky on the ARM runner — three
+      # consecutive runs of the fmt step have failed in <80s with no
+      # real diff, while ubuntu-x86 / ubuntu-arm / windows pass. Force
+      # rustfmt + clippy explicitly so a silent component miss can't
+      # red the gate. Runs against the toolchain dtolnay picked up
+      # (1.88.0) and is a no-op when the components are already there.
+      - name: Ensure rustfmt + clippy on macOS
+        if: runner.os == 'macOS'
+        run: rustup component add rustfmt clippy --toolchain 1.88.0
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
