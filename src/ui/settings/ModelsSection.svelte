@@ -107,12 +107,13 @@
       let activeLabel = "";
 
       // Walk every (provider, family, mode) triple via `modeFor` so
-      // shared_modes — most notably the manifest-wide transcribe ladder —
-      // contributes its tiers to both the lock set and the tagFamilies
-      // map. Without this, whisper tags inherited from shared_modes show
-      // as "unrecommended" in the list even though every family that
-      // supports transcribe would re-pull them on demand.
-      const ALL_MODES: Mode[] = ["text", "vision", "code", "transcribe"];
+      // shared_modes — most notably the manifest-wide transcribe and
+      // diarize ladders — contributes its tiers to both the lock set and
+      // the tagFamilies map. Without this, whisper / pyannote tags
+      // inherited from shared_modes show as "unrecommended" in the list
+      // even though every family that supports transcribe would re-pull
+      // them on demand.
+      const ALL_MODES: Mode[] = ["text", "vision", "code", "transcribe", "diarize"];
       for (const { provider, manifest } of allManifests) {
         for (const [familyName, family] of Object.entries(manifest.families ?? {})) {
           const isActiveFam =
@@ -139,20 +140,21 @@
       // Mode overrides can point at a tag outside the active family. Whichever
       // tag the resolver picks for the active mode is the "live" model and
       // also belongs in the lock set, even if it doesn't appear in any tier
-      // of the active family. Transcribe is locked unconditionally as well
-      // (regardless of which mode the user is currently in) — the picked
-      // whisper model is one click away from being needed and it doesn't
-      // appear in the ollama family tiers, so the activeMode probe alone
-      // misses it on every text/code/vision session. We resolve directly
-      // against the active manifest rather than via lookupModelUsage so the
-      // transcribe pick from `shared_modes` (which most LLM families inherit
-      // rather than redeclare) is captured.
+      // of the active family. Transcribe and diarize are locked
+      // unconditionally as well (regardless of which mode the user is
+      // currently in) — the picked whisper / pyannote models are one
+      // toggle away from being needed and they don't appear in the ollama
+      // family tiers, so the activeMode probe alone misses them on every
+      // text/code/vision session. We resolve directly against the active
+      // manifest rather than via lookupModelUsage so picks from
+      // `shared_modes` (which most LLM families inherit rather than
+      // redeclare) are captured.
       if (hardware) {
         const activeEntry = allManifests.find(
           (e) => e.provider.name === config.active_provider,
         );
         if (activeEntry) {
-          for (const mode of [activeMode, "transcribe" as Mode]) {
+          for (const mode of [activeMode, "transcribe" as Mode, "diarize" as Mode]) {
             try {
               const tag = resolveModel(
                 hardware,
