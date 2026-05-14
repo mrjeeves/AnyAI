@@ -37,36 +37,18 @@ jobs:
         # (Linux x86_64 + Windows) that used to live here are gone for
         # the same reason: only whisper-rs's Vulkan feature wanted them.
 
-      - uses: dtolnay/rust-toolchain@1.88.0
-        with:
-          components: clippy, rustfmt
-
-      # Belt-and-braces for macOS-14: `dtolnay/rust-toolchain`'s
-      # `components:` install has been flaky on the ARM runner — past
-      # runs of the fmt step failed in <80 s with no real diff, while
-      # ubuntu-x86 / ubuntu-arm / windows passed. Force rustfmt + clippy
-      # explicitly so a silent component miss can't red the gate. No-op
-      # when the components are already there.
-      - name: Ensure rustfmt + clippy on macOS
-        if: runner.os == 'macOS'
-        run: rustup component add rustfmt clippy --toolchain 1.88.0
-
-      # Rust toolchain diagnostic on macOS. Past runs failed at `cargo
-      # fmt --check` in <80 s with no diff — meaning either rustfmt
-      # wasn't actually installed for the active toolchain, or `cargo`
-      # was resolving to the `/usr/local/bin/cargo → rustup-init` symlink
-      # which exits 1 on any subcommand. Printing what's there once,
-      # before fmt runs, makes the next mystery failure debuggable.
-      - name: Rust toolchain diagnostic (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          echo "PATH=$PATH"
-          which cargo || true
-          which rustup || true
-          rustup show
-          rustup run 1.88.0 cargo --version
-          rustup run 1.88.0 cargo fmt --version
-          rustup run 1.88.0 cargo clippy --version
+      # `src-tauri/rust-toolchain.toml` pins channel 1.88.0 + the
+      # rustfmt/clippy components, so `rustup show` inside that
+      # directory installs the right toolchain on demand. This
+      # replaces the previous `dtolnay/rust-toolchain@1.88.0` +
+      # macOS-only belt-and-braces dance, which silently no-op'd the
+      # `components:` install on the macOS-14 ARM runner and made
+      # `cargo fmt --check` red on every PR with a real-but-imaginary
+      # "Rust formatting" diff (#152, #153). One install path, one
+      # source of truth.
+      - name: Install Rust toolchain
+        working-directory: src-tauri
+        run: rustup show active-toolchain || rustup show
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -87,22 +69,21 @@ jobs:
       - name: Frontend type-check
         run: pnpm check
 
-      # All three Rust steps go through `rustup run 1.88.0 cargo …`
-      # rather than bare `cargo …`. On macOS-14 ARM, `/usr/local/bin/cargo`
-      # is a symlink to `rustup-init` (the installer, not the rustup proxy);
-      # plain `cargo fmt` invokes the installer with `fmt` as an argument
-      # and exits 1 with no diff — exactly the failure mode we kept seeing.
-      # Going through `rustup run` pins the toolchain explicitly and uses
-      # the rustup proxy regardless of which `cargo` PATH resolves to, so
-      # the gate behaves the same on every runner.
+      # `cargo` from inside `src-tauri/` goes through the rustup proxy
+      # and respects the pinned channel in `rust-toolchain.toml`, so
+      # bare `cargo …` is enough — no `rustup run` prefix needed. The
+      # macOS-14 `cargo → rustup-init` symlink case the old prefix
+      # worked around is solved by `working-directory: src-tauri` (the
+      # rustup proxy reads the toolchain file and dispatches to the
+      # right binary) plus the explicit `rustup show` step above.
       - name: Rust formatting
         working-directory: src-tauri
-        run: rustup run 1.88.0 cargo fmt --check
+        run: cargo fmt --check
 
       - name: Rust lint
         working-directory: src-tauri
-        run: rustup run 1.88.0 cargo clippy --all-targets
+        run: cargo clippy --all-targets
 
       - name: Rust tests
         working-directory: src-tauri
-        run: rustup run 1.88.0 cargo test --no-fail-fast
+        run: cargo test --no-fail-fast
