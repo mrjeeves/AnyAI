@@ -4,6 +4,7 @@
   import { loadConfig, updateConfig } from "../../config";
   import { getActiveManifest } from "../../providers";
   import { resolveModelEx } from "../../manifest";
+  import { scrollAffordance } from "../scroll-affordance";
   import type { HardwareProfile, GpuType, MicConfig } from "../../types";
 
   type Tab = "providers" | "families" | "models" | "storage" | "updates" | "hardware";
@@ -193,7 +194,8 @@
   {:else if error && !hardware}
     <p class="error">{error}</p>
   {:else if hardware}
-    <div class="cards scroll-fade">
+    <div class="scroll-affordance-wrap">
+    <div class="cards scroll-fade" use:scrollAffordance>
       <div class="group-label">Compute</div>
 
       <div class="card">
@@ -401,6 +403,11 @@
         Speakers, camera, GPU grouping, and CPU/GPU-only modes will surface
         here as multimodal support lands.
       </p>
+    </div>
+    <div class="scroll-more-hint" aria-hidden="true">
+      <span class="scroll-more-chevron">⌄</span>
+      <span>more below</span>
+    </div>
     </div>
   {/if}
 </div>

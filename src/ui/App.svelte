@@ -1092,6 +1092,55 @@
       radial-gradient(farthest-side at 50% 100%, rgba(0, 0, 0, .55), rgba(0, 0, 0, 0)) bottom / 100% 14px no-repeat;
     background-attachment: local, local, scroll, scroll;
   }
+  /* Global container + chip for the "⌄ more below" hint. Pair with
+     the `scrollAffordance` Svelte action on the inner scroll element
+     — it sets data-overflow-down="true" when there is content past
+     the fold, which fades the chip in. Defined globally so any
+     section can opt in by wrapping its scrollable in
+     `<div class="scroll-affordance-wrap">` plus a sibling
+     `<div class="scroll-more-hint">` chip. */
+  :global(.scroll-affordance-wrap) {
+    position: relative;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  :global(.scroll-more-hint) {
+    position: absolute;
+    left: 50%;
+    bottom: .55rem;
+    transform: translateX(-50%);
+    display: inline-flex;
+    align-items: center;
+    gap: .3rem;
+    padding: .15rem .55rem .2rem;
+    border-radius: 999px;
+    background: rgba(110, 110, 247, .18);
+    border: 1px solid rgba(110, 110, 247, .4);
+    color: #b8b8ff;
+    font-size: .68rem;
+    line-height: 1;
+    letter-spacing: .02em;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity .18s ease;
+    box-shadow: 0 6px 14px rgba(0, 0, 0, .45);
+  }
+  :global([data-overflow-down="true"] + .scroll-more-hint) {
+    opacity: 1;
+    animation: scroll-hint-bob 1.6s ease-in-out infinite;
+  }
+  :global(.scroll-more-chevron) {
+    font-size: 1rem;
+    font-weight: 700;
+    line-height: .5;
+    transform: translateY(-2px);
+  }
+  @keyframes scroll-hint-bob {
+    0%, 100% { transform: translate(-50%, 0); }
+    50% { transform: translate(-50%, 3px); }
+  }
   .app {
     height: 100vh;
     display: flex;

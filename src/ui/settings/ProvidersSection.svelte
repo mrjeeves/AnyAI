@@ -3,6 +3,7 @@
   import { getProviders, addProvider, removeProvider, setActiveProvider } from "../../providers";
   import { loadConfig, invalidateConfigCache } from "../../config";
   import type { Provider } from "../../types";
+  import { scrollAffordance } from "../scroll-affordance";
 
   let { onChanged } = $props<{ onChanged: () => void }>();
 
@@ -60,7 +61,8 @@
     </p>
   </div>
 
-  <div class="list scroll-fade">
+  <div class="scroll-affordance-wrap">
+  <div class="list scroll-fade" use:scrollAffordance>
     {#each providers as p}
       <div class="item" class:active={p.name === activeProvider}>
         <button class="item-name" onclick={() => switchProvider(p.name)}>
@@ -76,6 +78,11 @@
     {#if providers.length === 0}
       <p class="empty-note">No providers added.</p>
     {/if}
+  </div>
+  <div class="scroll-more-hint" aria-hidden="true">
+    <span class="scroll-more-chevron">⌄</span>
+    <span>more below</span>
+  </div>
   </div>
 
   <div class="add-form">
