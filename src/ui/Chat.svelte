@@ -464,6 +464,7 @@
   />
 
   <div class="chat-body">
+  <div class="chat-scroll">
   {#if tpHoldsSlot}
     <div class="tp-takeover">
       <header class="tp-head">
@@ -528,6 +529,18 @@
   </div>
   {/if}
 
+  {#if textModelMissing && textModel}
+    <DownloadOverlay
+      kind="text"
+      modelName={textModel}
+      label="Text model"
+      description={`Download the ${activeFamily} chat model to start a conversation. Stays on your device — never leaves your machine. Open Settings first if you'd like a different family or tier.`}
+      {hardware}
+      onComplete={onTextDownloaded}
+    />
+  {/if}
+  </div>
+
   <ModeBar
     current={activeMode}
     supported={supportedModes}
@@ -543,26 +556,16 @@
       <textarea
         bind:value={input}
         onkeydown={onKeydown}
-        placeholder="Message…"
+        placeholder={textModelMissing ? "Download the text model to start chatting…" : "Message…"}
         rows="1"
+        disabled={textModelMissing}
       ></textarea>
       {#if streaming}
         <button class="stop" onclick={stop} title="Stop generating">Stop</button>
       {:else}
-        <button onclick={send} disabled={!input.trim()}>Send</button>
+        <button onclick={send} disabled={!input.trim() || textModelMissing}>Send</button>
       {/if}
     </div>
-  {/if}
-
-  {#if textModelMissing && textModel}
-    <DownloadOverlay
-      kind="text"
-      modelName={textModel}
-      label="Text model"
-      description={`Download the ${activeFamily} chat model to start a conversation. Stays on your device — never leaves your machine. Open Settings first if you'd like a different family or tier.`}
-      {hardware}
-      onComplete={onTextDownloaded}
-    />
   {/if}
   </div>
 
@@ -587,10 +590,18 @@
     flex-direction: column;
     position: relative;
   }
-  /* Anchor for the DownloadOverlay — it covers everything in the chat
-     surface below the StatusBar (messages, ModeBar, input row) without
-     hiding the top header bar with the settings/family controls. */
   .chat-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+  }
+  /* Anchor for the DownloadOverlay — scoped to the messages area only so
+     the ModeBar below stays clickable (the user must always be able to
+     swap to transcribe mode, even when the text model isn't on disk).
+     The input-row is disabled separately while textModelMissing. */
+  .chat-scroll {
     flex: 1;
     min-height: 0;
     display: flex;
@@ -712,6 +723,11 @@
     overflow-y: auto;
   }
   textarea:focus { outline: none; border-color: #6e6ef7; }
+  textarea:disabled {
+    opacity: .55;
+    cursor: not-allowed;
+    color: #777;
+  }
   button {
     padding: 0 1rem;
     background: #6e6ef7;
