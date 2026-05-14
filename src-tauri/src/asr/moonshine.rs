@@ -291,12 +291,16 @@ impl AsrBackend for MoonshineBackend {
         // step we feed the entire accumulated `input_ids` sequence
         // and read out the next token's argmax logit.
         let mut tokens: Vec<i64> = vec![START_TOKEN];
-        for _ in 0..MAX_DECODE_STEPS {
+        let mut hit_eos_on_first_step = false;
+        for step in 0..MAX_DECODE_STEPS {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
             let next = self.run_decoder_step(&tokens, &enc_hidden)?;
             if next == EOS_TOKEN {
+                if step == 0 {
+                    hit_eos_on_first_step = true;
+                }
                 break;
             }
             tokens.push(next);
@@ -315,6 +319,25 @@ impl AsrBackend for MoonshineBackend {
             .map_err(|e| anyhow!("tokenizer decode: {e}"))?;
         let trimmed = text.trim();
         if trimmed.is_empty() {
+            // Surfacing the EOS-on-step-1 case explicitly: that's the
+            // signature of a broken no-cache decoder path (the merged
+            // export collapsing to EOS without producing content
+            // tokens), not "audio actually had no speech". Operating on
+            // this signal lets us tell silent-input issues from
+            // decoder issues without an interactive debugger.
+            if hit_eos_on_first_step {
+                eprintln!(
+                    "[moonshine] decoder produced EOS on step 1 for {}-sample chunk \
+                     — no content tokens; check use_cache_branch / past-KV wiring",
+                    pcm16k_mono.len(),
+                );
+            } else if tokens.len() > 1 {
+                eprintln!(
+                    "[moonshine] decoder emitted {} tokens but tokenizer.decode \
+                     returned empty after trimming",
+                    tokens.len() - 1,
+                );
+            }
             return Ok(AsrChunkOut::default());
         }
 

@@ -78,21 +78,32 @@ impl Embedder {
         // Sniff I/O names. wespeaker / 3D-Speaker exports vary; we
         // accept any input whose name looks like audio / feats /
         // waveform and any output whose name looks like an
-        // embedding.
+        // embedding. Fall back to whatever the graph declares so a
+        // re-export under a different naming convention doesn't blow
+        // up at first inference.
+        let mut input_match: Option<String> = None;
         for input in session.inputs() {
             let n = input.name().to_lowercase();
             if n.contains("feat") || n.contains("audio") || n.contains("wave") || n == "input" {
-                self.input_name = input.name().to_string();
+                input_match = Some(input.name().to_string());
                 break;
             }
         }
+        self.input_name = input_match
+            .or_else(|| session.inputs().first().map(|i| i.name().to_string()))
+            .unwrap_or_else(|| self.input_name.clone());
+
+        let mut output_match: Option<String> = None;
         for output in session.outputs() {
             let n = output.name().to_lowercase();
             if n.contains("embed") || n.contains("output") {
-                self.output_name = output.name().to_string();
+                output_match = Some(output.name().to_string());
                 break;
             }
         }
+        self.output_name = output_match
+            .or_else(|| session.outputs().first().map(|o| o.name().to_string()))
+            .unwrap_or_else(|| self.output_name.clone());
         self.session = Some(session);
         Ok(())
     }
