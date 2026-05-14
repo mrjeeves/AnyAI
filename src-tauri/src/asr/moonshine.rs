@@ -8,17 +8,39 @@
 //! decode until EOS.
 //!
 //! **Decode loop strategy.** Moonshine's merged decoder ONNX
-//! technically supports two branches gated on a `use_cache_branch`
-//! input: a fast cached path (one token in, past-KV grows by one)
-//! and a slow no-cache path (full input_ids sequence in, ignore past
-//! tensors). The cached path needs careful shape management of the
-//! past-KV inputs whose dimensions are model-specific (n_heads /
-//! head_dim) and which I can't introspect at runtime without
-//! actually loading the model. The no-cache path is simpler at the
-//! cost of O(n²) decoder forwards per chunk; with `n ≤ ~50` tokens
-//! per 8 s chunk that's still tractable. Pick correctness +
-//! simplicity here; the cached path is a follow-up optimisation
-//! when there's a measured latency win to chase.
+//! supports two execution branches gated on a `use_cache_branch`
+//! input: a *cached* path (one new token in, past-KV tensors holding
+//! prior K/V activations, decoder concatenates and emits next-position
+//! K/V) and a *no-cache* path (full `input_ids` sequence in, past-KV
+//! inputs ignored, decoder recomputes K/V from scratch each call).
+//! We drive the cached path because it is the one the model authors
+//! and onnx-community export tools actually exercise; the no-cache
+//! path of a *merged* export turned out to be fragile in practice
+//! (see PR #144's accuracy regression — the decoder would sometimes
+//! collapse to EOS-on-step-1 on perfectly normal speech).
+//!
+//! The decode loop:
+//!
+//!   1. **Prefill** — run the decoder once with `[START_TOKEN]` as
+//!      `input_ids`, zero-shaped past-KV tensors, and
+//!      `use_cache_branch = false`. The merged graph computes the
+//!      encoder cross-attn K/V from `encoder_hidden_states` and emits
+//!      both the first token's logits *and* the present-KV tensors
+//!      (encoder cross-attn KV at full length, decoder self-attn KV
+//!      at length 1). We stash these as the starting cache.
+//!   2. **Cached steps** — for each subsequent decode step feed only
+//!      the *new* token's id, the same `encoder_hidden_states` (the
+//!      graph signature still requires it but the cached branch uses
+//!      the cached encoder KV instead), the accumulated past-KV
+//!      tensors, and `use_cache_branch = true`. Capture the new
+//!      present-KV outputs back into the cache so the next step has
+//!      past-KV of length `n+1`.
+//!
+//! Falls back to the old no-cache loop when the export lacks a
+//! `use_cache_branch` input or when its present-KV output names
+//! don't follow the `present.X.Y.Z` / `present_key_values.X.Y.Z`
+//! convention (defensive — current onnx-community Moonshine exports
+//! do follow it).
 //!
 //! Tokenizer is HuggingFace `tokenizer.json` (BPE). We decode token
 //! IDs → text via the `tokenizers` crate with its pure-Rust
@@ -52,12 +74,36 @@ const MAX_DECODE_STEPS: usize = 256;
 
 /// One past-KV input the decoder graph declares, plus the model's
 /// static-vs-dynamic dim layout for it. `-1` means "this dim is
-/// dynamic at graph-edit time"; the `run_decoder_step` helper
-/// resolves dynamic dims to `0` for the no-cache pass.
+/// dynamic at graph-edit time"; the prefill helper resolves dynamic
+/// dims to `0` to hand ORT a zero-volume placeholder satisfying the
+/// graph's static dim pins.
 #[derive(Debug, Clone)]
 struct PastKvInput {
     name: String,
     declared_shape: Vec<i64>,
+}
+
+/// Mutable KV cache held across decode steps within a single chunk.
+/// Each entry is parallel to `MoonshineBackend::past_kv_inputs`:
+/// element `i` is fed in as `past_kv_inputs[i].name` and overwritten
+/// from the corresponding present-KV output after each decoder run.
+/// `None` before the first run completes (prefill replaces with the
+/// initial KV); always `Some` thereafter for the duration of the
+/// chunk's decode loop.
+struct DecoderKvCache {
+    values: Vec<Option<ArrayD<f32>>>,
+}
+
+impl DecoderKvCache {
+    fn empty(slots: usize) -> Self {
+        Self {
+            values: (0..slots).map(|_| None).collect(),
+        }
+    }
+
+    fn all_populated(&self) -> bool {
+        self.values.iter().all(|v| v.is_some())
+    }
 }
 
 pub struct MoonshineBackend {
@@ -74,20 +120,25 @@ pub struct MoonshineBackend {
     dec_logits_name: String,
     /// Past-KV inputs the decoder graph declares, with the model's
     /// per-input declared shape (dynamic dims reported as `-1`).
-    /// We pass zero-volume tensors here on every step (the no-cache
-    /// decode branch the model exposes via `use_cache_branch=false`)
-    /// but the shape we hand to ORT has to satisfy the model's
-    /// **static** dim declarations or `Session::run` errors with
-    /// `Got invalid dimensions for input: past_key_values.…`. The
-    /// merged Moonshine-base export pins index 1 (`n_heads = 8`) and
-    /// index 3 (`head_dim = 52`); only the batch and `past_seq_len`
-    /// dims are free. Storing the declared shape per input lets us
-    /// build a matching `[batch, n_heads, past_seq_len=0, head_dim]`
-    /// at decode time without hard-coding the values.
+    /// On the prefill step we hand ORT zero-volume placeholders here
+    /// (the shape we pass has to satisfy the model's **static** dim
+    /// declarations or `Session::run` errors with `Got invalid
+    /// dimensions for input: past_key_values.…`). On cached steps
+    /// we hand it the accumulated KV from prior steps. The merged
+    /// Moonshine-base export pins index 1 (`n_heads = 8`) and index
+    /// 3 (`head_dim = 52`); only the batch and `past_seq_len` dims
+    /// are free.
     past_kv_inputs: Vec<PastKvInput>,
+    /// Present-KV output name corresponding to each `past_kv_inputs`
+    /// entry, in matching order. Sniffed at warm-up by mapping
+    /// `past_key_values.X.Y.Z` → `present.X.Y.Z` (or
+    /// `present_key_values.X.Y.Z`). Empty when the mapping is
+    /// incomplete or absent — that flips the decode loop back to the
+    /// no-cache fallback path.
+    present_kv_outputs: Vec<String>,
     /// Name of the `use_cache_branch` input if the export has one.
-    /// Some Moonshine ONNX exports have it; some don't. When
-    /// present we pass `false` every step.
+    /// All current onnx-community Moonshine exports have it; if a
+    /// future export drops it we fall back to no-cache decode.
     use_cache_branch_name: Option<String>,
 }
 
@@ -104,6 +155,7 @@ impl MoonshineBackend {
             dec_enc_hidden_name: "encoder_hidden_states".to_string(),
             dec_logits_name: "logits".to_string(),
             past_kv_inputs: Vec::new(),
+            present_kv_outputs: Vec::new(),
             use_cache_branch_name: None,
         })
     }
@@ -272,11 +324,64 @@ impl AsrBackend for MoonshineBackend {
                 self.dec_enc_hidden_name = n.to_string();
             }
         }
-        for output in decoder.outputs() {
-            if output.name().to_lowercase().ends_with("logits") {
-                self.dec_logits_name = output.name().to_string();
+        // Collect every output name once so we can both find `logits`
+        // and match each past-KV input to its corresponding present-KV
+        // output below.
+        let output_names: Vec<String> = decoder
+            .outputs()
+            .iter()
+            .map(|o| o.name().to_string())
+            .collect();
+        for name in &output_names {
+            if name.to_lowercase().ends_with("logits") {
+                self.dec_logits_name = name.clone();
                 break;
             }
+        }
+
+        // Build the past→present KV mapping. The HuggingFace Optimum
+        // export convention is `past_key_values.X.Y.Z` (input) →
+        // `present.X.Y.Z` (output), with an older mirror occasionally
+        // using `present_key_values.X.Y.Z`. If every past input maps
+        // cleanly we drive the cached decoder branch; otherwise we
+        // fall back to no-cache decode (full input_ids every step).
+        let mut present_kv: Vec<String> = Vec::with_capacity(self.past_kv_inputs.len());
+        let mut mapping_complete = true;
+        for past in &self.past_kv_inputs {
+            let suffix = past
+                .name
+                .strip_prefix("past_key_values.")
+                .unwrap_or(&past.name);
+            let candidates = [
+                format!("present.{suffix}"),
+                format!("present_key_values.{suffix}"),
+            ];
+            let matched = candidates
+                .iter()
+                .find(|c| output_names.iter().any(|n| n == *c))
+                .cloned();
+            match matched {
+                Some(n) => present_kv.push(n),
+                None => {
+                    mapping_complete = false;
+                    break;
+                }
+            }
+        }
+        if mapping_complete && !present_kv.is_empty() && self.use_cache_branch_name.is_some() {
+            self.present_kv_outputs = present_kv;
+            eprintln!(
+                "[moonshine] cached decoder path enabled ({} KV tensors)",
+                self.present_kv_outputs.len(),
+            );
+        } else {
+            self.present_kv_outputs.clear();
+            eprintln!(
+                "[moonshine] cached decoder path unavailable (use_cache_branch={}, kv_inputs={}, present_outputs_matched={}); falling back to no-cache decode",
+                self.use_cache_branch_name.is_some(),
+                self.past_kv_inputs.len(),
+                if mapping_complete { present_kv.len() } else { 0 },
+            );
         }
 
         if cancel.load(Ordering::Relaxed) {
@@ -313,16 +418,31 @@ impl AsrBackend for MoonshineBackend {
             return Ok(AsrChunkOut::default());
         }
 
-        // 2. Greedy autoregressive decode (no-cache branch). Each
-        // step we feed the entire accumulated `input_ids` sequence
-        // and read out the next token's argmax logit.
+        // 2. Greedy autoregressive decode. Step 0 is a prefill pass
+        // (no-cache branch) that primes the KV cache from
+        // `[START_TOKEN]`; subsequent steps drive the cached branch
+        // with just the most-recently-decoded token as `input_ids`
+        // and the accumulated past-KV from the cache. When the
+        // export lacks a `use_cache_branch` input or its present-KV
+        // outputs couldn't be matched at warm-up
+        // (`present_kv_outputs` empty), every step uses the no-cache
+        // branch with the full token sequence.
+        let cache_available =
+            !self.present_kv_outputs.is_empty() && self.use_cache_branch_name.is_some();
+        let mut kv = DecoderKvCache::empty(self.past_kv_inputs.len());
         let mut tokens: Vec<i64> = vec![START_TOKEN];
         let mut hit_eos_on_first_step = false;
         for step in 0..MAX_DECODE_STEPS {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
-            let next = self.run_decoder_step(&tokens, &enc_hidden)?;
+            let use_cache = cache_available && step > 0 && kv.all_populated();
+            let input_ids: &[i64] = if use_cache {
+                std::slice::from_ref(tokens.last().expect("token vec is non-empty"))
+            } else {
+                &tokens
+            };
+            let next = self.run_decoder(input_ids, &enc_hidden, &mut kv, use_cache)?;
             if next == EOS_TOKEN {
                 if step == 0 {
                     hit_eos_on_first_step = true;
@@ -345,17 +465,19 @@ impl AsrBackend for MoonshineBackend {
             .map_err(|e| anyhow!("tokenizer decode: {e}"))?;
         let trimmed = text.trim();
         if trimmed.is_empty() {
-            // Surfacing the EOS-on-step-1 case explicitly: that's the
-            // signature of a broken no-cache decoder path (the merged
-            // export collapsing to EOS without producing content
-            // tokens), not "audio actually had no speech". Operating on
-            // this signal lets us tell silent-input issues from
-            // decoder issues without an interactive debugger.
+            // EOS-on-step-1 with the cached path enabled almost
+            // always means the audio actually was silent (or
+            // sub-threshold) — the prior no-cache-only build used
+            // this as a signal for a broken decoder branch, but with
+            // the cached branch driving we expect this to be rare
+            // and benign. Keep the log line for now so we can spot a
+            // regression if the cached path itself ever misbehaves.
             if hit_eos_on_first_step {
                 eprintln!(
                     "[moonshine] decoder produced EOS on step 1 for {}-sample chunk \
-                     — no content tokens; check use_cache_branch / past-KV wiring",
+                     (cached_path={}) — likely silent/near-silent input",
                     pcm16k_mono.len(),
+                    !self.present_kv_outputs.is_empty(),
                 );
             } else if tokens.len() > 1 {
                 eprintln!(
@@ -409,10 +531,30 @@ impl MoonshineBackend {
         Ok(view.to_owned())
     }
 
-    /// One decoder forward pass: feed the full `tokens` sequence and
-    /// the encoder hidden states, read back logits, return the
-    /// argmax over the last position's vocab axis.
-    fn run_decoder_step(&mut self, tokens: &[i64], enc_hidden: &ArrayD<f32>) -> Result<i64> {
+    /// One decoder forward pass.
+    ///
+    /// When `use_cache` is `false` (the prefill pass or the no-cache
+    /// fallback), `input_ids` should be the full accumulated token
+    /// sequence and past-KV inputs are handed zero-volume
+    /// placeholders whose shape satisfies the model's static dim
+    /// pins (n_heads, head_dim). The merged decoder recomputes K/V
+    /// from scratch and emits fresh present-KV outputs.
+    ///
+    /// When `use_cache` is `true`, `input_ids` should be a single
+    /// new token, the past-KV inputs come from `kv` (populated by
+    /// the prior call), and the cached branch only attends over the
+    /// new position before emitting the extended present-KV.
+    ///
+    /// Either way we capture the present-KV outputs back into `kv`
+    /// so the next call has the right past state, then return the
+    /// argmax of the logits at the last position.
+    fn run_decoder(
+        &mut self,
+        input_ids: &[i64],
+        enc_hidden: &ArrayD<f32>,
+        kv: &mut DecoderKvCache,
+        use_cache: bool,
+    ) -> Result<i64> {
         let decoder = self
             .decoder
             .as_mut()
@@ -421,12 +563,14 @@ impl MoonshineBackend {
         let dec_enc_hidden_name = self.dec_enc_hidden_name.clone();
         let dec_logits_name = self.dec_logits_name.clone();
         let past_inputs = self.past_kv_inputs.clone();
+        let present_outputs = self.present_kv_outputs.clone();
         let use_cache_name = self.use_cache_branch_name.clone();
 
-        let input_ids: Array2<i64> = Array2::from_shape_vec((1, tokens.len()), tokens.to_vec())
-            .map_err(|e| anyhow!("shape input_ids: {e}"))?;
+        let input_ids_arr: Array2<i64> =
+            Array2::from_shape_vec((1, input_ids.len()), input_ids.to_vec())
+                .map_err(|e| anyhow!("shape input_ids: {e}"))?;
         let input_ids_tensor =
-            Tensor::from_array(input_ids).map_err(|e| anyhow!("ort tensor input_ids: {e}"))?;
+            Tensor::from_array(input_ids_arr).map_err(|e| anyhow!("ort tensor input_ids: {e}"))?;
         let enc_tensor =
             Tensor::from_array(enc_hidden.clone()).map_err(|e| anyhow!("ort tensor enc: {e}"))?;
 
@@ -444,32 +588,35 @@ impl MoonshineBackend {
             ),
         ];
 
-        // No-cache branch: zero-volume past-KV tensors whose **shape**
-        // satisfies the model's static dim declarations. The merged
-        // Moonshine decoder pins n_heads (dim 1) and head_dim (dim 3),
-        // so a generic `[1, 0, 0, 0]` placeholder fails ORT's input-
-        // shape validation with:
-        //
+        // Past-KV inputs. Cached path: clone in the accumulated KV
+        // (ORT consumes the array on `Tensor::from_array`, so we
+        // clone to keep the cache live for the present-KV capture
+        // below). No-cache path: zero-volume placeholder honouring
+        // the declared static dims. The merged Moonshine decoder
+        // pins `n_heads` (dim 1) and `head_dim` (dim 3), so a
+        // generic `[1, 0, 0, 0]` placeholder fails ORT's input-shape
+        // validation with
         //   Got invalid dimensions for input: past_key_values.0.decoder.key
         //   index: 1 Got: 0 Expected: 8
         //   index: 3 Got: 0 Expected: 52
-        //
-        // We honour each declared static dim and pick zero-volume
-        // sentinels for the dynamic ones (`-1` in the ort crate's
-        // shape representation). For the standard transformer past-KV
-        // layout `[batch, n_heads, past_seq_len, head_dim]` the
-        // dynamic dims are batch (index 0) and past_seq_len (index 2):
-        // both get `0` so the resulting tensor is empty regardless of
-        // which one is variable. The decoder ignores the contents
-        // under `use_cache_branch = false`; only the shape matters.
-        for past in &past_inputs {
-            let resolved_shape: Vec<usize> = past
-                .declared_shape
-                .iter()
-                .map(|&d| if d < 0 { 0 } else { d as usize })
-                .collect();
-            let empty: ArrayD<f32> = ArrayD::zeros(ndarray::IxDyn(&resolved_shape));
-            let t = Tensor::from_array(empty).map_err(|e| anyhow!("ort tensor past-kv: {e}"))?;
+        // Resolving dynamic dims (`-1`) to `0` for the standard
+        // `[batch, n_heads, past_seq_len, head_dim]` layout yields a
+        // zero-volume tensor that ORT accepts.
+        for (idx, past) in past_inputs.iter().enumerate() {
+            let arr = if use_cache {
+                kv.values[idx]
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("KV cache slot {} unpopulated under use_cache", idx))?
+                    .clone()
+            } else {
+                let resolved_shape: Vec<usize> = past
+                    .declared_shape
+                    .iter()
+                    .map(|&d| if d < 0 { 0 } else { d as usize })
+                    .collect();
+                ArrayD::zeros(ndarray::IxDyn(&resolved_shape))
+            };
+            let t = Tensor::from_array(arr).map_err(|e| anyhow!("ort tensor past-kv: {e}"))?;
             inputs.push((std::borrow::Cow::Owned(past.name.clone()), t.into()));
         }
 
@@ -478,7 +625,7 @@ impl MoonshineBackend {
         // runtimes; if a future export uses a true bool dtype, ORT
         // will surface a type-mismatch error and we'll switch.
         if let Some(name) = use_cache_name {
-            let flag: ndarray::Array1<bool> = ndarray::Array1::from_vec(vec![false]);
+            let flag: ndarray::Array1<bool> = ndarray::Array1::from_vec(vec![use_cache]);
             let t = Tensor::from_array(flag).map_err(|e| anyhow!("ort tensor use_cache: {e}"))?;
             inputs.push((std::borrow::Cow::Owned(name), t.into()));
         }
@@ -486,13 +633,16 @@ impl MoonshineBackend {
         let outputs = decoder
             .run(inputs)
             .map_err(|e| anyhow!("ort decoder run: {e}"))?;
+
+        // Logits → argmax at the last position. Shape `[1, seq_len,
+        // vocab]`. Cached path: `seq_len == 1` (just the new token);
+        // prefill / no-cache: `seq_len == input_ids.len()` and we
+        // want the *last* row.
         let logits_view = outputs
             .get(dec_logits_name.as_str())
             .ok_or_else(|| anyhow!("decoder missing logits"))?
             .try_extract_array::<f32>()
             .map_err(|e| anyhow!("ort extract logits: {e}"))?;
-        // Shape `[1, seq_len, vocab]`. We want the argmax at the
-        // last position.
         let shape = logits_view.shape().to_vec();
         if shape.len() != 3 || shape[0] != 1 {
             return Err(anyhow!("unexpected decoder logits shape {:?}", shape));
@@ -508,7 +658,22 @@ impl MoonshineBackend {
                 best_i = v;
             }
         }
-        Ok(best_i as i64)
+        let next = best_i as i64;
+
+        // Capture present-KV outputs into the cache for the next
+        // step. Only meaningful when caching is configured; for the
+        // no-cache fallback `present_outputs` is empty so this is a
+        // no-op.
+        for (idx, name) in present_outputs.iter().enumerate() {
+            let view = outputs
+                .get(name.as_str())
+                .ok_or_else(|| anyhow!("decoder missing present-KV output {name}"))?
+                .try_extract_array::<f32>()
+                .map_err(|e| anyhow!("ort extract present-KV {name}: {e}"))?;
+            kv.values[idx] = Some(view.to_owned());
+        }
+
+        Ok(next)
     }
 }
 
