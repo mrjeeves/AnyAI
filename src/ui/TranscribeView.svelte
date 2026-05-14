@@ -863,7 +863,7 @@
           modelName={asrModel}
           runtime={asrRuntime}
           label="Transcription model"
-          description="Download the on-device speech-to-text model. Audio is transcribed locally — nothing is uploaded."
+          description={`Download the ${asrRuntime || "on-device"} speech-to-text model to transcribe locally. Audio never leaves your machine. Open Settings to switch runtimes or tiers first.`}
           {hardware}
           compact={true}
           onComplete={onAsrDownloaded}
@@ -968,7 +968,7 @@
           kind="text"
           modelName={textModel}
           label="Talking Points model"
-          description="Download the {activeFamily} chat model to power live Talking Points. Optional — transcription works without it."
+          description={`Download the ${activeFamily} chat model to power live Talking Points. Optional — transcription works without it. Pick a different family or tier in Settings before downloading if you'd like.`}
           {hardware}
           compact={true}
           onComplete={onTextDownloaded}
