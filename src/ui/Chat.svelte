@@ -102,7 +102,7 @@
    *  Un-switch) instead of the list. Cleared alongside `settingsTab`
    *  whenever the panel closes. */
   let settingsDetailFamily = $state<string | null>(null);
-  let messagesEl: HTMLElement;
+  let messagesEl = $state<HTMLElement | undefined>(undefined);
 
   /** Loaded conversation snapshot. We keep the full record (id + metadata)
    *  here so saves don't need to re-read the file just to preserve fields
