@@ -4,6 +4,7 @@
   import ModeBar from "./ModeBar.svelte";
   import StatusBar from "./StatusBar.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
+  import DownloadOverlay from "./DownloadOverlay.svelte";
   import {
     loadConversation,
     saveConversation,
@@ -31,6 +32,9 @@
     sidebarOpen,
     conversationId,
     newChatCounter,
+    textModelMissing,
+    textModel,
+    onTextDownloaded,
     onToggleSidebar,
     onModeChange,
     onProviderChange,
@@ -51,6 +55,15 @@
      *  effect lets the panel reset cleanly even when the chat is already
      *  empty (so re-clicks still feel responsive). */
     newChatCounter: number;
+    /** When true, the family's text model isn't on disk; the chat surface
+     *  is covered by a DownloadOverlay until the user pulls it. */
+    textModelMissing: boolean;
+    /** Resolved Ollama tag for the active family's text tier (e.g.
+     *  "gemma3:4b"). Empty for non-Ollama text picks. */
+    textModel: string;
+    /** Notify App that a download finished so it can re-check the
+     *  missing flag and dismiss the overlay. */
+    onTextDownloaded: () => void;
     onToggleSidebar: () => void;
     onModeChange: (mode: Mode) => void;
     onProviderChange: () => void;
@@ -446,6 +459,7 @@
     }}
   />
 
+  <div class="chat-body">
   {#if tpHoldsSlot}
     <div class="tp-takeover">
       <header class="tp-head">
@@ -536,6 +550,18 @@
     </div>
   {/if}
 
+  {#if textModelMissing && textModel}
+    <DownloadOverlay
+      kind="text"
+      modelName={textModel}
+      label="Text model"
+      description="Download the {activeFamily} chat model to start a conversation. Stays on your device — never leaves your machine."
+      {hardware}
+      onComplete={onTextDownloaded}
+    />
+  {/if}
+  </div>
+
   {#if settingsTab}
     <SettingsPanel
       initialTab={settingsTab}
@@ -553,6 +579,16 @@
   .chat-shell {
     flex: 1;
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+  }
+  /* Anchor for the DownloadOverlay — it covers everything in the chat
+     surface below the StatusBar (messages, ModeBar, input row) without
+     hiding the top header bar with the settings/family controls. */
+  .chat-body {
+    flex: 1;
+    min-height: 0;
     display: flex;
     flex-direction: column;
     position: relative;

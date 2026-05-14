@@ -4,7 +4,6 @@
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getVersion } from "@tauri-apps/api/app";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import FirstRun from "./FirstRun.svelte";
   import Chat from "./Chat.svelte";
   import TranscribeView from "./TranscribeView.svelte";
   import Sidebar from "./Sidebar.svelte";
@@ -79,26 +78,30 @@
   const localSessionId =
     "local-" + Math.random().toString(36).slice(2, 10) + "-" + Date.now().toString(36);
 
-  type View = "loading" | "first-run" | "chat";
+  type View = "loading" | "chat";
 
   let view = $state<View>("loading");
   let appVersion = $state("");
   let hardware = $state<HardwareProfile | null>(null);
   let activeModel = $state("");
-  let activeMode = $state<Mode>("text");
+  let activeMode = $state<Mode>("transcribe");
   let activeFamilyName = $state("");
   /** What the family/tier resolver picks for transcribe with the
-   *  current hardware. Stored separately from `activeModel` so we can
-   *  pre-pull / re-pull the ASR model independently of the active
-   *  mode. Runtime is captured alongside so FirstRun's pull
-   *  subscription knows which event prefix to listen on. */
+   *  current hardware. The transcribe view's left-pane download overlay
+   *  uses these to drive the ASR pull. */
   let pendingAsrModel = $state("");
   let pendingAsrRuntime = $state("");
-  /** Tag handed to FirstRun when something needs pulling. Set during
-   *  onMount based on what's actually missing on disk. */
-  let firstRunTextModel = $state("");
-  let firstRunAsrModel = $state("");
-  let firstRunAsrRuntime = $state("");
+  /** The text-model tag resolved for the active family. Even on the
+   *  Transcribe view we surface this on the right pane (Talking Points
+   *  uses the chat model), so it's tracked at App scope independent of
+   *  the current mode. */
+  let pendingTextModel = $state("");
+  /** Missing-on-disk flags. The Chat / Transcribe views render the
+   *  DownloadOverlay over their relevant surface when these are true.
+   *  Re-derived after every config / family change and after each
+   *  successful download. */
+  let textModelMissing = $state(false);
+  let asrModelMissing = $state(false);
   let supportedModes = $state<Set<Mode>>(new Set(["text", "vision", "code", "transcribe"]));
   let error = $state("");
 
@@ -218,89 +221,18 @@
       const picked = pickFamily(manifest, config.active_family);
       activeFamilyName = picked?.name ?? manifest.default_family ?? "";
       supportedModes = modesForActiveFamily(manifest, activeFamilyName);
-      const activeResolved = resolveModelEx(
-        hw,
-        manifest,
-        activeMode,
-        config.mode_overrides,
-        activeFamilyName,
-        config.family_overrides,
-      );
-      activeModel =
-        activeResolved.runtime !== "ollama"
-          ? `${activeResolved.runtime}:${activeResolved.model}`
-          : activeResolved.model;
+      await recomputeMissing(hw, manifest, config);
 
-      // Always resolve transcribe alongside whatever the user's active
-      // mode is — we want the ASR model present too so a switch into
-      // transcribe mode "just works" without a separate download flow.
-      // Resolved here so FirstRun can pull both in parallel.
-      const transcribeResolved = resolveModelEx(
-        hw,
-        manifest,
-        "transcribe",
-        config.mode_overrides,
-        activeFamilyName,
-        config.family_overrides,
-      );
-      pendingAsrModel =
-        transcribeResolved.runtime !== "ollama" ? transcribeResolved.model : "";
-      pendingAsrRuntime =
-        transcribeResolved.runtime !== "ollama" ? transcribeResolved.runtime : "";
-
-      // We need both the active text model (Ollama) AND the picked
-      // ASR transcribe model on disk. FirstRun pulls whichever is
-      // missing in parallel; if everything is already present we
-      // skip straight to chat.
-      const ollamaInstalled = await invoke<boolean>("ollama_installed");
-      const textModelToCheck =
-        activeResolved.runtime === "ollama" ? activeResolved.model : "";
-      let textPresent = textModelToCheck === ""; // non-Ollama modes don't need it
-      if (textModelToCheck && ollamaInstalled) {
-        const pulled = await invoke<Array<{ name: string }>>("ollama_list_models");
-        textPresent = pulled.some((m) => m.name === textModelToCheck);
-      }
-      let asrPresent = pendingAsrModel === "";
-      if (pendingAsrModel) {
-        try {
-          const list = await invoke<Array<{ name: string; installed: boolean }>>(
-            "asr_models_list",
-          );
-          asrPresent = list.some(
-            (m) => m.name === pendingAsrModel && m.installed,
-          );
-        } catch {
-          asrPresent = false;
-        }
-      }
-
-      if (!ollamaInstalled || !textPresent || !asrPresent) {
-        // Only ask FirstRun to pull what's actually missing. Passing
-        // empty strings tells FirstRun to skip that side — important
-        // because we don't want a "Downloading text" row to flash on
-        // screen for a model the user already has on disk.
-        firstRunTextModel = textPresent ? "" : (textModelToCheck || resolveModelEx(
-          hw,
-          manifest,
-          "text",
-          config.mode_overrides,
-          activeFamilyName,
-          config.family_overrides,
-        ).model);
-        firstRunAsrModel = asrPresent ? "" : pendingAsrModel;
-        firstRunAsrRuntime = asrPresent ? "" : pendingAsrRuntime;
-        view = "first-run";
-        console.info(
-          "[myownllm] first-run: text=%s asr=%s (%s)",
-          firstRunTextModel || "(present)",
-          firstRunAsrModel || "(present)",
-          firstRunAsrRuntime || "-",
-        );
-      } else {
-        await invoke("ollama_ensure_running");
-        view = "chat";
-        kickUpdateCheck();
-      }
+      // Always reveal the workspace immediately — the Chat / Transcribe
+      // views render their own per-surface DownloadOverlay over the
+      // areas that need a missing model, so we no longer gate the entire
+      // app on first-run downloads. Fire-and-forget the Ollama daemon
+      // ping so we don't block on `ollama_ensure_running` when the
+      // binary isn't installed yet (the overlay's Download button will
+      // run the install lazily).
+      view = "chat";
+      invoke("ollama_ensure_running").catch(() => {});
+      kickUpdateCheck();
 
       // Seed the sidebar early so it's ready when the chat view paints.
       refreshConversations().catch(() => {});
@@ -416,10 +348,99 @@
     if (heartbeatTimer) clearInterval(heartbeatTimer);
   });
 
-  async function onFirstRunComplete() {
-    await invoke("ollama_ensure_running");
-    view = "chat";
-    kickUpdateCheck();
+  /**
+   * Re-derive `textModelMissing` / `asrModelMissing` against the
+   * active family's resolver picks. Called on mount, on family /
+   * mode change, and after each DownloadOverlay completes. The two
+   * surfaces (Chat overlay, Transcribe split overlays) key entirely
+   * off these flags.
+   */
+  async function recomputeMissing(
+    hw: HardwareProfile,
+    manifest: Awaited<ReturnType<typeof getActiveManifest>>,
+    config: Awaited<ReturnType<typeof loadConfig>>,
+  ) {
+    const textResolved = resolveModelEx(
+      hw,
+      manifest,
+      "text",
+      config.mode_overrides,
+      activeFamilyName,
+      config.family_overrides,
+    );
+    pendingTextModel =
+      textResolved.runtime === "ollama" ? textResolved.model : "";
+
+    const transcribeResolved = resolveModelEx(
+      hw,
+      manifest,
+      "transcribe",
+      config.mode_overrides,
+      activeFamilyName,
+      config.family_overrides,
+    );
+    pendingAsrModel =
+      transcribeResolved.runtime !== "ollama" ? transcribeResolved.model : "";
+    pendingAsrRuntime =
+      transcribeResolved.runtime !== "ollama" ? transcribeResolved.runtime : "";
+
+    let textPresent = pendingTextModel === "";
+    if (pendingTextModel) {
+      try {
+        const ollamaInstalled = await invoke<boolean>("ollama_installed");
+        if (ollamaInstalled) {
+          const pulled = await invoke<Array<{ name: string }>>("ollama_list_models");
+          textPresent = pulled.some((m) => m.name === pendingTextModel);
+        } else {
+          textPresent = false;
+        }
+      } catch {
+        textPresent = false;
+      }
+    }
+
+    let asrPresent = pendingAsrModel === "";
+    if (pendingAsrModel) {
+      try {
+        const list = await invoke<Array<{ name: string; installed: boolean }>>(
+          "asr_models_list",
+        );
+        asrPresent = list.some(
+          (m) => m.name === pendingAsrModel && m.installed,
+        );
+      } catch {
+        asrPresent = false;
+      }
+    }
+
+    textModelMissing = !textPresent;
+    asrModelMissing = !asrPresent;
+  }
+
+  /** Re-check missing state using the live hardware/manifest/config.
+   *  Fires from the DownloadOverlay's onComplete callbacks once a pull
+   *  finishes so the overlay dismisses itself. */
+  async function refreshMissing() {
+    if (!hardware) return;
+    try {
+      const [config, manifest] = await Promise.all([
+        loadConfig(),
+        getActiveManifest(),
+      ]);
+      await recomputeMissing(hardware, manifest, config);
+    } catch (e) {
+      console.warn("refreshMissing failed:", e);
+    }
+  }
+
+  function onTextDownloaded() {
+    // Make sure the daemon is up before any chat send fires.
+    invoke("ollama_ensure_running").catch(() => {});
+    refreshMissing();
+  }
+
+  function onAsrDownloaded() {
+    refreshMissing();
   }
 
   /**
@@ -489,7 +510,7 @@
     activeModel = displayModelFor(mode, hardware, manifest, config);
 
     await updateConfig({ active_mode: mode });
-    ensureAsrPresent(hardware, manifest, config);
+    recomputeMissing(hardware, manifest, config).catch(() => {});
   }
 
   async function onProviderChange() {
@@ -498,39 +519,7 @@
     activeFamilyName = config.active_family;
     supportedModes = modesForActiveFamily(manifest, activeFamilyName);
     activeModel = displayModelFor(activeMode, hardware, manifest, config);
-    ensureAsrPresent(hardware, manifest, config);
-  }
-
-  /** Background-pull the family-resolved ASR model if it isn't on
-   *  disk yet. Fire-and-forget so the user can keep using text mode
-   *  while the ASR download runs; the next switch into transcribe
-   *  mode lands on a ready model instead of erroring out. */
-  function ensureAsrPresent(
-    hw: HardwareProfile,
-    manifest: Awaited<ReturnType<typeof getActiveManifest>>,
-    config: Awaited<ReturnType<typeof loadConfig>>,
-  ) {
-    const r = resolveModelEx(
-      hw,
-      manifest,
-      "transcribe",
-      config.mode_overrides,
-      activeFamilyName,
-      config.family_overrides,
-    );
-    // Ollama-runtime transcribe is unsupported; any non-Ollama runtime
-    // (moonshine / parakeet) needs the local ONNX model on disk.
-    if (r.runtime === "ollama" || !r.model) return;
-    invoke<Array<{ name: string; installed: boolean }>>("asr_models_list")
-      .then((list) => {
-        const installed = list.some((m) => m.name === r.model && m.installed);
-        if (installed) return;
-        console.info("[myownllm] background ASR pull: %s (%s)", r.model, r.runtime);
-        invoke("asr_model_pull", { name: r.model }).catch((e) => {
-          console.warn("[myownllm] background ASR pull failed:", e);
-        });
-      })
-      .catch(() => {});
+    recomputeMissing(hardware, manifest, config).catch(() => {});
   }
 
   /** While a text chat is mid-stream the chat slot pins `activeConversationId`
@@ -912,14 +901,6 @@
         <p class="splash-version">v{appVersion}</p>
       {/if}
     </div>
-  {:else if view === "first-run"}
-    <FirstRun
-      {hardware}
-      activeModel={firstRunTextModel}
-      asrModel={firstRunAsrModel}
-      asrRuntime={firstRunAsrRuntime}
-      onComplete={onFirstRunComplete}
-    />
   {:else}
     {#if error}
       <div class="error-banner">⚠ Startup failed: {error}</div>
@@ -952,6 +933,13 @@
           {sidebarOpen}
           conversationId={activeConversationId}
           {newChatCounter}
+          {textModelMissing}
+          {asrModelMissing}
+          textModel={pendingTextModel}
+          asrModel={pendingAsrModel}
+          asrRuntime={pendingAsrRuntime}
+          onTextDownloaded={onTextDownloaded}
+          onAsrDownloaded={onAsrDownloaded}
           onToggleSidebar={() => (sidebarOpen = !sidebarOpen)}
           onModeChange={onModeChange}
           onProviderChange={onProviderChange}
@@ -973,6 +961,9 @@
           {sidebarOpen}
           conversationId={activeConversationId}
           {newChatCounter}
+          {textModelMissing}
+          textModel={pendingTextModel}
+          onTextDownloaded={onTextDownloaded}
           onToggleSidebar={() => (sidebarOpen = !sidebarOpen)}
           onModeChange={onModeChange}
           onProviderChange={onProviderChange}
