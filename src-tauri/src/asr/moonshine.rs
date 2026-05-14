@@ -128,6 +128,7 @@ impl AsrBackend for MoonshineBackend {
         let dec_path = self.artifact_path("decoder.onnx")?;
         let tok_path = self.artifact_path("tokenizer.json")?;
 
+        eprintln!("[moonshine] warm_up: start");
         on_stage("Verifying Moonshine files…");
         // Pre-flight: not just "exists" but "has plausibly the right
         // number of bytes". A truncated download (network drop on
@@ -140,6 +141,7 @@ impl AsrBackend for MoonshineBackend {
         check_file_plausible(&dec_path, MIN_DECODER_BYTES, "decoder")?;
         check_file_plausible(&tok_path, MIN_TOKENIZER_BYTES, "tokenizer")?;
         if cancel.load(Ordering::Relaxed) {
+            eprintln!("[moonshine] warm_up: cancelled before encoder load");
             return Err(anyhow!("Moonshine warm-up cancelled"));
         }
 
@@ -168,6 +170,7 @@ impl AsrBackend for MoonshineBackend {
         })?;
 
         if cancel.load(Ordering::Relaxed) {
+            eprintln!("[moonshine] warm_up: cancelled after encoder load");
             return Err(anyhow!("Moonshine warm-up cancelled"));
         }
         // Decoder pinned to `Level1`. The decoder_model_merged_quantized.onnx
@@ -255,6 +258,7 @@ impl AsrBackend for MoonshineBackend {
         }
 
         if cancel.load(Ordering::Relaxed) {
+            eprintln!("[moonshine] warm_up: cancelled after decoder load");
             return Err(anyhow!("Moonshine warm-up cancelled"));
         }
         on_stage("Loading Moonshine tokenizer…");

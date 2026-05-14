@@ -551,7 +551,14 @@ pub fn start(
 
 pub fn stop(stream_id: &str) -> Result<()> {
     if let Some(s) = sessions().get(stream_id) {
+        // Diagnostic line so a spurious cancel (e.g. fired during the
+        // first warm-up because the frontend double-fired stopRecording)
+        // is visible in the backend logs. The legitimate user-Stop case
+        // is no quieter, but the volume is one line per session end.
+        eprintln!("[transcribe] stop() called for stream {stream_id}");
         s.cancel.store(true, Ordering::SeqCst);
+    } else {
+        eprintln!("[transcribe] stop() called for unknown stream {stream_id} (already finished?)");
     }
     Ok(())
 }
