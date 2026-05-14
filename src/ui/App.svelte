@@ -221,6 +221,14 @@
       const picked = pickFamily(manifest, config.active_family);
       activeFamilyName = picked?.name ?? manifest.default_family ?? "";
       supportedModes = modesForActiveFamily(manifest, activeFamilyName);
+      // Seed `activeModel` for the active mode before painting the UI.
+      // PR #127 dropped this when collapsing the first-run flow, which
+      // left activeModel = "" on every launch — StatusBar showed
+      // nothing and TranscribeView's runtime parser couldn't extract
+      // an ASR runtime, so Record bailed with "Couldn't determine the
+      // ASR runtime for ''". onModeChange / onProviderChange still
+      // refresh it, but the initial paint needs the same value.
+      activeModel = displayModelFor(activeMode, hw, manifest, config);
       await recomputeMissing(hw, manifest, config);
 
       // Always reveal the workspace immediately — the Chat / Transcribe

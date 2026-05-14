@@ -691,8 +691,13 @@
                         </span>
                         {#if switched}
                           <span class="tier-badge switched-badge" title="You picked this option for this family.">✓ Switched to</span>
-                        {:else if recommended && current}
+                        {:else if recommended && current && sz.installed}
                           <span class="tier-badge rec-badge" title="Best fit for your hardware — and what the app is using.">✓ Recommended · in use</span>
+                        {:else if recommended && current}
+                          <!-- Resolver's pick but not on disk yet — call
+                               that out explicitly so the row's Download
+                               button doesn't contradict an "in use" badge. -->
+                          <span class="tier-badge rec-badge soft" title="Best fit for your hardware. Click Download to pull it; the app will start using it once it's on disk.">★ Recommended · needs download</span>
                         {:else if recommended}
                           <span class="tier-badge rec-badge soft" title="Best fit for your hardware. Click Switch on this row to revert to it.">★ Recommended</span>
                         {/if}
@@ -777,6 +782,13 @@
                         >
                           ⇄ Switch to
                         </button>
+                      {:else if current && sz.installed}
+                        <!-- Steady state: this is the resolver's pick AND
+                             on disk. Without this stub the action area
+                             went empty after a successful Download —
+                             which read as "the button reset the view"
+                             instead of "the model is now ready." -->
+                        <span class="tier-ready" title="This model is on disk and active for this family.">✓ Installed</span>
                       {/if}
                     </div>
                   </div>
@@ -1145,6 +1157,14 @@
   .unswitch-btn:hover:not(:disabled) { color: #e6c068; background: #1f1812; border-color: #4a3a1a; }
   .delete-btn { color: #f88; border-color: #3a1f1f; }
   .delete-btn:hover:not(:disabled) { color: #faa; background: #2a1414; border-color: #4a2424; }
+  .tier-ready {
+    padding: .3rem .55rem;
+    font-size: .72rem;
+    color: #6c6;
+    background: transparent;
+    border: 1px solid transparent;
+    white-space: nowrap;
+  }
 
   .detail-footer {
     flex-shrink: 0;
