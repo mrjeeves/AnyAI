@@ -540,7 +540,7 @@ pub fn start(
                 is_final: true,
                 pending_chunks: 0,
                 chunk_seconds: None,
-                status: Some(format!("transcription error: {e}")),
+                status: Some(format!("transcription error: {e:#}")),
                 upload_progress: None,
             },
         };
@@ -634,7 +634,7 @@ pub fn start_drain(
                 is_final: true,
                 pending_chunks: 0,
                 chunk_seconds: None,
-                status: Some(format!("transcription error: {e}")),
+                status: Some(format!("transcription error: {e:#}")),
                 upload_progress: None,
             },
         };
@@ -713,7 +713,7 @@ pub fn start_upload(
                 is_final: true,
                 pending_chunks: 0,
                 chunk_seconds: None,
-                status: Some(format!("transcription error: {e}")),
+                status: Some(format!("transcription error: {e:#}")),
                 upload_progress: None,
             },
         };
@@ -969,7 +969,7 @@ fn run_session(
                         started.elapsed().as_millis(),
                         count_pending_chunks(&buffer_dir),
                         None,
-                        Some(format!("Chunk read failed: {e}")),
+                        Some(format!("Chunk read failed: {e:#}")),
                     ),
                 );
                 continue;
@@ -1030,7 +1030,7 @@ fn run_session(
                         count_pending_chunks(&buffer_dir),
                         None,
                         Some(format!(
-                            "ASR inference error ({}/{}): {e}",
+                            "ASR inference error ({}/{}): {e:#}",
                             consecutive_errors, ASR_CONSECUTIVE_ERROR_LIMIT
                         )),
                     ),
