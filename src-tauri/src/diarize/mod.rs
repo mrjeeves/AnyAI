@@ -166,14 +166,24 @@ impl DiarizeBackend for PyannoteOrtBackend {
 
         // Segmentation pass.
         let voiced = self.segmenter.segment(&window, window_t0_ms, cancel)?;
+        let window_len_ms = (window.len() as u64 * 1000) / 16_000;
+        eprintln!(
+            "[diarize] chunk t0={}ms window={}ms tail={}ms voiced_slices={}",
+            chunk_t0_ms,
+            window_len_ms,
+            self.tail.len() as u64 * 1000 / 16_000,
+            voiced.len()
+        );
 
         // Embed + cluster each voiced slice ≥ 0.5 s.
         let mut turns = Vec::new();
+        let mut filtered_short = 0usize;
         for slice in voiced {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
             }
             if slice.end_ms <= slice.start_ms + 500 {
+                filtered_short += 1;
                 continue;
             }
             // Extract waveform for the slice. start_ms / end_ms are
@@ -197,6 +207,13 @@ impl DiarizeBackend for PyannoteOrtBackend {
                 confidence: Some(sim),
             });
         }
+
+        eprintln!(
+            "[diarize] chunk t0={}ms emitted_turns={} filtered_short_slices={}",
+            chunk_t0_ms,
+            turns.len(),
+            filtered_short
+        );
 
         // Stash a 2 s tail for next chunk's context (enough for the
         // segmenter's lookahead + embedder's context budget).

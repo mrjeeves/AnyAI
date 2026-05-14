@@ -1,6 +1,6 @@
 {
   "name": "MyOwnLLM Default",
-  "version": "15",
+  "version": "16",
   "ttl_minutes": 360,
   "default_family": "gemma4",
   "headroom_gb": {
@@ -14,7 +14,6 @@
       "label": "Transcribe",
       "input": "audio",
       "tiers": [
-        { "min_vram_gb": 4,  "min_ram_gb": 8,  "min_unified_ram_gb": 16, "disk_mb": 700, "runtime": "parakeet",  "model": "parakeet-tdt-0.6b-v3-int8", "fallback": "moonshine-small-q8" },
         { "min_vram_gb": 0,  "min_ram_gb": 0,  "min_unified_ram_gb": 0,  "disk_mb": 80,  "runtime": "moonshine", "model": "moonshine-small-q8",        "fallback": "moonshine-small-q8" }
       ]
     },

@@ -278,15 +278,32 @@ pub fn find_composite(composite: &str, kind: ModelKind) -> Result<Vec<&'static M
 /// not installed so a half-pulled backend never tries to load.
 pub fn is_installed(spec: &ModelSpec) -> bool {
     let Ok(dir) = model_dir(spec.kind, spec.name) else {
+        eprintln!("[models] is_installed({}): model_dir failed", spec.name);
         return false;
     };
     for artifact in spec.artifacts {
         let path = dir.join(artifact.filename);
-        let Ok(meta) = std::fs::metadata(&path) else {
-            return false;
-        };
-        if meta.len() < artifact.min_bytes {
-            return false;
+        match std::fs::metadata(&path) {
+            Err(e) => {
+                eprintln!(
+                    "[models] is_installed({}): missing artifact {} at {} ({e})",
+                    spec.name,
+                    artifact.filename,
+                    path.display()
+                );
+                return false;
+            }
+            Ok(meta) if meta.len() < artifact.min_bytes => {
+                eprintln!(
+                    "[models] is_installed({}): {} too small ({} < min {})",
+                    spec.name,
+                    artifact.filename,
+                    meta.len(),
+                    artifact.min_bytes
+                );
+                return false;
+            }
+            Ok(_) => {}
         }
     }
     true
