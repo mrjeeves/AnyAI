@@ -71,6 +71,20 @@
   /** Folder paths the user has collapsed. Folders default to expanded. */
   let collapsed = $state<Set<string>>(new Set());
 
+  /** Non-native delete-confirmation modal. `window.confirm()` used to
+   *  drive the delete flows, but Tauri's `dialog:default` capability
+   *  set doesn't include the (deprecated) `dialog:allow-confirm`
+   *  permission — and we don't want native modals anyway, since the
+   *  rest of the app (StorageSection, ModelsSection, the conflict
+   *  modal in App) uses inline confirmations consistently. Setting
+   *  `deletePrompt` opens the overlay; `proceed` runs after the user
+   *  clicks Delete; clicking Cancel just clears it. */
+  let deletePrompt = $state<{
+    title: string;
+    body: string;
+    proceed: () => void;
+  } | null>(null);
+
   function openItemMenu(e: MouseEvent, id: string) {
     e.preventDefault();
     e.stopPropagation();
@@ -148,9 +162,11 @@
     closeMenu();
     const item = items.find((c: ConversationMeta) => c.id === id);
     const label = item?.title ?? `this ${itemNoun}`;
-    if (confirm(`Delete "${label}"? This can't be undone.`)) {
-      onDelete(id);
-    }
+    deletePrompt = {
+      title: `Delete "${label}"?`,
+      body: "This can't be undone.",
+      proceed: () => onDelete(id),
+    };
   }
 
   function deleteFolderWithConfirm(path: string) {
@@ -162,16 +178,21 @@
       (f: FolderMeta) => f.path !== path && f.path.startsWith(path + "/"),
     ).length;
     const total = childCount + childFolderCount;
-    let prompt = `Delete folder "${path.split("/").pop()}"?`;
+    const folderName = path.split("/").pop() ?? path;
+    let body = "";
     if (total > 0) {
-      prompt += ` This also removes ${childCount} ${itemNoun}${childCount === 1 ? "" : "s"}`;
+      body = `This also removes ${childCount} ${itemNoun}${childCount === 1 ? "" : "s"}`;
       if (childFolderCount > 0) {
-        prompt += ` and ${childFolderCount} subfolder${childFolderCount === 1 ? "" : "s"}`;
+        body += ` and ${childFolderCount} subfolder${childFolderCount === 1 ? "" : "s"}`;
       }
-      prompt += " inside it.";
+      body += " inside it. ";
     }
-    prompt += " This can't be undone.";
-    if (confirm(prompt)) onDeleteFolder(path);
+    body += "This can't be undone.";
+    deletePrompt = {
+      title: `Delete folder "${folderName}"?`,
+      body,
+      proceed: () => onDeleteFolder(path),
+    };
   }
 
   function startCreateFolder(parent: string) {
@@ -783,6 +804,35 @@
   </div>
 {/if}
 
+{#if deletePrompt}
+  <!-- Non-native delete confirmation. Modelled on the existing
+       inline modals in StorageSection / ModelsSection / App's conflict
+       modal — no Tauri native dialog, so it works on every platform
+       without needing `dialog:allow-confirm` in capabilities. -->
+  <button
+    class="delete-prompt-scrim"
+    aria-label="Cancel delete"
+    onclick={() => (deletePrompt = null)}
+  ></button>
+  <div class="delete-prompt" role="dialog" aria-label={deletePrompt.title}>
+    <h3>{deletePrompt.title}</h3>
+    <p>{deletePrompt.body}</p>
+    <div class="delete-prompt-actions">
+      <button class="cancel" onclick={() => (deletePrompt = null)}>Cancel</button>
+      <button
+        class="delete"
+        onclick={() => {
+          const p = deletePrompt;
+          deletePrompt = null;
+          p?.proceed();
+        }}
+      >
+        Delete
+      </button>
+    </div>
+  </div>
+{/if}
+
 {#if drag && drag.active}
   <div
     class="drag-ghost"
@@ -1027,4 +1077,33 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+
+  .delete-prompt-scrim {
+    position: fixed; inset: 0; background: rgba(0, 0, 0, .65); z-index: 40;
+    border: none; padding: 0; cursor: default;
+  }
+  .delete-prompt {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: min(380px, 90vw);
+    background: #161616; border: 1px solid #2a2a2a; border-radius: 10px;
+    padding: 1rem 1.1rem; z-index: 41;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, .6);
+  }
+  .delete-prompt h3 {
+    font-size: .9rem; font-weight: 600; margin-bottom: .5rem;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  .delete-prompt p { font-size: .82rem; color: #c4c4c4; margin-bottom: .75rem; }
+  .delete-prompt-actions {
+    display: flex; gap: .5rem; justify-content: flex-end;
+  }
+  .delete-prompt-actions button {
+    padding: .4rem .8rem; border-radius: 5px; border: 1px solid #2a2a2a;
+    background: #1d1d1d; color: #e8e8e8; cursor: pointer; font-size: .82rem;
+  }
+  .delete-prompt-actions .cancel:hover { background: #232323; }
+  .delete-prompt-actions .delete {
+    background: #3a1818; border-color: #5a2c2c; color: #ff8b8b;
+  }
+  .delete-prompt-actions .delete:hover { background: #4a2020; }
 </style>
