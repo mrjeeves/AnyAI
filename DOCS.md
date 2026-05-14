@@ -384,6 +384,7 @@ If a tool only accepts `ANTHROPIC_BASE_URL` and the Anthropic Messages API (vani
 | `myownllm families`   | Pick the model family inside the active provider      |
 | `myownllm import`     | Import a config bundle                                 |
 | `myownllm export`     | Export the current config                              |
+| `myownllm purge`      | Danger zone: delete models, conversations, or all data |
 | `myownllm update`     | Self-update: `status`, `check`, `apply`                |
 
 ### Run / Chat
@@ -571,6 +572,58 @@ myownllm update apply        # apply any staged update (or no-op)
 
 See [Auto-update](#auto-update) for behaviour.
 
+### Purge
+
+Three destructive resets for testing, support sessions, or starting over. Each
+mirrors a row in the GUI's **Settings → Storage → Danger zone** card.
+
+```bash
+myownllm purge models               # every pulled tag + ASR/diarize artifacts
+myownllm purge conversations        # every saved chat + sidecars
+myownllm purge data                 # the whole ~/.myownllm/ tree, plus models
+```
+
+| Tier            | What it deletes                                                                       |
+|-----------------|---------------------------------------------------------------------------------------|
+| `models`        | Every pulled Ollama tag, every ASR / diarize artifact under `~/.myownllm/models/`, and resets `kept_models` / `mode_overrides` / `family_overrides`. Provider list and active family are kept. |
+| `conversations` | Everything under `conversation_dir` — JSON files, talking-points sidecars, folders, user-dropped files. The folder itself is recreated empty. |
+| `data`          | Stops the managed Ollama, drops every model, then removes the entire `~/.myownllm/` tree (config, cache, transcribe buffer, updates, legacy dirs). A redirected `conversation_dir` outside `~/.myownllm/` is wiped too. Next launch starts fresh against compiled-in defaults — same as a first install. |
+
+Without `-f` each tier prints a one-line summary of what it's about to delete and waits for you to type the matching phrase verbatim. The phrases are deliberately specific so muscle-memorying through a prompt won't fire one off:
+
+```
+$ myownllm purge models
+About to delete all models.
+Removes every pulled Ollama tag, on-disk ASR / diarize artifacts, and resets
+your kept-list and mode overrides. Provider list and active family are kept.
+Models will be re-downloaded on next use.
+
+This is irreversible. There is no trash.
+Type the phrase to confirm (or anything else to abort):
+  delete all models
+>
+```
+
+Pass `-f` (or `--force`) to skip the prompt — for scripts, CI, or anywhere a TTY isn't available:
+
+```bash
+myownllm purge models -f
+myownllm purge conversations -f
+myownllm purge data -f
+myownllm purge data -f --json    # machine-readable PurgeReport
+```
+
+```jsonc
+// --json output (PurgeReport)
+{
+  "bytes_freed": 18403258461,
+  "items_removed": 142,
+  "errors": []
+}
+```
+
+There is no undo. There is no trash. Once a tier completes, the data is gone. `purge data` in particular requires a restart afterward: the running process has just had its config dir deleted from under it, and will repopulate defaults on next launch the same way a first install does.
+
 ---
 
 ## GUI
@@ -610,6 +663,7 @@ Launch the GUI by running `myownllm` with no arguments, or open the application 
 - **Family tab** — pick which family inside the active provider MyOwnLLM uses for recommendations. Each family card shows its full tier list with the tier picked for your hardware highlighted, so you can see exactly what's running and why.
 - **Providers tab** — list of saved providers. Click any provider to switch (model and family hot-swap immediately to the new manifest's default family).
 - **Models tab** — every pulled model with its size, recommendation status, and pin/override controls.
+- **Storage tab** — per-area auto-cleanup toggles and a "Clean now" button per area (models, transcribe buffer, legacy runtimes, update leftovers, orphaned conversation files). The conversations folder lives here too. At the bottom: a **Danger zone** card with one-click resets — Delete all models, Delete all conversations, Delete all app data and downloads. Each is gated behind a typed challenge phrase and mirrors the matching `myownllm purge` subcommand.
 
 **Model status panel** (click "⊞ Models"):
 - Every pulled model: size, which providers recommend it, age if unrecommended.
@@ -947,6 +1001,18 @@ In the GUI: open the Models panel → click "change" next to any mode → pick f
 ```bash
 myownllm models prune    # immediately evict everything that qualifies (ignores age)
 ```
+
+### Wiping the slate
+
+`myownllm models prune` only touches unrecommended, non-pinned, non-override tags — it's the routine cleanup pass run by hand. For a full reset (testing, support, switching providers wholesale, or just starting over), use [`myownllm purge`](#purge) or the GUI's **Settings → Storage → Danger zone**:
+
+```bash
+myownllm purge models           # every pulled tag + ASR/diarize artifacts
+myownllm purge conversations    # every saved chat
+myownllm purge data             # the whole ~/.myownllm/ tree, plus models
+```
+
+Each tier prompts for a typed confirmation; `-f` skips it for scripts. There is no trash.
 
 ---
 

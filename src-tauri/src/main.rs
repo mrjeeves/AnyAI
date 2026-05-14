@@ -14,6 +14,7 @@ mod ollama;
 mod ort_setup;
 mod preload;
 mod process;
+mod purge;
 mod remote_ui;
 mod resolver;
 mod self_update;
@@ -463,6 +464,35 @@ fn update_leftovers_clear() -> u64 {
     self_update::clear_update_leftovers()
 }
 
+/// Danger-zone: drop every pulled Ollama tag plus the on-disk ASR /
+/// diarize artifacts, and reset `kept_models` / `mode_overrides` /
+/// `family_overrides` so the next preload is a clean slate. Used by
+/// the Storage tab's "Delete all models" button (and the matching
+/// `myownllm purge models` CLI). Provider list and active family are
+/// left alone — they're config, not data.
+#[tauri::command]
+async fn purge_models() -> Result<purge::PurgeReport, String> {
+    purge::purge_models().await.map_err(|e| e.to_string())
+}
+
+/// Danger-zone: wipe every saved conversation under the active
+/// `conversation_dir`, sidecars and folders included. The directory
+/// itself is recreated empty so the next save isn't met with ENOENT.
+#[tauri::command]
+fn purge_conversations() -> Result<purge::PurgeReport, String> {
+    purge::purge_conversations().map_err(|e| e.to_string())
+}
+
+/// Danger-zone: stop the managed Ollama, drop every model, and remove
+/// the entire `~/.myownllm/` tree (config, cache, transcribe buffer,
+/// updates, legacy dirs, …). Plus a redirected `conversation_dir` if
+/// it lives outside the root. The next launch starts fresh against
+/// compiled-in defaults, the same way a first install would.
+#[tauri::command]
+async fn purge_all_data() -> Result<purge::PurgeReport, String> {
+    purge::purge_all().await.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn audio_input_devices() -> Result<Vec<transcribe::AudioInputDevice>, String> {
     transcribe::list_input_devices().map_err(|e| e.to_string())
@@ -669,6 +699,9 @@ fn main() {
             transcribe_buffer_clear,
             update_leftovers_list,
             update_leftovers_clear,
+            purge_models,
+            purge_conversations,
+            purge_all_data,
             audio_input_devices,
             write_text_to_path,
             usage_live_snapshot,

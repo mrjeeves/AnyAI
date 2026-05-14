@@ -13,6 +13,7 @@ pub async fn run(args: Vec<String>) -> Result<()> {
         Some("families") => cmd_families(&args[1..]).await,
         Some("import") => cmd_import(&args[1..]).await,
         Some("export") => cmd_export(&args[1..]).await,
+        Some("purge") => cmd_purge(&args[1..]).await,
         Some("update") => crate::self_update::cmd_update(&args[1..]).await,
         Some("help") | Some("--help") | Some("-h") => {
             print_help();
@@ -51,6 +52,8 @@ COMMANDS:
   families      Pick the model family inside the active provider
   import <url>  Import config from URL or file
   export        Export config
+  purge         Danger zone: delete models, conversations, or all app data
+                Subcommands: models | conversations | data    (pass -f to skip prompt)
   update        Update to the latest release (one shot: check + download + apply)
                 Subcommands: status | check | apply | enable | disable
 
@@ -71,6 +74,10 @@ FLAGS (preload):
   --track               Persist to config.tracked_modes
   --no-warm             Skip the post-pull warm-up call
   --json                Newline-delimited JSON event output
+
+FLAGS (purge):
+  -f, --force           Skip the typed confirmation prompt (for scripts / CI)
+  --json                Emit the post-purge report as JSON instead of a summary
 
 FLAGS (providers use):
   --immediate           After swap, evict the previously-resolved tag now
@@ -797,6 +804,99 @@ async fn cmd_export(args: &[String]) -> Result<()> {
         println!("myownllm:import:{encoded}");
     } else {
         println!("{}", serde_json::to_string_pretty(&export)?);
+    }
+    Ok(())
+}
+
+/// Danger-zone CLI dispatcher: maps `myownllm purge <tier>` to the same
+/// purge functions the GUI's "Danger zone" buttons call. The tier names
+/// (`models`, `conversations`, `data`) match the three sections in the
+/// Storage tab and the three Tauri commands one-for-one. Without `-f`
+/// each tier prints a warning and waits for the user to type the
+/// confirmation phrase verbatim; with `-f` the prompt is skipped so
+/// scripts and CI can use the same surface.
+async fn cmd_purge(args: &[String]) -> Result<()> {
+    let force = args.iter().any(|a| a == "-f" || a == "--force");
+    let json = args.contains(&"--json".to_string());
+    let tier = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .ok_or_else(|| anyhow!(
+            "usage: myownllm purge <models|conversations|data> [-f] [--json]"
+        ))?;
+
+    let (label, challenge, blurb) = match tier {
+        "models" => (
+            "all models",
+            "delete all models",
+            "Removes every pulled Ollama tag, on-disk ASR / diarize artifacts, \
+             and resets your kept-list and mode overrides. Provider list and \
+             active family are kept. Models will be re-downloaded on next use.",
+        ),
+        "conversations" => (
+            "all conversations",
+            "delete all conversations",
+            "Wipes every saved conversation under your conversations folder, \
+             talking-points sidecars and folders included.",
+        ),
+        "data" => (
+            "all app data and downloads",
+            "delete everything",
+            "Stops the managed Ollama, drops every model, and removes the \
+             entire ~/.myownllm/ tree (config, cache, transcribe buffer, \
+             updates, legacy dirs). A redirected conversations folder \
+             outside ~/.myownllm/ is wiped too. Next launch starts fresh.",
+        ),
+        other => {
+            return Err(anyhow!(
+                "unknown purge tier: {other}\n\
+                 expected one of: models, conversations, data"
+            ))
+        }
+    };
+
+    if !force {
+        eprintln!("About to delete {label}.");
+        eprintln!("{blurb}");
+        eprintln!();
+        eprintln!("This is irreversible. There is no trash.");
+        eprintln!("Type the phrase to confirm (or anything else to abort):");
+        eprintln!("  {challenge}");
+        eprint!("> ");
+        use std::io::Write;
+        std::io::stderr().flush().ok();
+        let mut typed = String::new();
+        std::io::stdin().read_line(&mut typed)?;
+        if typed.trim() != challenge {
+            eprintln!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    let report = match tier {
+        "models" => crate::purge::purge_models().await?,
+        "conversations" => crate::purge::purge_conversations()?,
+        "data" => crate::purge::purge_all().await?,
+        _ => unreachable!(),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        let gb = report.bytes_freed as f64 / 1024.0 / 1024.0 / 1024.0;
+        println!(
+            "Freed {:.2} GB · removed {} item{}",
+            gb,
+            report.items_removed,
+            if report.items_removed == 1 { "" } else { "s" }
+        );
+        for e in &report.errors {
+            eprintln!("  ! {e}");
+        }
+        if tier == "data" {
+            eprintln!("Restart MyOwnLLM to come back up against compiled-in defaults.");
+        }
     }
     Ok(())
 }

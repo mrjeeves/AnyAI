@@ -86,6 +86,7 @@ A tier carries three RAM/VRAM thresholds because Apple Silicon and discrete GPUs
 | `self_update.rs` | Periodic GitHub-releases check, channel-aware (stable/beta), patch auto-apply, atomic rename-on-restart, package-manager-install detection (no-op when installed via brew/apt/rpm/MSI). |
 | `hardware.rs` | nvidia-smi / rocm-smi / sysctl / /proc detection. |
 | `ollama.rs` | spawn/stop `ollama serve`, pull, list, delete, warm, has_model. |
+| `purge.rs` | Danger-zone resets: `purge_models` / `purge_conversations` / `purge_all`. Shared between the Storage tab's "Danger zone" Tauri commands and `myownllm purge` in the CLI. |
 
 ## Modules (TypeScript)
 

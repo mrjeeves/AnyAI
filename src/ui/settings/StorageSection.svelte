@@ -49,6 +49,20 @@
    *  and the active "Clean now" confirmation modal. */
   type SectionKey = "models" | "transcribe_buffer" | "legacy" | "updates" | "conversations";
 
+  /** Mirror of `purge::PurgeReport`. The Storage tab's danger zone
+   *  surfaces `bytes_freed` in a post-purge toast and `errors` inline
+   *  if anything refused to delete. */
+  interface PurgeReport {
+    bytes_freed: number;
+    items_removed: number;
+    errors: string[];
+  }
+
+  /** Which danger-zone tier is currently being confirmed. `null` when
+   *  the modal is closed. The three tiers map 1-to-1 with the CLI's
+   *  `myownllm purge {models,conversations,data}` subcommands. */
+  type DangerKey = "models" | "conversations" | "data";
+
   type Tab = "providers" | "families" | "models" | "storage" | "updates";
 
   let { setActive } = $props<{ setActive: (tab: Tab) => void }>();
@@ -99,6 +113,23 @@
   let cleanError = $state("");
   /** Last-cleaned summary, shown briefly after a successful pass. */
   let lastCleaned = $state<{ section: SectionKey; bytes: number } | null>(null);
+
+  /** Two-step confirmation state for the danger zone. The first click on
+   *  a button opens the modal (`step: 1`); the user must type the exact
+   *  challenge phrase, then click the destructive action again to advance
+   *  to `step: 2` where the purge is actually issued. Mirrors the CLI's
+   *  `-f` opt-out: typing the phrase is the GUI equivalent of `-f`. */
+  let dangerOpen = $state<{
+    key: DangerKey;
+    step: 1 | 2;
+    challenge: string;
+    typed: string;
+  } | null>(null);
+  let purging = $state(false);
+  let purgeError = $state("");
+  /** Last-purged summary. Shown beneath the matching danger-zone row
+   *  for a few seconds — same shape as `lastCleaned`. */
+  let lastPurged = $state<{ key: DangerKey; bytes: number; items: number } | null>(null);
 
   async function refreshStorage(): Promise<void> {
     const [pulled, hw, config, orphans, legacy, updateList, modelTargets, convOrphans] =
@@ -375,6 +406,112 @@
     "updates",
     "conversations",
   ];
+
+  /** Per-tier static copy for the danger zone. `challenge` is the phrase
+   *  the user must type verbatim before the destructive button enables —
+   *  picked to be specific enough that "Delete" alone can't be muscle-
+   *  memoried through. Mirrors the CLI's prompt phrasing. */
+  const dangerMeta: Record<
+    DangerKey,
+    { title: string; blurb: string; challenge: string; cta: string }
+  > = {
+    models: {
+      title: "Delete all models",
+      blurb:
+        "Removes every pulled Ollama tag, the on-disk ASR / diarize artifacts, " +
+        "and clears your kept-list, mode overrides, and family overrides. " +
+        "Provider list and active family are kept — they're config, not data. " +
+        "Models will be re-downloaded on next use.",
+      challenge: "delete all models",
+      cta: "Delete models",
+    },
+    conversations: {
+      title: "Delete all conversations",
+      blurb:
+        "Wipes every saved conversation under the conversations folder, " +
+        "talking-points sidecars and folders included. The folder itself " +
+        "is recreated empty so the next save lands cleanly.",
+      challenge: "delete all conversations",
+      cta: "Delete conversations",
+    },
+    data: {
+      title: "Delete all app data and downloads",
+      blurb:
+        "The full reset: stops the managed Ollama, drops every model, " +
+        "and removes the entire ~/.myownllm/ tree (config, cache, transcribe " +
+        "buffer, updates, legacy dirs). A redirected conversations folder " +
+        "outside ~/.myownllm/ is wiped too. Restart MyOwnLLM after this; " +
+        "it'll come back up against compiled-in defaults like a first install.",
+      challenge: "delete everything",
+      cta: "Delete everything",
+    },
+  };
+
+  function openDanger(key: DangerKey): void {
+    purgeError = "";
+    dangerOpen = {
+      key,
+      step: 1,
+      challenge: dangerMeta[key].challenge,
+      typed: "",
+    };
+  }
+
+  function closeDanger(): void {
+    if (purging) return;
+    dangerOpen = null;
+    purgeError = "";
+  }
+
+  /** Run the actual purge for the open tier. Two-step: the first call
+   *  (challenge satisfied) advances the modal to a final-confirm state
+   *  with the destructive verb; the second call issues the invoke and
+   *  closes on success. */
+  async function runPurge(): Promise<void> {
+    if (!dangerOpen || purging) return;
+    if (dangerOpen.typed.trim() !== dangerOpen.challenge) return;
+    if (dangerOpen.step === 1) {
+      dangerOpen = { ...dangerOpen, step: 2 };
+      return;
+    }
+    const target = dangerOpen;
+    purging = true;
+    purgeError = "";
+    try {
+      let report: PurgeReport;
+      switch (target.key) {
+        case "models":
+          report = await invoke<PurgeReport>("purge_models");
+          break;
+        case "conversations":
+          report = await invoke<PurgeReport>("purge_conversations");
+          break;
+        case "data":
+          report = await invoke<PurgeReport>("purge_all_data");
+          break;
+      }
+      lastPurged = {
+        key: target.key,
+        bytes: report.bytes_freed,
+        items: report.items_removed,
+      };
+      if (report.errors.length > 0) {
+        purgeError = report.errors.slice(0, 3).join("; ");
+      }
+      dangerOpen = null;
+      // Refresh the cleanup cards so model/legacy/etc. counts reset.
+      await refreshStorage().catch(() => {});
+      setTimeout(() => {
+        if (lastPurged?.key === target.key) lastPurged = null;
+      }, 6000);
+    } catch (e) {
+      purgeError = String(e);
+    } finally {
+      purging = false;
+    }
+  }
+
+  const dangerKeys: DangerKey[] = ["models", "conversations", "data"];
 </script>
 
 <div class="section">
@@ -490,6 +627,40 @@
           {/if}
         </div>
       </div>
+
+      <div class="card danger-zone">
+        <div class="danger-head">
+          <div class="card-title danger-title">Danger zone</div>
+          <p class="card-meta">
+            One-click resets for testing or starting over. Each one is
+            destructive, irreversible, and gated behind a typed confirmation.
+            The CLI mirrors these as <code>myownllm purge models</code>,
+            <code>myownllm purge conversations</code>, and
+            <code>myownllm purge data</code> — pass <code>-f</code> there to
+            skip the prompt.
+          </p>
+        </div>
+        {#each dangerKeys as key (key)}
+          {@const meta = dangerMeta[key]}
+          <div class="danger-row">
+            <div class="danger-info">
+              <div class="danger-row-title">{meta.title}</div>
+              <div class="danger-row-blurb">{meta.blurb}</div>
+              {#if lastPurged?.key === key}
+                <div class="danger-row-result">
+                  ✓ Freed {bytesLabel(lastPurged.bytes)}
+                  {#if lastPurged.items > 0}
+                    · {lastPurged.items} {lastPurged.items === 1 ? "item" : "items"} removed
+                  {/if}
+                </div>
+              {/if}
+            </div>
+            <button class="danger-btn" onclick={() => openDanger(key)}>
+              {meta.cta}
+            </button>
+          </div>
+        {/each}
+      </div>
     </div>
     <div class="scroll-more-hint" aria-hidden="true">
       <span class="scroll-more-chevron">⌄</span>
@@ -535,6 +706,58 @@
           onclick={runClean}
         >
           {cleaning ? "Cleaning…" : "Clean"}
+        </button>
+      </div>
+    </div>
+  {/if}
+
+  {#if dangerOpen}
+    {@const meta = dangerMeta[dangerOpen.key]}
+    {@const phraseOk = dangerOpen.typed.trim() === dangerOpen.challenge}
+    <div class="confirm-overlay" onclick={closeDanger} role="presentation"></div>
+    <div class="confirm danger-confirm" role="dialog" aria-label={meta.title}>
+      <h3 class="danger-h">{meta.title}</h3>
+      <p class="confirm-lead">{meta.blurb}</p>
+      <p class="danger-warn">
+        This is irreversible. There is no trash — once you confirm, the data is gone.
+      </p>
+      {#if dangerOpen.step === 1}
+        <label class="danger-challenge">
+          <span>
+            Type <code>{meta.challenge}</code> to enable the button.
+          </span>
+          <input
+            type="text"
+            spellcheck="false"
+            autocomplete="off"
+            bind:value={dangerOpen.typed}
+            placeholder={meta.challenge}
+            disabled={purging}
+          />
+        </label>
+      {:else}
+        <p class="danger-final">
+          Last chance. Click <strong>{meta.cta}</strong> below to delete now,
+          or Cancel to back out.
+        </p>
+      {/if}
+      {#if purgeError}
+        <p class="confirm-error">{purgeError}</p>
+      {/if}
+      <div class="confirm-actions">
+        <button class="cancel" disabled={purging} onclick={closeDanger}>Cancel</button>
+        <button
+          class="danger-go"
+          disabled={purging || !phraseOk}
+          onclick={runPurge}
+        >
+          {#if purging}
+            Deleting…
+          {:else if dangerOpen.step === 1}
+            Continue
+          {:else}
+            {meta.cta}
+          {/if}
         </button>
       </div>
     </div>
@@ -710,4 +933,63 @@
     background: #5a4a24; color: #ffe6b3; border-color: #7a6434;
   }
   .confirm-actions .clean:hover:not(:disabled) { background: #6a5a2c; }
+
+  .danger-zone {
+    border-color: #4a1a1a;
+    background: #1a1010;
+    margin-top: .25rem;
+  }
+  .danger-head { display: flex; flex-direction: column; gap: .25rem; padding-bottom: .25rem; border-bottom: 1px dashed #3a1818; margin-bottom: .35rem; }
+  .danger-title { color: #f88; }
+  .danger-row {
+    display: flex; align-items: center; gap: .75rem;
+    padding: .5rem 0;
+    border-top: 1px dashed #2a1414;
+  }
+  .danger-row:first-of-type { border-top: none; }
+  .danger-info { flex: 1; display: flex; flex-direction: column; gap: .15rem; min-width: 0; }
+  .danger-row-title { font-size: .82rem; font-weight: 600; color: #f0c8c8; }
+  .danger-row-blurb { font-size: .74rem; color: #998; line-height: 1.5; }
+  .danger-row-result { font-size: .74rem; color: #6a6; margin-top: .15rem; }
+  .danger-btn {
+    background: #3a1a1a; border: 1px solid #5a2424;
+    color: #f88; padding: .4rem .75rem;
+    border-radius: 6px; font-size: .78rem; cursor: pointer;
+    white-space: nowrap;
+  }
+  .danger-btn:hover { background: #4a2020; color: #fbb; }
+
+  .danger-confirm { border-color: #5a2424; }
+  .danger-h { color: #f88; }
+  .danger-warn {
+    font-size: .76rem; color: #fbb;
+    background: #2a1414; border: 1px solid #4a2020;
+    padding: .4rem .6rem; border-radius: 5px;
+    margin-bottom: .55rem;
+  }
+  .danger-challenge {
+    display: flex; flex-direction: column; gap: .35rem;
+    font-size: .76rem; color: #aaa;
+    margin-bottom: .55rem;
+  }
+  .danger-challenge code {
+    color: #f88; background: #2a1414;
+    padding: .05rem .3rem; border-radius: 3px; font-size: .78rem;
+  }
+  .danger-challenge input {
+    background: #1a1010; border: 1px solid #4a2020; border-radius: 5px;
+    color: #f0c8c8; padding: .4rem .55rem; font-size: .82rem;
+    font-family: monospace;
+  }
+  .danger-challenge input:focus { outline: none; border-color: #f88; }
+  .danger-final {
+    font-size: .8rem; color: #fbb;
+    background: #2a1414; border: 1px solid #6a2828;
+    padding: .55rem .65rem; border-radius: 5px;
+    margin-bottom: .55rem;
+  }
+  .confirm-actions .danger-go {
+    background: #6a2424; color: #ffd; border-color: #8a3030;
+  }
+  .confirm-actions .danger-go:hover:not(:disabled) { background: #7a2a2a; }
 </style>
