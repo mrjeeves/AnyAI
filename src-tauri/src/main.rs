@@ -18,6 +18,7 @@ mod remote_ui;
 mod resolver;
 mod self_update;
 mod transcribe;
+mod usage;
 mod watcher;
 
 #[cfg(target_os = "windows")]
@@ -467,6 +468,24 @@ fn audio_input_devices() -> Result<Vec<transcribe::AudioInputDevice>, String> {
     transcribe::list_input_devices().map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn usage_live_snapshot() -> usage::LiveSnapshot {
+    usage::sample()
+}
+
+#[tauri::command]
+fn usage_stats() -> usage::UsageStats {
+    usage::load_stats()
+}
+
+/// Frontend-driven counter bumps. Done as Tauri commands rather than
+/// pulling a TS persistence layer in so the file under
+/// `~/.myownllm/usage-stats.json` stays the single source of truth.
+#[tauri::command]
+fn usage_record_chat_sent() {
+    usage::record_chat_sent();
+}
+
 /// Write UTF-8 text to a filesystem path the user picked via the save
 /// dialog. The fs plugin's allowlist is scoped to ~/.myownllm/** so
 /// downloads to anywhere else (Desktop, Downloads, an external drive) need
@@ -549,6 +568,12 @@ fn main() {
     // First thing every process does: apply any staged self-update so the new
     // binary takes over before we open ports, sockets, or the GUI window.
     self_update::apply_pending_if_any();
+
+    // Anchor the per-session uptime clock and bump the persisted launch
+    // counter so the Usage tab can show "X launches" without us having to
+    // care whether this turned into a CLI run or the GUI.
+    usage::mark_process_start();
+    usage::record_app_launch();
 
     // Resolve + commit the onnxruntime dylib path before any ASR or
     // diarize backend tries to load a model. `load-dynamic` ort means
@@ -646,6 +671,9 @@ fn main() {
             update_leftovers_clear,
             audio_input_devices,
             write_text_to_path,
+            usage_live_snapshot,
+            usage_stats,
+            usage_record_chat_sent,
         ])
         .setup(|app| {
             // If the configured 800x600 window can't fit on this monitor —
@@ -674,6 +702,17 @@ fn main() {
 
                 // Start watcher so tracked modes stay current in the GUI session.
                 watcher::spawn_background();
+
+                // Online-time ticker. Persists every minute so a hard kill
+                // loses at most ~60s of accounting; the Usage tab can poll
+                // its own derived "since now" view live without needing
+                // this writer to be more aggressive.
+                tokio::spawn(async {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        usage::record_online_seconds(60);
+                    }
+                });
 
                 // Optionally start the OpenAI-compat server alongside the GUI.
                 if let Ok(cfg) = resolver::load_config_value() {

@@ -411,7 +411,12 @@ pub async fn pull(model: &str, window: &tauri::WebviewWindow) -> Result<PullOutc
     })
     .await;
     match &outcome {
-        Ok(o) => eprintln!("[ollama] pull done: model='{model}' outcome={o:?}"),
+        Ok(o) => {
+            eprintln!("[ollama] pull done: model='{model}' outcome={o:?}");
+            if matches!(o, PullOutcome::Completed) {
+                crate::usage::record_model_pulled();
+            }
+        }
         Err(e) => eprintln!("[ollama] pull error: model='{model}' err={e}"),
     }
     outcome
@@ -851,6 +856,14 @@ where
                 }
             }
             if v["done"].as_bool().unwrap_or(false) {
+                // Ollama's terminal frame carries `prompt_eval_count` /
+                // `eval_count` (token totals for the turn). Surface them
+                // to the persistent stats blob so the Usage tab can show
+                // a lifetime "tokens in / out" counter without needing a
+                // separate accounting pass.
+                let prompt = v["prompt_eval_count"].as_u64().unwrap_or(0);
+                let completion = v["eval_count"].as_u64().unwrap_or(0);
+                crate::usage::record_tokens(prompt, completion);
                 return Ok(ChatStreamOutcome::Completed);
             }
         }
@@ -907,6 +920,9 @@ pub async fn chat_once(
     if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
         return Err(anyhow!("ollama error: {err}"));
     }
+    let prompt = v["prompt_eval_count"].as_u64().unwrap_or(0);
+    let completion = v["eval_count"].as_u64().unwrap_or(0);
+    crate::usage::record_tokens(prompt, completion);
     Ok(v["message"]["content"]
         .as_str()
         .unwrap_or_default()
