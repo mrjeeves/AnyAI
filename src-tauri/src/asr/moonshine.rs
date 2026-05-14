@@ -36,6 +36,7 @@ use tokenizers::Tokenizer;
 
 use crate::asr::{AsrBackend, AsrCaps, AsrChunkOut, AsrSegment};
 use crate::models::{model_dir, ModelKind};
+use crate::ort_setup;
 
 /// Moonshine's special-token IDs. Fixed by the model card; seeds the
 /// decoder and detects end-of-sequence.
@@ -138,30 +139,39 @@ impl AsrBackend for MoonshineBackend {
         // walk these back up tier-by-tier if perf becomes a
         // problem, but correctness ("Record actually works") wins
         // over a marginal latency improvement here.
-        on_stage("Loading Moonshine encoder…");
-        let encoder = Session::builder()
-            .map_err(|e| anyhow!("ort builder: {e}"))?
-            .with_optimization_level(GraphOptimizationLevel::Disable)
-            .map_err(|e| anyhow!("ort opt level: {e}"))?
-            .with_intra_threads(1)
-            .map_err(|e| anyhow!("ort threads: {e}"))?
-            .commit_from_file(&enc_path)
-            .map_err(|e| anyhow!("loading {}: {e}", enc_path.display()))
-            .with_context(|| "warm_up moonshine encoder".to_string())?;
+        on_stage(&format!(
+            "Loading Moonshine encoder… ({})",
+            ort_setup::status().diagnostic()
+        ));
+        let enc_path_owned = enc_path.clone();
+        let encoder = ort_setup::load_session("Moonshine encoder", 90, move || {
+            Session::builder()
+                .map_err(|e| anyhow!("ort builder: {e}"))?
+                .with_optimization_level(GraphOptimizationLevel::Disable)
+                .map_err(|e| anyhow!("ort opt level: {e}"))?
+                .with_intra_threads(1)
+                .map_err(|e| anyhow!("ort threads: {e}"))?
+                .commit_from_file(&enc_path_owned)
+                .map_err(|e| anyhow!("loading {}: {e}", enc_path_owned.display()))
+                .with_context(|| "warm_up moonshine encoder".to_string())
+        })?;
 
         if cancel.load(Ordering::Relaxed) {
             return Err(anyhow!("Moonshine warm-up cancelled"));
         }
         on_stage("Loading Moonshine decoder…");
-        let decoder = Session::builder()
-            .map_err(|e| anyhow!("ort builder: {e}"))?
-            .with_optimization_level(GraphOptimizationLevel::Disable)
-            .map_err(|e| anyhow!("ort opt level: {e}"))?
-            .with_intra_threads(1)
-            .map_err(|e| anyhow!("ort threads: {e}"))?
-            .commit_from_file(&dec_path)
-            .map_err(|e| anyhow!("loading {}: {e}", dec_path.display()))
-            .with_context(|| "warm_up moonshine decoder".to_string())?;
+        let dec_path_owned = dec_path.clone();
+        let decoder = ort_setup::load_session("Moonshine decoder", 90, move || {
+            Session::builder()
+                .map_err(|e| anyhow!("ort builder: {e}"))?
+                .with_optimization_level(GraphOptimizationLevel::Disable)
+                .map_err(|e| anyhow!("ort opt level: {e}"))?
+                .with_intra_threads(1)
+                .map_err(|e| anyhow!("ort threads: {e}"))?
+                .commit_from_file(&dec_path_owned)
+                .map_err(|e| anyhow!("loading {}: {e}", dec_path_owned.display()))
+                .with_context(|| "warm_up moonshine decoder".to_string())
+        })?;
 
         // Sniff encoder I/O. First input + first output by
         // convention; tolerate any naming.

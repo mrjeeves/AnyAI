@@ -745,6 +745,21 @@ fn build_backends(
     on_stage: &dyn Fn(&str),
     cancel: &AtomicBool,
 ) -> Result<Backends> {
+    // Fail fast if onnxruntime didn't load at app startup. Without
+    // this guard, every record click would wait the per-session
+    // watchdog timeout (90 s) inside `commit_from_file` before
+    // surfacing the actual problem — pre-checking the resolved
+    // `ort_setup` status lets us tell the user immediately that
+    // onnxruntime is missing / incompatible and what to do about it.
+    let ort_status = crate::ort_setup::status();
+    if !ort_status.initialized {
+        return Err(anyhow!(
+            "onnxruntime isn't loaded — {}. \
+             Install onnxruntime \u{2265}1.20 (e.g. `brew install onnxruntime` on macOS), or set ORT_DYLIB_PATH to the libonnxruntime.{{dylib,so,dll}} you want to use, then restart MyOwnLLM.",
+            ort_status.diagnostic()
+        ));
+    }
+
     // The ASR backend pushes its own per-stage heartbeats now
     // ("Loading Moonshine encoder…" / "decoder…" / "tokenizer…"); the
     // bare "Loading X model…" preamble used to be the only signal

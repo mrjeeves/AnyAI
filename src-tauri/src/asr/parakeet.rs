@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::asr::{AsrBackend, AsrCaps, AsrChunkOut, AsrSegment};
 use crate::models::{model_dir, ModelKind};
+use crate::ort_setup;
 
 /// Frame stride used by the encoder, in samples. NeMo's standard
 /// fastconformer stride is 80 ms at 16 kHz = 1280 samples/frame.
@@ -82,7 +83,10 @@ impl AsrBackend for ParakeetBackend {
     }
 
     fn warm_up(&mut self, on_stage: &dyn Fn(&str), _cancel: &AtomicBool) -> Result<()> {
-        on_stage("Loading Parakeet model…");
+        on_stage(&format!(
+            "Loading Parakeet model… ({})",
+            ort_setup::status().diagnostic()
+        ));
         let model_path = self.artifact_path("model.onnx")?;
         let tokens_path = self.artifact_path("tokens.txt")?;
         if !model_path.exists() {
@@ -111,15 +115,20 @@ impl AsrBackend for ParakeetBackend {
         }
         self.tokens = tokens;
 
-        let session = Session::builder()
-            .map_err(|e| anyhow!("ort builder: {e}"))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| anyhow!("ort opt level: {e}"))?
-            .with_intra_threads(intra_threads())
-            .map_err(|e| anyhow!("ort threads: {e}"))?
-            .commit_from_file(&model_path)
-            .map_err(|e| anyhow!("loading {}: {e}", model_path.display()))
-            .with_context(|| format!("warm_up parakeet {}", self.model_name))?;
+        let model_path_owned = model_path.clone();
+        let model_name_owned = self.model_name.clone();
+        let threads = intra_threads();
+        let session = ort_setup::load_session("Parakeet model", 180, move || {
+            Session::builder()
+                .map_err(|e| anyhow!("ort builder: {e}"))?
+                .with_optimization_level(GraphOptimizationLevel::Level3)
+                .map_err(|e| anyhow!("ort opt level: {e}"))?
+                .with_intra_threads(threads)
+                .map_err(|e| anyhow!("ort threads: {e}"))?
+                .commit_from_file(&model_path_owned)
+                .map_err(|e| anyhow!("loading {}: {e}", model_path_owned.display()))
+                .with_context(|| format!("warm_up parakeet {}", model_name_owned))
+        })?;
 
         // Sniff I/O names. NeMo's istupakov export uses
         // `audio_signal` / `audio_signal_lens` for inputs and

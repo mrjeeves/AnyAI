@@ -11,6 +11,7 @@ mod frame_sink;
 mod hardware;
 mod models;
 mod ollama;
+mod ort_setup;
 mod preload;
 mod process;
 mod remote_ui;
@@ -533,6 +534,15 @@ fn main() {
     // First thing every process does: apply any staged self-update so the new
     // binary takes over before we open ports, sockets, or the GUI window.
     self_update::apply_pending_if_any();
+
+    // Resolve + commit the onnxruntime dylib path before any ASR or
+    // diarize backend tries to load a model. `load-dynamic` ort means
+    // the dylib is found at runtime; doing it here (rather than
+    // lazily on the first record click) lets us log which path was
+    // picked and surface a clear error if the lib is missing instead
+    // of leaving the user staring at "Loading Moonshine encoder…"
+    // while ort hangs inside an FFI trampoline.
+    ort_setup::initialize();
 
     if cli_mode {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
