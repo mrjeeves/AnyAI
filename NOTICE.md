@@ -11,11 +11,19 @@ This file is informational. The project itself is MIT-licensed; see
 
 ## Model weights
 
-### Moonshine Small (`moonshine-small-q8`)
+### Moonshine (`moonshine-tiny-q8`, `moonshine-small-q8`, `moonshine-base-fp32`)
 
-- **Source:** [`UsefulSensors/moonshine`](https://huggingface.co/UsefulSensors/moonshine) (HuggingFace)
+- **Source:** Original weights at [`UsefulSensors/moonshine`](https://huggingface.co/UsefulSensors/moonshine);
+  ONNX exports pulled from the community mirrors at
+  [`onnx-community/moonshine-tiny-ONNX`](https://huggingface.co/onnx-community/moonshine-tiny-ONNX)
+  (27 M params, used by `moonshine-tiny-q8`) and
+  [`onnx-community/moonshine-base-ONNX`](https://huggingface.co/onnx-community/moonshine-base-ONNX)
+  (61 M params, used by `moonshine-small-q8` int8 and `moonshine-base-fp32`).
 - **License:** MIT
-- **Used for:** English speech-to-text on Pi-class / low-end hardware.
+- **Used for:** English speech-to-text. The transcribe ladder picks per
+  hardware: `moonshine-tiny-q8` on Pi-class hosts, `moonshine-small-q8`
+  on general low-end, `moonshine-base-fp32` on capable hardware that
+  can spare the extra resident memory for the accuracy bump.
 - **Citation:** Useful Sensors. _Moonshine: Speech recognition for live transcription and voice commands._ 2024.
   <https://arxiv.org/abs/2410.15608>
 

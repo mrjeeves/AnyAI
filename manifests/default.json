@@ -1,6 +1,6 @@
 {
   "name": "MyOwnLLM Default",
-  "version": "17",
+  "version": "18",
   "ttl_minutes": 360,
   "default_family": "gemma4",
   "headroom_gb": {
@@ -14,7 +14,9 @@
       "label": "Transcribe",
       "input": "audio",
       "tiers": [
-        { "min_vram_gb": 0,  "min_ram_gb": 0,  "min_unified_ram_gb": 0,  "disk_mb": 80,  "runtime": "moonshine", "model": "moonshine-small-q8",        "fallback": "moonshine-small-q8" }
+        { "min_vram_gb": 0, "min_ram_gb": 6, "min_unified_ram_gb": 12, "disk_mb": 290, "runtime": "moonshine", "model": "moonshine-base-fp32", "fallback": "moonshine-small-q8" },
+        { "min_vram_gb": 0, "min_ram_gb": 2, "min_unified_ram_gb": 4,  "disk_mb": 80,  "runtime": "moonshine", "model": "moonshine-small-q8", "fallback": "moonshine-tiny-q8"  },
+        { "min_vram_gb": 0, "min_ram_gb": 0, "min_unified_ram_gb": 0,  "disk_mb": 30,  "runtime": "moonshine", "model": "moonshine-tiny-q8",  "fallback": "moonshine-tiny-q8"  }
       ]
     },
     "diarize": {

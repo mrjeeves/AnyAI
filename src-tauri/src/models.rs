@@ -145,13 +145,49 @@ pub struct ModelSpec {
 /// commit in the URL.
 pub const REGISTRY: &[ModelSpec] = &[
     // ---- ASR ----------------------------------------------------------
-    // Moonshine INT8 — encoder + decoder ONNX pair, English, ~80 MB
-    // total. Streaming-native (ergodic encoder), built for edge. Used
-    // as the Pi 5 / low-end tier. UsefulSensors only ships `tiny` and
-    // `base` ONNX exports (no `small`), so we pull from the
-    // onnx-community mirror of the `base` build; the registry id keeps
-    // the historical `-small-q8` label to avoid migration churn on
-    // existing installs.
+    // The transcribe ladder runs three Moonshine variants: tiny INT8 for
+    // Pi-class boards, base INT8 for general low-end, and base FP32 for
+    // capable hardware that can spare ~300 MB of resident memory for a
+    // measurable accuracy bump. All three share the same encoder/decoder
+    // I/O schema, so the existing `asr/moonshine.rs` backend handles
+    // them without dtype-specific code (FP16 / Q4 variants would need a
+    // dtype-generic decoder forward; that's a follow-up).
+
+    // Moonshine tiny INT8 — encoder + decoder ONNX pair, English, ~30 MB
+    // total. The smallest export UsefulSensors publishes (27 M params).
+    // Bottom rung for Pi 5 4 GB and other RAM-starved hosts. Note: the
+    // tiny export labels its merged-decoder quantization as `_int8` while
+    // the base export uses `_quantized`; same content, different
+    // filename convention between the two repos.
+    ModelSpec {
+        name: "moonshine-tiny-q8",
+        kind: ModelKind::Asr,
+        artifacts: &[
+            Artifact {
+                filename: "encoder.onnx",
+                url: "https://huggingface.co/onnx-community/moonshine-tiny-ONNX/resolve/main/onnx/encoder_model_quantized.onnx",
+                approx_bytes: 8_000_000,
+                min_bytes: 4_500_000,
+            },
+            Artifact {
+                filename: "decoder.onnx",
+                url: "https://huggingface.co/onnx-community/moonshine-tiny-ONNX/resolve/main/onnx/decoder_model_merged_int8.onnx",
+                approx_bytes: 20_500_000,
+                min_bytes: 12_000_000,
+            },
+            Artifact {
+                filename: "tokenizer.json",
+                url: "https://huggingface.co/onnx-community/moonshine-tiny-ONNX/resolve/main/tokenizer.json",
+                approx_bytes: 2_000_000,
+                min_bytes: 500_000,
+            },
+        ],
+    },
+    // Moonshine base INT8 — encoder + decoder ONNX pair, English, ~80 MB
+    // total. UsefulSensors only ships `tiny` and `base` exports (no
+    // `small`), so we pull the `base` quantized build from the
+    // onnx-community mirror; the registry id keeps the historical
+    // `-small-q8` label to avoid migration churn on existing installs.
     ModelSpec {
         name: "moonshine-small-q8",
         kind: ModelKind::Asr,
@@ -167,6 +203,37 @@ pub const REGISTRY: &[ModelSpec] = &[
                 url: "https://huggingface.co/onnx-community/moonshine-base-ONNX/resolve/main/onnx/decoder_model_merged_quantized.onnx",
                 approx_bytes: 45_000_000,
                 min_bytes: 20_000_000,
+            },
+            Artifact {
+                filename: "tokenizer.json",
+                url: "https://huggingface.co/onnx-community/moonshine-base-ONNX/resolve/main/tokenizer.json",
+                approx_bytes: 2_000_000,
+                min_bytes: 500_000,
+            },
+        ],
+    },
+    // Moonshine base FP32 — full-precision encoder + decoder ONNX pair,
+    // English, ~285 MB total. Top of the transcribe ladder for hosts
+    // that can spare the resident memory: the same Moonshine-base
+    // architecture as `moonshine-small-q8`, just without int8 weight
+    // quantization. Decoder loads cleanly at any ORT optimization
+    // level — the Level1 pin in `asr/moonshine.rs` exists solely for
+    // the quantized export's QDQ fuser bug.
+    ModelSpec {
+        name: "moonshine-base-fp32",
+        kind: ModelKind::Asr,
+        artifacts: &[
+            Artifact {
+                filename: "encoder.onnx",
+                url: "https://huggingface.co/onnx-community/moonshine-base-ONNX/resolve/main/onnx/encoder_model.onnx",
+                approx_bytes: 120_000_000,
+                min_bytes: 70_000_000,
+            },
+            Artifact {
+                filename: "decoder.onnx",
+                url: "https://huggingface.co/onnx-community/moonshine-base-ONNX/resolve/main/onnx/decoder_model_merged.onnx",
+                approx_bytes: 166_000_000,
+                min_bytes: 100_000_000,
             },
             Artifact {
                 filename: "tokenizer.json",
