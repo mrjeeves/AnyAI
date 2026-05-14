@@ -152,26 +152,26 @@ impl AsrBackend for MoonshineBackend {
         if cancel.load(Ordering::Relaxed) {
             return Err(anyhow!("Moonshine warm-up cancelled"));
         }
-        // Decoder pinned to `Level1`. The `decoder_model_merged_quantized.onnx`
+        // Decoder pinned to `Level1`. The decoder_model_merged_quantized.onnx
         // export from onnx-community has a quantisation layout that
-        // tickles ORT's Level2+ QDQ optimiser into looking for a scale
-        // tensor that doesn't exist:
+        // tickles ORT's Level2-plus QDQ optimiser into looking for a
+        // scale tensor that doesn't exist:
         //
         //   qdq_actions.cc:137 TransposeDQWeightsForMatMulNBits
         //   Missing required scale: model.decoder.embed_tokens.weight_merged_0_scale
         //   for node: model.decoder.embed_tokens.weight_transposed_DequantizeLinear
         //
-        // The DequantizeLinear→Transpose→MatMul fuser tries to roll up
-        // into a `MatMulNBits` op and assumes there's a `_merged_0_scale`
-        // initializer paired with the dequantize weight; this export
-        // merged the scale somewhere else, so the fuser bails with the
-        // error above. The fuser only runs at `Level2` (extended) and
-        // higher, so `Level1` (basic constant-folding only) sidesteps it
-        // entirely. The decode loop runs the no-cache branch with
-        // ≤30 tokens per chunk anyway, so the Level2/3 wins would be
-        // marginal even if they worked.
+        // The DequantizeLinear -> Transpose -> MatMul fuser tries to
+        // roll up into a `MatMulNBits` op and assumes there's a
+        // `_merged_0_scale` initializer paired with the dequantize
+        // weight; this export merged the scale somewhere else, so the
+        // fuser bails with the error above. The fuser only runs at
+        // `Level2` (extended) and higher, so `Level1` (basic constant-
+        // folding only) sidesteps it entirely. The decode loop runs the
+        // no-cache branch with at most 30 tokens per chunk anyway, so
+        // the Level2/3 wins would be marginal even if they worked.
         //
-        // Encoder stays at `Level3` — its graph doesn't trigger the
+        // Encoder stays at `Level3` -- its graph doesn't trigger the
         // same fuser.
         on_stage("Loading Moonshine decoder…");
         let dec_path_owned = dec_path.clone();
