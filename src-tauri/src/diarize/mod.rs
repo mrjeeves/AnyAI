@@ -27,6 +27,7 @@ use std::sync::atomic::AtomicBool;
 
 pub mod cluster;
 pub mod embedder;
+pub mod fbank;
 pub mod segmenter;
 
 pub use cluster::{ClusterConfig, OnlineClusterer};
