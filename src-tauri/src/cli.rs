@@ -822,9 +822,9 @@ async fn cmd_purge(args: &[String]) -> Result<()> {
         .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
-        .ok_or_else(|| anyhow!(
-            "usage: myownllm purge <models|conversations|data> [-f] [--json]"
-        ))?;
+        .ok_or_else(|| {
+            anyhow!("usage: myownllm purge <models|conversations|data> [-f] [--json]")
+        })?;
 
     let (label, challenge, blurb) = match tier {
         "models" => (

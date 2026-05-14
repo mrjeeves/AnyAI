@@ -63,7 +63,9 @@ pub async fn purge_models() -> Result<PurgeReport> {
                     report.bytes_freed = report.bytes_freed.saturating_add(bytes);
                     report.items_removed = report.items_removed.saturating_add(files);
                 }
-                Err(e) => report.errors.push(format!("rm {}: {e}", models_root.display())),
+                Err(e) => report
+                    .errors
+                    .push(format!("rm {}: {e}", models_root.display())),
             }
         }
     }
