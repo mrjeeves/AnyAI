@@ -867,6 +867,7 @@
           {hardware}
           compact={true}
           onComplete={onAsrDownloaded}
+          followUpDiarize={diarizeEnabled ? defaultDiarizeModel : null}
         />
       {/if}
       <header class="pane-head">

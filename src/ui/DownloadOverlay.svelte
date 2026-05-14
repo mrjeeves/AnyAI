@@ -14,6 +14,7 @@
     hardware,
     onComplete,
     compact = false,
+    followUpDiarize = null,
   } = $props<{
     /** "text" pulls via Ollama (with an install pre-step if needed);
      *  "asr" pulls a local-runtime ONNX model via `asr_model_pull`. */
@@ -35,9 +36,22 @@
     /** Compact panes (transcribe split) use this to drop the hardware
      *  line and shrink type so the card fits two-up. */
     compact?: boolean;
+    /** For `kind: "asr"`: the diarize composite name (e.g.
+     *  `"pyannote-seg-3.0+wespeaker-r34"`) to pull immediately after
+     *  the ASR model finishes. `null` skips the follow-up. Used when
+     *  "Identify speakers" is on by default so the user doesn't take
+     *  a second download stall the first time they hit Record. */
+    followUpDiarize?: string | null;
   }>();
 
-  type Phase = "idle" | "installing-ollama" | "pulling" | "done" | "error";
+  type Phase =
+    | "idle"
+    | "installing-ollama"
+    | "pulling"
+    | "pulling-diarize"
+    | "done"
+    | "error"
+    | "cancelled";
   let phase = $state<Phase>("idle");
   let errorMsg = $state("");
 
@@ -81,21 +95,32 @@
   let framesSeen = $state(0);
   let pullStartedAt = 0;
 
-  let unlisten: UnlistenFn | null = null;
+  /** Active listener handles. Diarize composites have one per component
+   *  (each component pulls on its own channel) so we keep an array. */
+  let unlistens: UnlistenFn[] = [];
   let waitingTimer: ReturnType<typeof setInterval> | null = null;
   /** Wall-clock seconds since the pull started — surfaced when no
    *  progress frames have arrived yet so the user knows we're alive
    *  but the backend hasn't streamed anything. */
   let waitingSeconds = $state(0);
+  /** When `true`, an in-flight pull was asked to cancel. The `start()`
+   *  loop sees this on the await boundary and short-circuits the
+   *  follow-up diarize step. */
+  let cancelRequested = false;
+
+  function clearListeners() {
+    for (const fn of unlistens) {
+      try { fn(); } catch { /* listener already detached */ }
+    }
+    unlistens = [];
+  }
 
   onDestroy(() => {
-    unlisten?.();
+    clearListeners();
     if (waitingTimer) clearInterval(waitingTimer);
   });
 
-  async function start() {
-    if (phase === "pulling" || phase === "installing-ollama") return;
-    errorMsg = "";
+  function resetSamplers() {
     status = "";
     percent = null;
     bytesDone = 0;
@@ -105,8 +130,22 @@
     lastSampleBytes = 0;
     artifactIndex = 0;
     artifactCount = 0;
+  }
+
+  /** Tauri-event channel sanitiser. Mirrors `channel_safe()` on the Rust
+   *  side — any char outside `[A-Za-z0-9_:-]` becomes `_` so dots in
+   *  model tags don't blow up `listen()`. */
+  function channelSafe(name: string): string {
+    return name.replace(/[^A-Za-z0-9\-:_]/g, "_");
+  }
+
+  async function start() {
+    if (phase === "pulling" || phase === "installing-ollama" || phase === "pulling-diarize") return;
+    errorMsg = "";
+    resetSamplers();
     framesSeen = 0;
     waitingSeconds = 0;
+    cancelRequested = false;
     pullStartedAt = Date.now();
     // Tick the "Waiting on backend…" counter while no frames have
     // landed yet. Without this the bar is just an inert sliding band
@@ -126,30 +165,49 @@
           status = "Installing Ollama…";
           await invoke("ollama_install");
         }
+        if (cancelRequested) { phase = "cancelled"; return; }
         phase = "pulling";
         status = "Connecting to Ollama…";
-        unlisten?.();
-        unlisten = await listen<OllamaPullEvent>(
-          "ollama-pull-progress",
-          (e) => applyOllama(e.payload),
+        clearListeners();
+        unlistens.push(
+          await listen<OllamaPullEvent>(
+            "ollama-pull-progress",
+            (e) => applyOllama(e.payload),
+          ),
         );
         await invoke("ollama_pull", { model: modelName });
+        if (cancelRequested) { phase = "cancelled"; return; }
         await invoke("ollama_ensure_running").catch(() => {});
       } else {
         phase = "pulling";
-        status = "Connecting to HuggingFace…";
-        unlisten?.();
-        // Tauri rejects event names with chars outside `[A-Za-z0-9_/:-]`,
-        // and Parakeet's tag carries dots (`parakeet-tdt-0.6b-v3-int8`).
-        // Mirrors `channel_safe()` on the Rust side.
-        const safe = modelName.replace(/[^A-Za-z0-9\-:_]/g, "_");
+        status = followUpDiarize
+          ? "Connecting to HuggingFace… (1 of 2: speech model)"
+          : "Connecting to HuggingFace…";
+        clearListeners();
+        const safe = channelSafe(modelName);
         const chan = `myownllm://model-pull/asr/${safe}`;
         console.debug("[DownloadOverlay] subscribing to", chan);
-        unlisten = await listen<ModelPullEvent>(chan, (e) => {
-          framesSeen += 1;
-          applyModelPull(e.payload);
-        });
+        unlistens.push(
+          await listen<ModelPullEvent>(chan, (e) => {
+            framesSeen += 1;
+            applyModelPull(e.payload, followUpDiarize ? "1 of 2: speech model" : null);
+          }),
+        );
         await invoke("asr_model_pull", { name: modelName });
+        if (cancelRequested) { phase = "cancelled"; return; }
+
+        // Follow-up: pull the diarization composite so the user doesn't
+        // eat a second download stall the first time they hit Record
+        // with "Identify speakers" on (which is the default).
+        if (followUpDiarize) {
+          const present = await invoke<boolean>("diarize_model_present", {
+            name: followUpDiarize,
+          }).catch(() => false);
+          if (!present) {
+            await runDiarize(followUpDiarize);
+            if (cancelRequested) { phase = "cancelled"; return; }
+          }
+        }
       }
       phase = "done";
       if (waitingTimer) {
@@ -158,15 +216,67 @@
       }
       onComplete();
     } catch (e) {
-      errorMsg = String(e);
-      phase = "error";
+      // A user-initiated cancel reaches us as a thrown error from the
+      // pull command. Surface as a clean cancelled state, not a red
+      // error card.
+      if (cancelRequested) {
+        phase = "cancelled";
+      } else {
+        errorMsg = String(e);
+        phase = "error";
+      }
     } finally {
-      unlisten?.();
-      unlisten = null;
+      clearListeners();
       if (waitingTimer) {
         clearInterval(waitingTimer);
         waitingTimer = null;
       }
+    }
+  }
+
+  /** Pull the diarize composite and subscribe to every component's
+   *  channel so the bar tracks whichever component is currently
+   *  streaming. Components run serially on the Rust side, so at most
+   *  one channel emits at a time. */
+  async function runDiarize(composite: string): Promise<void> {
+    phase = "pulling-diarize";
+    framesSeen = 0;
+    resetSamplers();
+    const components = composite.split("+");
+    for (const comp of components) {
+      const chan = `myownllm://model-pull/diarize/${channelSafe(comp)}`;
+      unlistens.push(
+        await listen<ModelPullEvent>(chan, (e) => {
+          framesSeen += 1;
+          applyModelPull(e.payload, `2 of 2: speaker model · ${comp}`);
+        }),
+      );
+    }
+    status = "Downloading speaker models… (2 of 2)";
+    await invoke("diarize_model_pull", { name: composite });
+  }
+
+  /** Abort whichever pull is currently in flight and let `start()`'s
+   *  awaiter resolve / reject so it can land on the "cancelled" phase.
+   *  We fire all three cancels — they're each no-ops when nothing
+   *  matches — to avoid having to track the active sub-phase inside
+   *  the handler. */
+  async function cancel(): Promise<void> {
+    if (phase !== "pulling" && phase !== "installing-ollama" && phase !== "pulling-diarize") return;
+    cancelRequested = true;
+    status = "Cancelling…";
+    try {
+      if (kind === "text") {
+        await invoke("ollama_pull_cancel", { model: modelName });
+      } else {
+        await invoke("asr_model_pull_cancel", { name: modelName });
+        if (followUpDiarize) {
+          await invoke("diarize_model_pull_cancel", { name: followUpDiarize });
+        }
+      }
+    } catch {
+      // Cancel commands are best-effort; the start() awaiter will
+      // settle either way and land in the cancelled branch.
     }
   }
 
@@ -200,7 +310,7 @@
     }
   }
 
-  function applyModelPull(f: ModelPullEvent) {
+  function applyModelPull(f: ModelPullEvent, stagePrefix: string | null) {
     // Reset the byte-rate sampler whenever we cross an artifact
     // boundary — `f.bytes` snaps back to 0 for the next file, which
     // would otherwise feed a negative delta into the rate calc.
@@ -226,11 +336,12 @@
       f.artifact_count > 1
         ? ` (file ${f.artifact_index + 1} of ${f.artifact_count})`
         : "";
-    status = f.error
+    const base = f.error
       ? `Failed: ${f.error}`
       : f.done
         ? "Done"
         : `Downloading${artifactSuffix}`;
+    status = stagePrefix ? `${stagePrefix} · ${base}` : base;
     if (f.total > 0) {
       percent = f.bytes / f.total;
       bytesDone = f.bytes;
@@ -299,7 +410,14 @@
     {/if}
 
     {#if phase === "idle"}
-      <p class="desc">{description}</p>
+      <p class="desc">
+        {description}
+        {#if followUpDiarize && kind === "asr"}
+          <br /><span class="diarize-note">
+            Speaker-ID models download alongside the speech model.
+          </span>
+        {/if}
+      </p>
       <button class="primary" onclick={start}>
         Download
         {#if runtime && kind === "asr"}
@@ -319,6 +437,11 @@
             >{:else}{part.value}{/if}
         {/each}
       </code>
+      <button class="primary" onclick={start}>Retry</button>
+    {:else if phase === "cancelled"}
+      <p class="desc">
+        Download cancelled. Partial files were cleaned up; click below to start again.
+      </p>
       <button class="primary" onclick={start}>Retry</button>
     {:else}
       <div class="bar" class:indeterminate={percent === null && phase !== "done"}>
@@ -340,12 +463,15 @@
               · {formatRate(rate)}
             {/if}
           </span>
-        {:else if framesSeen === 0 && phase === "pulling" && waitingSeconds > 0}
+        {:else if framesSeen === 0 && (phase === "pulling" || phase === "pulling-diarize") && waitingSeconds > 0}
           <span class="meta-bytes">
             waiting on backend… {waitingSeconds}s
           </span>
         {/if}
       </div>
+      {#if phase === "pulling" || phase === "installing-ollama" || phase === "pulling-diarize"}
+        <button class="cancel" onclick={cancel}>Cancel</button>
+      {/if}
     {/if}
   </div>
 </div>
@@ -451,6 +577,31 @@
   }
   .primary:hover {
     background: #5a5ae0;
+  }
+  .cancel {
+    align-self: stretch;
+    background: transparent;
+    color: #aaa;
+    border: 1px solid #2a2a3a;
+    border-radius: 6px;
+    padding: 0.45rem 0.9rem;
+    font-size: 0.78rem;
+    cursor: pointer;
+    font-family: inherit;
+    transition:
+      background 0.12s,
+      color 0.12s,
+      border-color 0.12s;
+  }
+  .cancel:hover {
+    background: #20202a;
+    color: #fff;
+    border-color: #3a3a55;
+  }
+  .diarize-note {
+    color: #8888aa;
+    font-size: 0.78rem;
+    font-style: italic;
   }
   .runtime-tag {
     background: rgba(255, 255, 255, 0.18);
