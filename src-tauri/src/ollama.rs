@@ -12,6 +12,7 @@ use tokio::sync::{Mutex, Notify};
 
 static OLLAMA_PROCESS: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
 static CHAT_CANCELS: OnceLock<Mutex<HashMap<String, Arc<Notify>>>> = OnceLock::new();
+static PULL_CANCELS: OnceLock<Mutex<HashMap<String, Arc<Notify>>>> = OnceLock::new();
 
 fn process_lock() -> &'static Mutex<Option<Child>> {
     OLLAMA_PROCESS.get_or_init(|| Mutex::new(None))
@@ -19,6 +20,10 @@ fn process_lock() -> &'static Mutex<Option<Child>> {
 
 fn cancels() -> &'static Mutex<HashMap<String, Arc<Notify>>> {
     CHAT_CANCELS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn pull_cancels() -> &'static Mutex<HashMap<String, Arc<Notify>>> {
+    PULL_CANCELS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 pub fn is_installed() -> bool {
@@ -333,6 +338,18 @@ pub struct PullEvent {
     pub percent: Option<f64>,
     #[serde(default)]
     pub done: bool,
+    /// True on the final frame if the caller invoked `cancel_pull` mid-stream.
+    /// Lets the UI distinguish "completed" from "stopped" without inspecting
+    /// the status string.
+    #[serde(default)]
+    pub cancelled: bool,
+}
+
+/// Outcome of a pull call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullOutcome {
+    Completed,
+    Cancelled,
 }
 
 impl PullEvent {
@@ -368,16 +385,23 @@ fn fmt_bytes(n: u64) -> String {
     }
 }
 
-pub async fn pull(model: &str, window: &tauri::WebviewWindow) -> Result<()> {
-    pull_with(model, |evt| {
-        let _ = window.emit("ollama-pull-progress", evt.clone());
+pub async fn pull(model: &str, window: &tauri::WebviewWindow) -> Result<PullOutcome> {
+    let per_tag = format!("myownllm://ollama-pull/{model}");
+    let window_clone = window.clone();
+    pull_with(model, move |evt| {
+        // Per-tag channel for inline UIs (FamiliesSection's tier rows) that
+        // need to attribute frames to a specific model. Global channel kept
+        // alive for the legacy DownloadOverlay flow.
+        let _ = window_clone.emit(&per_tag, evt.clone());
+        let _ = window_clone.emit("ollama-pull-progress", evt.clone());
     })
     .await
 }
 
 /// Pull a model via Ollama's HTTP API (`POST /api/pull`) and invoke `on_event`
 /// for each streamed progress frame. Idempotent: returns immediately if the
-/// model is already present.
+/// model is already present. Caller can stop the pull mid-stream by invoking
+/// `cancel_pull(model)`.
 ///
 /// Why HTTP instead of `ollama pull` subprocess:
 /// 1. The CLI emits its progress to stderr using `\r`-replaced lines, which
@@ -388,8 +412,8 @@ pub async fn pull(model: &str, window: &tauri::WebviewWindow) -> Result<()> {
 ///    making the download appear to stall — that's the "very slow" report.
 ///
 /// The HTTP API streams reliable JSON frames and avoids both pitfalls.
-pub async fn pull_with<F: FnMut(&PullEvent)>(model: &str, mut on_event: F) -> Result<()> {
-    if has_model(model).await? {
+pub async fn pull_with<F: FnMut(&PullEvent)>(model: &str, mut on_event: F) -> Result<PullOutcome> {
+    if has_model(model).await.unwrap_or(false) {
         let mut done = PullEvent {
             status: "already pulled".into(),
             done: true,
@@ -397,13 +421,57 @@ pub async fn pull_with<F: FnMut(&PullEvent)>(model: &str, mut on_event: F) -> Re
         };
         done.percent = Some(1.0);
         on_event(&done);
-        return Ok(());
+        return Ok(PullOutcome::Completed);
     }
 
     // The HTTP API needs the daemon up. ensure_running is a no-op when it's
     // already reachable (the common Windows path: tray app already serving).
     ensure_running().await?;
 
+    // Register the cancel notifier BEFORE the network call so a cancel
+    // racing with an early-arriving first byte still wins. Mirrors
+    // chat_stream's pattern.
+    let notify = Arc::new(Notify::new());
+    pull_cancels()
+        .lock()
+        .await
+        .insert(model.to_string(), notify.clone());
+
+    let result = pull_inner(model, &mut on_event, notify).await;
+    pull_cancels().lock().await.remove(model);
+
+    // Always emit a final frame so the UI can transition out of "pulling"
+    // without waiting on the next streamed event.
+    match &result {
+        Ok(PullOutcome::Cancelled) => {
+            let mut frame = PullEvent {
+                status: "cancelled".into(),
+                done: true,
+                cancelled: true,
+                ..Default::default()
+            };
+            frame.percent = None;
+            on_event(&frame);
+        }
+        Ok(PullOutcome::Completed) => {
+            let mut frame = PullEvent {
+                status: "success".into(),
+                done: true,
+                ..Default::default()
+            };
+            frame.percent = Some(1.0);
+            on_event(&frame);
+        }
+        Err(_) => {}
+    }
+    result
+}
+
+async fn pull_inner<F: FnMut(&PullEvent)>(
+    model: &str,
+    on_event: &mut F,
+    notify: Arc<Notify>,
+) -> Result<PullOutcome> {
     let client = reqwest::Client::builder()
         // No total timeout — large pulls take many minutes.
         .pool_idle_timeout(Duration::from_secs(30))
@@ -411,12 +479,15 @@ pub async fn pull_with<F: FnMut(&PullEvent)>(model: &str, mut on_event: F) -> Re
         .context("reqwest client")?;
 
     let body = serde_json::json!({ "name": model, "stream": true });
-    let resp = client
+    let send_fut = client
         .post("http://127.0.0.1:11434/api/pull")
         .json(&body)
-        .send()
-        .await
-        .context("POST /api/pull")?;
+        .send();
+    let resp = tokio::select! {
+        biased;
+        _ = notify.notified() => return Ok(PullOutcome::Cancelled),
+        r = send_fut => r.context("POST /api/pull")?,
+    };
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -429,8 +500,15 @@ pub async fn pull_with<F: FnMut(&PullEvent)>(model: &str, mut on_event: F) -> Re
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("read /api/pull stream")?;
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            _ = notify.notified() => return Ok(PullOutcome::Cancelled),
+            next = stream.next() => match next {
+                Some(c) => c.context("read /api/pull stream")?,
+                None => break,
+            },
+        };
         buf.extend_from_slice(&chunk);
         while let Some(nl) = buf.iter().position(|b| *b == b'\n') {
             let line = buf.drain(..=nl).collect::<Vec<u8>>();
@@ -470,7 +548,15 @@ pub async fn pull_with<F: FnMut(&PullEvent)>(model: &str, mut on_event: F) -> Re
             "ollama pull finished but model {model} is not present"
         ));
     }
-    Ok(())
+    Ok(PullOutcome::Completed)
+}
+
+/// Signal an in-flight `pull` for this tag to abort. No-op if no pull with
+/// this name is currently registered.
+pub async fn cancel_pull(model: &str) {
+    if let Some(notify) = pull_cancels().lock().await.get(model).cloned() {
+        notify.notify_waiters();
+    }
 }
 
 /// True if the named model+tag is already pulled.

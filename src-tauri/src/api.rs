@@ -507,10 +507,15 @@ fn ensure_pull_started(state: &AppState, tag: &str) -> watch::Receiver<PullStatu
         })
         .await;
         let final_status = match res {
-            Ok(()) => PullStatus {
+            Ok(crate::ollama::PullOutcome::Completed) => PullStatus {
                 done: true,
                 error: None,
                 last_line: "complete".into(),
+            },
+            Ok(crate::ollama::PullOutcome::Cancelled) => PullStatus {
+                done: true,
+                error: Some("cancelled".into()),
+                last_line: "cancelled".into(),
             },
             Err(e) => PullStatus {
                 done: true,

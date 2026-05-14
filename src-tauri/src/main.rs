@@ -32,7 +32,15 @@ async fn detect_hardware() -> Result<hardware::HardwareProfile, String> {
 async fn ollama_pull(model: String, window: tauri::WebviewWindow) -> Result<(), String> {
     ollama::pull(&model, &window)
         .await
+        .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+/// Signal an in-flight `ollama_pull` for this tag to abort. The pull resolves
+/// as cancelled (Ok(())) and emits a final frame with `cancelled: true`.
+#[tauri::command]
+async fn ollama_pull_cancel(model: String) {
+    ollama::cancel_pull(&model).await;
 }
 
 #[tauri::command]
@@ -365,6 +373,13 @@ async fn asr_model_pull(name: String, window: tauri::WebviewWindow) -> Result<()
         .map_err(|e| e.to_string())
 }
 
+/// Signal an in-flight `asr_model_pull` to abort. The pull resolves as
+/// cancelled (Ok(())) and emits a final frame with `cancelled: true`.
+#[tauri::command]
+async fn asr_model_pull_cancel(name: String) {
+    models::cancel_pull(models::ModelKind::Asr, &name).await;
+}
+
 #[tauri::command]
 fn asr_model_remove(name: String) -> Result<(), String> {
     match models::find(&name, models::ModelKind::Asr) {
@@ -582,6 +597,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             detect_hardware,
             ollama_pull,
+            ollama_pull_cancel,
             ollama_ensure_running,
             ollama_installed,
             ollama_install,
@@ -616,6 +632,7 @@ fn main() {
             transcribe_upload_start,
             asr_models_list,
             asr_model_pull,
+            asr_model_pull_cancel,
             asr_model_remove,
             diarize_models_list,
             diarize_model_pull,
