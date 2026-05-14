@@ -127,9 +127,6 @@
   } | null>(null);
   let purging = $state(false);
   let purgeError = $state("");
-  /** Last-purged summary. Shown beneath the matching danger-zone row
-   *  for a few seconds — same shape as `lastCleaned`. */
-  let lastPurged = $state<{ key: DangerKey; bytes: number; items: number } | null>(null);
 
   async function refreshStorage(): Promise<void> {
     const [pulled, hw, config, orphans, legacy, updateList, modelTargets, convOrphans] =
@@ -410,7 +407,10 @@
   /** Per-tier static copy for the danger zone. `challenge` is the phrase
    *  the user must type verbatim before the destructive button enables —
    *  picked to be specific enough that "Delete" alone can't be muscle-
-   *  memoried through. Mirrors the CLI's prompt phrasing. */
+   *  memoried through. Mirrors the CLI's prompt phrasing. Every tier
+   *  also force-reloads the window after a successful purge — Rust
+   *  in-memory state survives, but the UI is rebuilt from scratch so
+   *  it can't show stale models / conversations from a now-deleted disk. */
   const dangerMeta: Record<
     DangerKey,
     { title: string; blurb: string; challenge: string; cta: string }
@@ -421,7 +421,7 @@
         "Removes every pulled Ollama tag, the on-disk ASR / diarize artifacts, " +
         "and clears your kept-list, mode overrides, and family overrides. " +
         "Provider list and active family are kept — they're config, not data. " +
-        "Models will be re-downloaded on next use.",
+        "The app will reload immediately after; models re-download on next use.",
       challenge: "delete all models",
       cta: "Delete models",
     },
@@ -430,7 +430,8 @@
       blurb:
         "Wipes every saved conversation under the conversations folder, " +
         "talking-points sidecars and folders included. The folder itself " +
-        "is recreated empty so the next save lands cleanly.",
+        "is recreated empty so the next save lands cleanly. " +
+        "The app will reload immediately after — any open chat will close.",
       challenge: "delete all conversations",
       cta: "Delete conversations",
     },
@@ -440,8 +441,8 @@
         "The full reset: stops the managed Ollama, drops every model, " +
         "and removes the entire ~/.myownllm/ tree (config, cache, transcribe " +
         "buffer, updates, legacy dirs). A redirected conversations folder " +
-        "outside ~/.myownllm/ is wiped too. Restart MyOwnLLM after this; " +
-        "it'll come back up against compiled-in defaults like a first install.",
+        "outside ~/.myownllm/ is wiped too. The app will reload immediately " +
+        "after and come back up against compiled-in defaults — same as a first install.",
       challenge: "delete everything",
       cta: "Delete everything",
     },
@@ -466,7 +467,12 @@
   /** Run the actual purge for the open tier. Two-step: the first call
    *  (challenge satisfied) advances the modal to a final-confirm state
    *  with the destructive verb; the second call issues the invoke and
-   *  closes on success. */
+   *  force-reloads the window on success. We don't try to keep the UI
+   *  alive after a purge — every screen that reads from disk (model
+   *  list, conversations sidebar, family resolver state, mode bar)
+   *  would have to invalidate at once, and a full reload is both
+   *  simpler and matches the user's mental model ("I just nuked it,
+   *  show me the fresh state"). */
   async function runPurge(): Promise<void> {
     if (!dangerOpen || purging) return;
     if (dangerOpen.typed.trim() !== dangerOpen.challenge) return;
@@ -490,23 +496,19 @@
           report = await invoke<PurgeReport>("purge_all_data");
           break;
       }
-      lastPurged = {
-        key: target.key,
-        bytes: report.bytes_freed,
-        items: report.items_removed,
-      };
+      // Stash any non-fatal errors on the way out — they'll be lost
+      // across the reload but at least surface during the brief
+      // "Reloading…" beat so the user sees something went sideways.
       if (report.errors.length > 0) {
         purgeError = report.errors.slice(0, 3).join("; ");
       }
-      dangerOpen = null;
-      // Refresh the cleanup cards so model/legacy/etc. counts reset.
-      await refreshStorage().catch(() => {});
-      setTimeout(() => {
-        if (lastPurged?.key === target.key) lastPurged = null;
-      }, 6000);
+      dangerOpen = { ...target, step: 2, typed: target.challenge };
+      // One tick so the modal can paint the "Reloading…" state before
+      // the navigation rips the page out from under us.
+      await Promise.resolve();
+      window.location.reload();
     } catch (e) {
       purgeError = String(e);
-    } finally {
       purging = false;
     }
   }
@@ -646,14 +648,6 @@
             <div class="danger-info">
               <div class="danger-row-title">{meta.title}</div>
               <div class="danger-row-blurb">{meta.blurb}</div>
-              {#if lastPurged?.key === key}
-                <div class="danger-row-result">
-                  ✓ Freed {bytesLabel(lastPurged.bytes)}
-                  {#if lastPurged.items > 0}
-                    · {lastPurged.items} {lastPurged.items === 1 ? "item" : "items"} removed
-                  {/if}
-                </div>
-              {/if}
             </div>
             <button class="danger-btn" onclick={() => openDanger(key)}>
               {meta.cta}
@@ -720,6 +714,8 @@
       <p class="confirm-lead">{meta.blurb}</p>
       <p class="danger-warn">
         This is irreversible. There is no trash — once you confirm, the data is gone.
+        The app will reload immediately after the delete finishes; any unsaved
+        in-flight state (open chat, active recording) goes with it.
       </p>
       {#if dangerOpen.step === 1}
         <label class="danger-challenge">
@@ -752,7 +748,7 @@
           onclick={runPurge}
         >
           {#if purging}
-            Deleting…
+            Deleting · reloading…
           {:else if dangerOpen.step === 1}
             Continue
           {:else}
@@ -950,7 +946,6 @@
   .danger-info { flex: 1; display: flex; flex-direction: column; gap: .15rem; min-width: 0; }
   .danger-row-title { font-size: .82rem; font-weight: 600; color: #f0c8c8; }
   .danger-row-blurb { font-size: .74rem; color: #998; line-height: 1.5; }
-  .danger-row-result { font-size: .74rem; color: #6a6; margin-top: .15rem; }
   .danger-btn {
     background: #3a1a1a; border: 1px solid #5a2424;
     color: #f88; padding: .4rem .75rem;

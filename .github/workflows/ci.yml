@@ -41,25 +41,32 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      # macOS-14 ARM runners ship `/usr/local/bin/cargo` as a symlink to
-      # `rustup-init` (the installer, not the rustup proxy), so plain
-      # `cargo fmt` invokes the installer with `fmt` as an argument and
-      # fails with `unexpected argument 'fmt' found`. Prepend the
-      # rustup-installed cargo so the real binary wins on PATH.
-      - name: Prefer rustup-installed cargo on macOS
-        if: runner.os == 'macOS'
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
       # Belt-and-braces for macOS-14: `dtolnay/rust-toolchain`'s
-      # `components:` install has been flaky on the ARM runner — three
-      # consecutive runs of the fmt step have failed in <80s with no
-      # real diff, while ubuntu-x86 / ubuntu-arm / windows pass. Force
-      # rustfmt + clippy explicitly so a silent component miss can't
-      # red the gate. Runs against the toolchain dtolnay picked up
-      # (1.88.0) and is a no-op when the components are already there.
+      # `components:` install has been flaky on the ARM runner — past
+      # runs of the fmt step failed in <80 s with no real diff, while
+      # ubuntu-x86 / ubuntu-arm / windows passed. Force rustfmt + clippy
+      # explicitly so a silent component miss can't red the gate. No-op
+      # when the components are already there.
       - name: Ensure rustfmt + clippy on macOS
         if: runner.os == 'macOS'
         run: rustup component add rustfmt clippy --toolchain 1.88.0
+
+      # Rust toolchain diagnostic on macOS. Past runs failed at `cargo
+      # fmt --check` in <80 s with no diff — meaning either rustfmt
+      # wasn't actually installed for the active toolchain, or `cargo`
+      # was resolving to the `/usr/local/bin/cargo → rustup-init` symlink
+      # which exits 1 on any subcommand. Printing what's there once,
+      # before fmt runs, makes the next mystery failure debuggable.
+      - name: Rust toolchain diagnostic (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          echo "PATH=$PATH"
+          which cargo || true
+          which rustup || true
+          rustup show
+          rustup run 1.88.0 cargo --version
+          rustup run 1.88.0 cargo fmt --version
+          rustup run 1.88.0 cargo clippy --version
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -80,14 +87,22 @@ jobs:
       - name: Frontend type-check
         run: pnpm check
 
+      # All three Rust steps go through `rustup run 1.88.0 cargo …`
+      # rather than bare `cargo …`. On macOS-14 ARM, `/usr/local/bin/cargo`
+      # is a symlink to `rustup-init` (the installer, not the rustup proxy);
+      # plain `cargo fmt` invokes the installer with `fmt` as an argument
+      # and exits 1 with no diff — exactly the failure mode we kept seeing.
+      # Going through `rustup run` pins the toolchain explicitly and uses
+      # the rustup proxy regardless of which `cargo` PATH resolves to, so
+      # the gate behaves the same on every runner.
       - name: Rust formatting
         working-directory: src-tauri
-        run: cargo fmt --check
+        run: rustup run 1.88.0 cargo fmt --check
 
       - name: Rust lint
         working-directory: src-tauri
-        run: cargo clippy --all-targets
+        run: rustup run 1.88.0 cargo clippy --all-targets
 
       - name: Rust tests
         working-directory: src-tauri
-        run: cargo test --no-fail-fast
+        run: rustup run 1.88.0 cargo test --no-fail-fast

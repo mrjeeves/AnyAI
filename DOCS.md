@@ -663,7 +663,7 @@ Launch the GUI by running `myownllm` with no arguments, or open the application 
 - **Family tab** — pick which family inside the active provider MyOwnLLM uses for recommendations. Each family card shows its full tier list with the tier picked for your hardware highlighted, so you can see exactly what's running and why.
 - **Providers tab** — list of saved providers. Click any provider to switch (model and family hot-swap immediately to the new manifest's default family).
 - **Models tab** — every pulled model with its size, recommendation status, and pin/override controls.
-- **Storage tab** — per-area auto-cleanup toggles and a "Clean now" button per area (models, transcribe buffer, legacy runtimes, update leftovers, orphaned conversation files). The conversations folder lives here too. At the bottom: a **Danger zone** card with one-click resets — Delete all models, Delete all conversations, Delete all app data and downloads. Each is gated behind a typed challenge phrase and mirrors the matching `myownllm purge` subcommand.
+- **Storage tab** — per-area auto-cleanup toggles and a "Clean now" button per area (models, transcribe buffer, legacy runtimes, update leftovers, orphaned conversation files). The conversations folder lives here too. At the bottom: a **Danger zone** card with one-click resets — Delete all models, Delete all conversations, Delete all app data and downloads. Each is gated behind a typed challenge phrase and mirrors the matching `myownllm purge` subcommand. All three force-reload the app window after the delete completes — any open chat or in-flight recording goes with it.
 
 **Model status panel** (click "⊞ Models"):
 - Every pulled model: size, which providers recommend it, age if unrecommended.
