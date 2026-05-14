@@ -495,8 +495,32 @@ pub struct ModelPullProgress {
 }
 
 fn emit_progress(window: &WebviewWindow, spec: &ModelSpec, frame: ModelPullProgress) {
-    let event = format!("myownllm://model-pull/{}/{}", spec.kind.as_str(), spec.name);
+    let event = format!(
+        "myownllm://model-pull/{}/{}",
+        spec.kind.as_str(),
+        channel_safe(spec.name)
+    );
     let _ = window.emit(&event, frame);
+}
+
+/// Tauri restricts event names to `[A-Za-z0-9_/:-]`. Several model
+/// names carry characters outside that set — Parakeet's tag is
+/// `parakeet-tdt-0.6b-v3-int8` (dots) and the diarize composites use
+/// `+` (`pyannote-seg-3.0+wespeaker-r34`). Without this both the JS
+/// `listen()` call and the Rust `emit()` would reject the channel,
+/// failing the download with an "invalid event name" error before a
+/// single byte was streamed. Mirrored 1:1 in `channelSafe()` on the
+/// frontend so the listener and the emit point at the same string.
+pub fn channel_safe(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | ':' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Outcome of a `pull_model` call.
@@ -766,6 +790,29 @@ mod tests {
             let found = find(spec.name, spec.kind);
             assert!(found.is_some(), "registry entry {} not findable", spec.name);
         }
+    }
+
+    #[test]
+    fn channel_safe_strips_disallowed_chars() {
+        // Tauri rejects event names containing chars outside
+        // `[A-Za-z0-9_/:-]`. Parakeet's tag has dots; the diarize
+        // composite has `+`; an Ollama tag may have either. The
+        // sanitizer keeps the allowed chars and replaces the rest
+        // with `_` so the JS `listen()` doesn't reject the channel.
+        assert_eq!(
+            channel_safe("parakeet-tdt-0.6b-v3-int8"),
+            "parakeet-tdt-0_6b-v3-int8"
+        );
+        assert_eq!(
+            channel_safe("pyannote-seg-3.0+wespeaker-r34"),
+            "pyannote-seg-3_0_wespeaker-r34"
+        );
+        assert_eq!(
+            channel_safe("gemma3:4b-instruct-v1.5"),
+            "gemma3:4b-instruct-v1_5"
+        );
+        // Allowed chars round-trip unchanged.
+        assert_eq!(channel_safe("moonshine-small-q8"), "moonshine-small-q8");
     }
 
     #[test]

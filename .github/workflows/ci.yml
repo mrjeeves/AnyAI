@@ -41,6 +41,15 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      # macOS-14 ARM runners ship `/usr/local/bin/cargo` as a symlink to
+      # `rustup-init` (the installer, not the rustup proxy), so plain
+      # `cargo fmt` invokes the installer with `fmt` as an argument and
+      # fails with `unexpected argument 'fmt' found`. Prepend the
+      # rustup-installed cargo so the real binary wins on PATH.
+      - name: Prefer rustup-installed cargo on macOS
+        if: runner.os == 'macOS'
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
