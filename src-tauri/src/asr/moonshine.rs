@@ -48,6 +48,16 @@ const EOS_TOKEN: i64 = 2;
 /// realistically produces ≤ 30 tokens.
 const MAX_DECODE_STEPS: usize = 64;
 
+/// One past-KV input the decoder graph declares, plus the model's
+/// static-vs-dynamic dim layout for it. `-1` means "this dim is
+/// dynamic at graph-edit time"; the `run_decoder_step` helper
+/// resolves dynamic dims to `0` for the no-cache pass.
+#[derive(Debug, Clone)]
+struct PastKvInput {
+    name: String,
+    declared_shape: Vec<i64>,
+}
+
 pub struct MoonshineBackend {
     model_name: String,
     encoder: Option<Session>,
@@ -60,11 +70,19 @@ pub struct MoonshineBackend {
     dec_input_ids_name: String,
     dec_enc_hidden_name: String,
     dec_logits_name: String,
-    /// Names of all past-KV inputs the decoder graph declares.
-    /// We pass zero-shape tensors for each one on every step (the
-    /// no-cache decode branch the model exposes via
-    /// `use_cache_branch=false`).
-    past_kv_input_names: Vec<String>,
+    /// Past-KV inputs the decoder graph declares, with the model's
+    /// per-input declared shape (dynamic dims reported as `-1`).
+    /// We pass zero-volume tensors here on every step (the no-cache
+    /// decode branch the model exposes via `use_cache_branch=false`)
+    /// but the shape we hand to ORT has to satisfy the model's
+    /// **static** dim declarations or `Session::run` errors with
+    /// `Got invalid dimensions for input: past_key_values.…`. The
+    /// merged Moonshine-base export pins index 1 (`n_heads = 8`) and
+    /// index 3 (`head_dim = 52`); only the batch and `past_seq_len`
+    /// dims are free. Storing the declared shape per input lets us
+    /// build a matching `[batch, n_heads, past_seq_len=0, head_dim]`
+    /// at decode time without hard-coding the values.
+    past_kv_inputs: Vec<PastKvInput>,
     /// Name of the `use_cache_branch` input if the export has one.
     /// Some Moonshine ONNX exports have it; some don't. When
     /// present we pass `false` every step.
@@ -83,7 +101,7 @@ impl MoonshineBackend {
             dec_input_ids_name: "input_ids".to_string(),
             dec_enc_hidden_name: "encoder_hidden_states".to_string(),
             dec_logits_name: "logits".to_string(),
-            past_kv_input_names: Vec::new(),
+            past_kv_inputs: Vec::new(),
             use_cache_branch_name: None,
         })
     }
@@ -200,12 +218,27 @@ impl AsrBackend for MoonshineBackend {
         // Sniff decoder I/O by suffix-match against the canonical
         // names. Past-KV inputs all start with `past_key_values.`;
         // the `use_cache_branch` input is bool / int8 and named
-        // exactly that.
+        // exactly that. For each past-KV input we also pull its
+        // declared shape off the `Outlet`'s `dtype()`; dynamic dims
+        // come through as `-1` (the ort crate's convention) which we
+        // resolve at decode time.
         for input in decoder.inputs() {
             let n = input.name();
             let lower = n.to_lowercase();
             if n.starts_with("past_key_values.") {
-                self.past_kv_input_names.push(n.to_string());
+                let shape: Vec<i64> = match input.dtype() {
+                    ort::value::ValueType::Tensor { shape, .. } => shape.iter().copied().collect(),
+                    // Non-tensor past-KV inputs are unheard of for
+                    // seq2seq decoders, but fall back to the
+                    // historical `[1, 0, 0, 0]` placeholder rather
+                    // than panicking — that path still works on
+                    // exports that don't pin dims 1 and 3.
+                    _ => vec![1, 0, 0, 0],
+                };
+                self.past_kv_inputs.push(PastKvInput {
+                    name: n.to_string(),
+                    declared_shape: shape,
+                });
             } else if lower == "use_cache_branch" {
                 self.use_cache_branch_name = Some(n.to_string());
             } else if lower.ends_with("input_ids") {
@@ -338,7 +371,7 @@ impl MoonshineBackend {
         let dec_input_ids_name = self.dec_input_ids_name.clone();
         let dec_enc_hidden_name = self.dec_enc_hidden_name.clone();
         let dec_logits_name = self.dec_logits_name.clone();
-        let past_names = self.past_kv_input_names.clone();
+        let past_inputs = self.past_kv_inputs.clone();
         let use_cache_name = self.use_cache_branch_name.clone();
 
         let input_ids: Array2<i64> = Array2::from_shape_vec((1, tokens.len()), tokens.to_vec())
@@ -362,18 +395,33 @@ impl MoonshineBackend {
             ),
         ];
 
-        // No-cache branch: dummy zero-shape past-KV tensors. The
-        // model's `use_cache_branch=false` graph ignores their
-        // contents but the ONNX runtime still needs every declared
-        // input bound. `[1, 0, 0, 0]` is a generic zero-volume shape
-        // that ORT accepts across the merged-decoder exports we
-        // ship. If a future export rejects it, switch to inspecting
-        // `input.dtype()` shape metadata to derive the right
-        // n_heads / head_dim.
-        for name in &past_names {
-            let empty: ArrayD<f32> = ArrayD::zeros(ndarray::IxDyn(&[1, 0, 0, 0]));
+        // No-cache branch: zero-volume past-KV tensors whose **shape**
+        // satisfies the model's static dim declarations. The merged
+        // Moonshine decoder pins n_heads (dim 1) and head_dim (dim 3),
+        // so a generic `[1, 0, 0, 0]` placeholder fails ORT's input-
+        // shape validation with:
+        //
+        //   Got invalid dimensions for input: past_key_values.0.decoder.key
+        //   index: 1 Got: 0 Expected: 8
+        //   index: 3 Got: 0 Expected: 52
+        //
+        // We honour each declared static dim and pick zero-volume
+        // sentinels for the dynamic ones (`-1` in the ort crate's
+        // shape representation). For the standard transformer past-KV
+        // layout `[batch, n_heads, past_seq_len, head_dim]` the
+        // dynamic dims are batch (index 0) and past_seq_len (index 2):
+        // both get `0` so the resulting tensor is empty regardless of
+        // which one is variable. The decoder ignores the contents
+        // under `use_cache_branch = false`; only the shape matters.
+        for past in &past_inputs {
+            let resolved_shape: Vec<usize> = past
+                .declared_shape
+                .iter()
+                .map(|&d| if d < 0 { 0 } else { d as usize })
+                .collect();
+            let empty: ArrayD<f32> = ArrayD::zeros(ndarray::IxDyn(&resolved_shape));
             let t = Tensor::from_array(empty).map_err(|e| anyhow!("ort tensor past-kv: {e}"))?;
-            inputs.push((std::borrow::Cow::Owned(name.clone()), t.into()));
+            inputs.push((std::borrow::Cow::Owned(past.name.clone()), t.into()));
         }
 
         // `use_cache_branch` flag: bool encoded as a single-element
