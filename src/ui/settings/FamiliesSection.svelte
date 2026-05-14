@@ -206,12 +206,22 @@
   /** Resolve actual on-disk size for a (mode, model) pair, returning bytes
    *  if the file is installed, the manifest's declared `disk_mb` * 1MB if
    *  not, or 0 if neither is known. Lets the tier table show real size
-   *  when present and the manifest estimate otherwise. */
-  function tierSize(modeSpec: ManifestMode, modelName: string, tierDiskMb?: number): {
+   *  when present and the manifest estimate otherwise.
+   *
+   *  Looks up the lookup map by the tier's effective runtime (Moonshine /
+   *  Parakeet tiers live in `localSizes`, Ollama tags live in
+   *  `pulledSizes`). The earlier version checked `modeSpec.runtime` only,
+   *  which is undefined on the manifest's shared transcribe mode — so
+   *  Moonshine kept showing a Download button after a successful pull
+   *  because we looked it up in the wrong map. */
+  function tierSize(
+    runtime: ModelRuntime,
+    modelName: string,
+    tierDiskMb?: number,
+  ): {
     bytes: number;
     installed: boolean;
   } {
-    const runtime = modeSpec.runtime ?? "ollama";
     const installedBytes =
       runtime !== "ollama" ? localSizes[modelName] : pulledSizes[modelName];
     if (installedBytes && installedBytes > 0) {
@@ -972,7 +982,7 @@
                   {@const current = tier.model === effectiveModel}
                   {@const switched = current && overridden}
                   {@const tierRt = runtimeOfTier(modeSpec, modeName, tier)}
-                  {@const sz = tierSize(modeSpec, tier.model, tier.disk_mb)}
+                  {@const sz = tierSize(tierRt, tier.model, tier.disk_mb)}
                   {@const downloadable = tierRt === "ollama" || tierRt === "moonshine" || tierRt === "parakeet"}
                   {@const dl = downloads[tier.model]}
                   {@const isDownloading = !!dl}
