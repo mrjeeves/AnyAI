@@ -559,7 +559,7 @@
       kind="text"
       modelName={textModel}
       label="Text model"
-      description="Download the {activeFamily} chat model to start a conversation. Stays on your device — never leaves your machine."
+      description={`Download the ${activeFamily} chat model to start a conversation. Stays on your device — never leaves your machine. Open Settings first if you'd like a different family or tier.`}
       {hardware}
       onComplete={onTextDownloaded}
     />

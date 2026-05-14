@@ -107,11 +107,13 @@
 </div>
 
 <style>
+  /* Sits above the per-surface DownloadOverlay (z-index: 30) so the
+     user can change family/tier/runtime before kicking off a pull. */
   .overlay {
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.65);
-    z-index: 10;
+    z-index: 40;
   }
   .panel {
     position: fixed;
@@ -123,7 +125,7 @@
     background: #111;
     border: 1px solid #222;
     border-radius: 12px;
-    z-index: 11;
+    z-index: 41;
     display: flex;
     flex-direction: column;
     overflow: hidden;
