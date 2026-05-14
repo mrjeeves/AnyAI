@@ -395,14 +395,26 @@ pub async fn pull(model: &str, window: &tauri::WebviewWindow) -> Result<PullOutc
         crate::models::channel_safe(model)
     );
     let window_clone = window.clone();
-    pull_with(model, move |evt| {
+    let per_tag_clone = per_tag.clone();
+    eprintln!("[ollama] pull start: model='{model}' channel='{per_tag}'");
+    let outcome = pull_with(model, move |evt| {
         // Per-tag channel for inline UIs (FamiliesSection's tier rows) that
         // need to attribute frames to a specific model. Global channel kept
-        // alive for the legacy DownloadOverlay flow.
-        let _ = window_clone.emit(&per_tag, evt.clone());
-        let _ = window_clone.emit("ollama-pull-progress", evt.clone());
+        // alive for the legacy DownloadOverlay flow. Surface emit errors so
+        // a misnamed channel doesn't masquerade as a frozen progress bar.
+        if let Err(e) = window_clone.emit(&per_tag_clone, evt.clone()) {
+            eprintln!("[ollama] emit on '{per_tag_clone}' failed: {e}");
+        }
+        if let Err(e) = window_clone.emit("ollama-pull-progress", evt.clone()) {
+            eprintln!("[ollama] emit on 'ollama-pull-progress' failed: {e}");
+        }
     })
-    .await
+    .await;
+    match &outcome {
+        Ok(o) => eprintln!("[ollama] pull done: model='{model}' outcome={o:?}"),
+        Err(e) => eprintln!("[ollama] pull error: model='{model}' err={e}"),
+    }
+    outcome
 }
 
 /// Pull a model via Ollama's HTTP API (`POST /api/pull`) and invoke `on_event`

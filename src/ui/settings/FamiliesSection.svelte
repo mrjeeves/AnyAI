@@ -493,6 +493,7 @@
     };
     downloads = { ...downloads, [model]: initial };
 
+    console.debug("[FamiliesSection] downloadTier start", { runtime, model, options });
     try {
       if (runtime === "ollama") {
         // FamiliesSection used to call ollama_pull directly. If ollama
@@ -510,6 +511,7 @@
         downloads[model].status = "Connecting to Ollama…";
         downloads = { ...downloads, [model]: downloads[model] };
         const chan = `myownllm://ollama-pull/${channelSafe(model)}`;
+        console.debug("[FamiliesSection] subscribing to", chan);
         progressUnlisten[model] = await listen<OllamaPullEvent>(chan, (e) => {
           applyOllamaEvent(model, e.payload);
         });
@@ -517,6 +519,7 @@
         await invoke("ollama_ensure_running").catch(() => {});
       } else if (runtime === "moonshine" || runtime === "parakeet") {
         const chan = `myownllm://model-pull/asr/${channelSafe(model)}`;
+        console.debug("[FamiliesSection] subscribing to", chan);
         progressUnlisten[model] = await listen<ModelPullEvent>(chan, (e) => {
           applyAsrEvent(model, e.payload);
         });
@@ -525,6 +528,7 @@
         throw new Error(`Downloads for runtime "${runtime}" are managed elsewhere.`);
       }
       const wasCancelled = downloads[model]?.cancelling ?? false;
+      console.debug("[FamiliesSection] downloadTier done", { model, wasCancelled });
       clearDownload(model);
       if (wasCancelled && options.switchInitiated && options.familyName && options.mode) {
         // User cancelled a switch-initiated pull; back out of the
@@ -533,9 +537,26 @@
       }
       await load();
     } catch (e) {
-      downloadError = { ...downloadError, [model]: String(e) };
+      console.error("[FamiliesSection] downloadTier failed", { model, error: e });
+      downloadError = { ...downloadError, [model]: friendlyPullError(String(e)) };
       clearDownload(model);
     }
+  }
+
+  /** Take a raw Tauri/Rust error string and turn it into something a
+   *  user can act on. The two common terminal cases — Ollama saying the
+   *  tag doesn't exist on the registry, and the post-stream "finished
+   *  but model X is not present" sentinel — both mean the manifest
+   *  entry doesn't map to a real model. Calling that out explicitly
+   *  saves the user a Google trip. */
+  function friendlyPullError(raw: string): string {
+    if (/file does not exist|model.+not found|manifest.+not found/i.test(raw)) {
+      return `${raw} — this tag isn't published on Ollama's registry. The manifest may reference a future or renamed model.`;
+    }
+    if (/finished but model .+ is not present/i.test(raw)) {
+      return `${raw} — Ollama accepted the pull but didn't end up with the tag on disk; usually means the registry has no such model.`;
+    }
+    return raw;
   }
 
   /** Send the cancel signal for an in-flight pull. The backend
@@ -1017,10 +1038,36 @@
                         </div>
                       {/if}
                       {#if dlErr && !dl}
-                        <div class="tier-err">Download failed: {dlErr}</div>
+                        <div class="tier-err-banner" role="alert">
+                          <span class="tier-err-icon" aria-hidden="true">⚠</span>
+                          <span class="tier-err-body">
+                            <strong>Download failed.</strong>
+                            <span class="tier-err-detail">{dlErr}</span>
+                          </span>
+                          <button
+                            class="tier-err-dismiss"
+                            onclick={() =>
+                              (downloadError = { ...downloadError, [tier.model]: "" })}
+                            aria-label="Dismiss error"
+                            title="Dismiss"
+                          >✕</button>
+                        </div>
                       {/if}
                       {#if delErr}
-                        <div class="tier-err">Delete failed: {delErr}</div>
+                        <div class="tier-err-banner" role="alert">
+                          <span class="tier-err-icon" aria-hidden="true">⚠</span>
+                          <span class="tier-err-body">
+                            <strong>Delete failed.</strong>
+                            <span class="tier-err-detail">{delErr}</span>
+                          </span>
+                          <button
+                            class="tier-err-dismiss"
+                            onclick={() =>
+                              (deleteError = { ...deleteError, [tier.model]: "" })}
+                            aria-label="Dismiss error"
+                            title="Dismiss"
+                          >✕</button>
+                        </div>
                       {/if}
                     </div>
                     <div class="tier-actions">
@@ -1421,6 +1468,34 @@
     max-width: 14rem;
   }
   .tier-err { color: #f88; font-size: .7rem; margin-top: .15rem; }
+  .tier-err-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: .5rem;
+    margin-top: .4rem;
+    padding: .5rem .65rem;
+    background: #2a1414;
+    border: 1px solid #5a2424;
+    border-radius: 6px;
+    font-size: .78rem;
+    color: #ffd6d6;
+    line-height: 1.45;
+  }
+  .tier-err-icon { color: #ff8a8a; font-size: .95rem; line-height: 1.2; flex-shrink: 0; }
+  .tier-err-body { flex: 1; min-width: 0; }
+  .tier-err-body strong { color: #ffb4b4; font-weight: 600; display: block; margin-bottom: .1rem; }
+  .tier-err-detail { color: #f0c4c4; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: .72rem; word-break: break-word; }
+  .tier-err-dismiss {
+    background: transparent;
+    border: none;
+    color: #ffb4b4;
+    cursor: pointer;
+    font-size: .9rem;
+    padding: 0 .25rem;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .tier-err-dismiss:hover { color: #fff; }
 
   .tier.recommended { background: #15151c; }
   .tier.recommended .tier-mem { color: #d8d8d8; }

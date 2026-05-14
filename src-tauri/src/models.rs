@@ -500,7 +500,12 @@ fn emit_progress(window: &WebviewWindow, spec: &ModelSpec, frame: ModelPullProgr
         spec.kind.as_str(),
         channel_safe(spec.name)
     );
-    let _ = window.emit(&event, frame);
+    if let Err(e) = window.emit(&event, frame) {
+        // Tauri rejects some event-name shapes silently in release builds —
+        // surface them so a missing progress bar is debuggable from the
+        // dev terminal instead of looking like a frozen pull.
+        eprintln!("[models] emit on '{event}' failed: {e}");
+    }
 }
 
 /// Tauri restricts event names to `[A-Za-z0-9_/:-]`. Several model
@@ -543,6 +548,17 @@ pub async fn pull_model(
         find(&name, kind).ok_or_else(|| anyhow!("unknown {} model: {}", kind.as_str(), name))?;
     let dir = model_dir(kind, &name)?;
     std::fs::create_dir_all(&dir)?;
+    let chan = format!(
+        "myownllm://model-pull/{}/{}",
+        kind.as_str(),
+        channel_safe(&name)
+    );
+    eprintln!(
+        "[models] pull_model start: kind={} name='{name}' dir={} channel='{chan}' artifacts={}",
+        kind.as_str(),
+        dir.display(),
+        spec.artifacts.len(),
+    );
 
     // Register the cancel notifier BEFORE the network call so a cancel
     // racing with an early-arriving first byte still wins. Same pattern
@@ -556,6 +572,17 @@ pub async fn pull_model(
 
     let result = pull_model_inner(spec, &dir, &window, notify.clone()).await;
     pull_cancels().lock().await.remove(&key);
+    match &result {
+        Ok(PullModelOutcome::Completed) => {
+            eprintln!("[models] pull_model done: name='{name}' completed");
+        }
+        Ok(PullModelOutcome::Cancelled) => {
+            eprintln!("[models] pull_model done: name='{name}' cancelled");
+        }
+        Err(e) => {
+            eprintln!("[models] pull_model error: name='{name}' err={e}");
+        }
+    }
 
     // Final frame so the UI can leave its "pulling" state even when the
     // last byte-counter emit was throttled out.
