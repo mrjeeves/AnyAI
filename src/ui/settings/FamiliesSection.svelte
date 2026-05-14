@@ -207,18 +207,19 @@
    *  if the file is installed, the manifest's declared `disk_mb` * 1MB if
    *  not, or 0 if neither is known. Lets the tier table show real size
    *  when present and the manifest estimate otherwise. */
-  function tierSize(modeSpec: ManifestMode, modelName: string, tierDiskMb?: number): {
-    bytes: number;
-    installed: boolean;
-  } {
-    const runtime = modeSpec.runtime ?? "ollama";
+  function tierSize(
+    modeSpec: ManifestMode,
+    modeName: Mode,
+    tier: ManifestTier,
+  ): { bytes: number; installed: boolean } {
+    const runtime = tierRuntime(tier, modeSpec, modeName);
     const installedBytes =
-      runtime !== "ollama" ? localSizes[modelName] : pulledSizes[modelName];
+      runtime === "ollama" ? pulledSizes[tier.model] : localSizes[tier.model];
     if (installedBytes && installedBytes > 0) {
       return { bytes: installedBytes, installed: true };
     }
-    if (tierDiskMb && tierDiskMb > 0) {
-      return { bytes: tierDiskMb * 1024 * 1024, installed: false };
+    if (tier.disk_mb && tier.disk_mb > 0) {
+      return { bytes: tier.disk_mb * 1024 * 1024, installed: false };
     }
     return { bytes: 0, installed: false };
   }
@@ -972,7 +973,7 @@
                   {@const current = tier.model === effectiveModel}
                   {@const switched = current && overridden}
                   {@const tierRt = runtimeOfTier(modeSpec, modeName, tier)}
-                  {@const sz = tierSize(modeSpec, tier.model, tier.disk_mb)}
+                  {@const sz = tierSize(modeSpec, modeName, tier)}
                   {@const downloadable = tierRt === "ollama" || tierRt === "moonshine" || tierRt === "parakeet"}
                   {@const dl = downloads[tier.model]}
                   {@const isDownloading = !!dl}
