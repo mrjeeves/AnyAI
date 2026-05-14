@@ -1,6 +1,6 @@
 {
   "name": "MyOwnLLM Default",
-  "version": "16",
+  "version": "17",
   "ttl_minutes": 360,
   "default_family": "gemma4",
   "headroom_gb": {
@@ -51,13 +51,13 @@
         "text": {
           "label": "Text",
           "tiers": [
-            { "min_vram_gb": 28, "min_ram_gb": 28, "min_unified_ram_gb": 36, "disk_mb": 24000, "model": "qwen3.6:35b", "fallback": "qwen3.6:27b" },
-            { "min_vram_gb": 20, "min_ram_gb": 20, "min_unified_ram_gb": 26, "disk_mb": 17000, "model": "qwen3.6:27b", "fallback": "qwen3:14b"   },
-            { "min_vram_gb": 12, "min_ram_gb": 12, "min_unified_ram_gb": 16, "disk_mb": 9300,  "model": "qwen3:14b",   "fallback": "qwen3:8b"    },
-            { "min_vram_gb": 7,  "min_ram_gb": 8,  "min_unified_ram_gb": 12, "disk_mb": 5200,  "model": "qwen3:8b",    "fallback": "qwen3:4b"    },
-            { "min_vram_gb": 4,  "min_ram_gb": 5,  "min_unified_ram_gb": 8,  "disk_mb": 2500,  "model": "qwen3:4b",    "fallback": "qwen3:1.7b"  },
-            { "min_vram_gb": 2,  "min_ram_gb": 3,  "min_unified_ram_gb": 6,  "disk_mb": 1400,  "model": "qwen3:1.7b",  "fallback": "qwen3:0.6b"  },
-            { "min_vram_gb": 0,  "min_ram_gb": 0,  "min_unified_ram_gb": 0,  "disk_mb": 500,   "model": "qwen3:0.6b",  "fallback": "qwen3:0.6b"  }
+            { "min_vram_gb": 80, "min_ram_gb": 80, "min_unified_ram_gb": 96, "disk_mb": 74000, "model": "qwen3.5:122b", "fallback": "qwen3.6:35b"  },
+            { "min_vram_gb": 28, "min_ram_gb": 28, "min_unified_ram_gb": 36, "disk_mb": 24000, "model": "qwen3.6:35b",  "fallback": "qwen3.6:27b"  },
+            { "min_vram_gb": 20, "min_ram_gb": 20, "min_unified_ram_gb": 26, "disk_mb": 17000, "model": "qwen3.6:27b",  "fallback": "qwen3.5:9b"   },
+            { "min_vram_gb": 8,  "min_ram_gb": 9,  "min_unified_ram_gb": 12, "disk_mb": 5800,  "model": "qwen3.5:9b",   "fallback": "qwen3.5:4b"   },
+            { "min_vram_gb": 4,  "min_ram_gb": 5,  "min_unified_ram_gb": 8,  "disk_mb": 2500,  "model": "qwen3.5:4b",   "fallback": "qwen3.5:2b"   },
+            { "min_vram_gb": 2,  "min_ram_gb": 3,  "min_unified_ram_gb": 6,  "disk_mb": 1500,  "model": "qwen3.5:2b",   "fallback": "qwen3.5:0.8b" },
+            { "min_vram_gb": 0,  "min_ram_gb": 0,  "min_unified_ram_gb": 0,  "disk_mb": 700,   "model": "qwen3.5:0.8b", "fallback": "qwen3.5:0.8b" }
           ]
         }
       }

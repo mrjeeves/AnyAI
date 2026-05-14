@@ -273,40 +273,60 @@ pub fn find_composite(composite: &str, kind: ModelKind) -> Result<Vec<&'static M
     Ok(out)
 }
 
-/// Whether all artifacts of a model are present at acceptable sizes.
-/// Treats a partial set (e.g. encoder present but decoder missing) as
-/// not installed so a half-pulled backend never tries to load.
-pub fn is_installed(spec: &ModelSpec) -> bool {
-    let Ok(dir) = model_dir(spec.kind, spec.name) else {
-        eprintln!("[models] is_installed({}): model_dir failed", spec.name);
-        return false;
-    };
+/// Inner check shared by the loud and quiet variants. Returns `Ok(())`
+/// when every artifact is present at an acceptable size, or `Err(msg)`
+/// describing the first failure (suitable for an eprintln! line).
+fn check_installed(spec: &ModelSpec) -> Result<(), String> {
+    let dir = model_dir(spec.kind, spec.name)
+        .map_err(|_| format!("[models] is_installed({}): model_dir failed", spec.name))?;
     for artifact in spec.artifacts {
         let path = dir.join(artifact.filename);
         match std::fs::metadata(&path) {
             Err(e) => {
-                eprintln!(
+                return Err(format!(
                     "[models] is_installed({}): missing artifact {} at {} ({e})",
                     spec.name,
                     artifact.filename,
                     path.display()
-                );
-                return false;
+                ));
             }
             Ok(meta) if meta.len() < artifact.min_bytes => {
-                eprintln!(
+                return Err(format!(
                     "[models] is_installed({}): {} too small ({} < min {})",
                     spec.name,
                     artifact.filename,
                     meta.len(),
                     artifact.min_bytes
-                );
-                return false;
+                ));
             }
             Ok(_) => {}
         }
     }
-    true
+    Ok(())
+}
+
+/// Whether all artifacts of a model are present at acceptable sizes.
+/// Treats a partial set (e.g. encoder present but decoder missing) as
+/// not installed so a half-pulled backend never tries to load. Logs the
+/// first failure on the way out — callers that drive transcription want
+/// to know *why* a freshly-pulled model still reads as missing.
+pub fn is_installed(spec: &ModelSpec) -> bool {
+    match check_installed(spec) {
+        Ok(()) => true,
+        Err(msg) => {
+            eprintln!("{msg}");
+            false
+        }
+    }
+}
+
+/// Same check as `is_installed` but silent. Used by the Settings-panel
+/// `list()` walk, which enumerates every registry entry on each refresh
+/// — including models the user has no reason to have on disk (retired
+/// tiers like parakeet, the alternate diarize embedder). Logging those
+/// as "missing artifact" on every poll buried the actual diagnostics.
+pub fn is_installed_quiet(spec: &ModelSpec) -> bool {
+    check_installed(spec).is_ok()
 }
 
 /// `true` if every component of a composite name is installed.
@@ -337,7 +357,7 @@ pub fn list(kind: ModelKind) -> Vec<ModelInfo> {
         .iter()
         .filter(|m| m.kind == kind)
         .map(|m| {
-            let installed = is_installed(m);
+            let installed = is_installed_quiet(m);
             let installed_size_bytes = if installed {
                 model_dir(m.kind, m.name).ok().and_then(|dir| {
                     let mut total: u64 = 0;
