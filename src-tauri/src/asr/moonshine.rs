@@ -418,17 +418,20 @@ impl AsrBackend for MoonshineBackend {
             return Ok(AsrChunkOut::default());
         }
 
-        // 2. Greedy autoregressive decode. Step 0 is a prefill pass
-        // (no-cache branch) that primes the KV cache from
-        // `[START_TOKEN]`; subsequent steps drive the cached branch
-        // with just the most-recently-decoded token as `input_ids`
-        // and the accumulated past-KV from the cache. When the
-        // export lacks a `use_cache_branch` input or its present-KV
-        // outputs couldn't be matched at warm-up
-        // (`present_kv_outputs` empty), every step uses the no-cache
-        // branch with the full token sequence.
-        let cache_available =
-            !self.present_kv_outputs.is_empty() && self.use_cache_branch_name.is_some();
+        // 2. Greedy autoregressive decode. Every step uses the no-cache
+        // branch with the full token sequence so far. The earlier
+        // cached-branch optimisation (#145) tripped a shape mismatch
+        // in the merged decoder's `optimum::if` → `encoder_attn/MatMul`
+        // on real chunks ("right operand cannot broadcast on dim 0"):
+        // the no-cache prefill emitted `present.encoder.{key,value}`
+        // tensors whose batch dim the cached branch's MatMul refused
+        // to broadcast against on the next step. Until we can poke at
+        // the actual exported shapes, no-cache decode is the safer
+        // path — slower per step but never fails. The cached bookkeeping
+        // below (`present_kv_outputs`, the `if use_cache { … }` branch
+        // in `run_decoder`) is preserved so re-enabling the optimised
+        // path is a one-line change once the shape mismatch is fixed.
+        let cache_available = false;
         let mut kv = DecoderKvCache::empty(self.past_kv_inputs.len());
         let mut tokens: Vec<i64> = vec![START_TOKEN];
         let mut hit_eos_on_first_step = false;
@@ -475,9 +478,8 @@ impl AsrBackend for MoonshineBackend {
             if hit_eos_on_first_step {
                 eprintln!(
                     "[moonshine] decoder produced EOS on step 1 for {}-sample chunk \
-                     (cached_path={}) — likely silent/near-silent input",
+                     — likely silent/near-silent input",
                     pcm16k_mono.len(),
-                    !self.present_kv_outputs.is_empty(),
                 );
             } else if tokens.len() > 1 {
                 eprintln!(

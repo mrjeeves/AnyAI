@@ -410,6 +410,18 @@ fn diarize_model_present(name: String) -> bool {
     models::composite_installed(&name, models::ModelKind::Diarize)
 }
 
+/// Signal an in-flight `diarize_model_pull` to abort. The composite
+/// pulls each component sequentially; we fire cancel against every
+/// component name so whichever one is currently streaming gets the
+/// notify and returns `Cancelled` (and `pull_composite` exits the
+/// chain on the first cancelled outcome).
+#[tauri::command]
+async fn diarize_model_pull_cancel(name: String) {
+    for component in name.split('+') {
+        models::cancel_pull(models::ModelKind::Diarize, component).await;
+    }
+}
+
 /// List leftover on-disk directories from deprecated runtimes
 /// (whisper today, future deprecations later). Returns every
 /// registered legacy id with its current on-disk size so the
@@ -691,6 +703,7 @@ fn main() {
             asr_model_remove,
             diarize_models_list,
             diarize_model_pull,
+            diarize_model_pull_cancel,
             diarize_model_present,
             legacy_models_list,
             legacy_models_remove,
