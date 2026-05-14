@@ -122,6 +122,19 @@
   let sessionName = $state("");
   let settingsTab = $state<SettingsTab | null>(null);
   let transcribeError = $state("");
+  /** Mirror async backend errors from `transcribeUi.error` (which the
+   *  state listener populates on a final frame carrying `status`) into
+   *  the local `transcribeError`, so the .mic-error block below
+   *  renders them. Without this, an error that arrives via the
+   *  transcribe-stream event channel (build_backends pre-flight, worker
+   *  panic, run_session Err, …) vanishes the moment `active` flips
+   *  false, since the .transcribe-status div is gated on
+   *  `isMyRecording`. */
+  $effect(() => {
+    if (transcribeUi.error) {
+      transcribeError = transcribeUi.error;
+    }
+  });
   /** Inline-edit state for renaming a speaker. `null` means no pill is
    *  currently being edited. */
   let renameTarget = $state<{ id: number; value: string } | null>(null);

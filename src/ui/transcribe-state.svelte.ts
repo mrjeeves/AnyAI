@@ -194,6 +194,19 @@ async function attachListener(streamId: string) {
         clearTimers();
         unlistenStream?.();
         unlistenStream = null;
+        // A final frame with a non-empty status is the worker
+        // reporting an unrecoverable error (the Rust side fills
+        // `status` with "transcription error: …" when run_session
+        // returns Err). The status subtitle is gated on
+        // `isMyRecording` in TranscribeView, so it disappears the
+        // moment `active` flips false below — mirror the error into
+        // `transcribeUi.error` so the persistent .mic-error block
+        // actually sees it. Without this the user gets zero on-screen
+        // feedback for async backend failures (e.g. the onnxruntime
+        // pre-flight in build_backends).
+        if (typeof f.status === "string" && f.status.length > 0) {
+          transcribeUi.error = f.status;
+        }
         transcribeUi.active = false;
         const r = stopResolver;
         stopResolver = null;
