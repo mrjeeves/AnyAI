@@ -75,12 +75,49 @@ const MAX_DECODE_STEPS: usize = 256;
 /// One past-KV input the decoder graph declares, plus the model's
 /// static-vs-dynamic dim layout for it. `-1` means "this dim is
 /// dynamic at graph-edit time"; the prefill helper resolves dynamic
-/// dims to `0` to hand ORT a zero-volume placeholder satisfying the
-/// graph's static dim pins.
+/// dims based on whether this is a self-attention (decoder) or
+/// cross-attention (encoder) slot — see `PastKvKind`.
 #[derive(Debug, Clone)]
 struct PastKvInput {
     name: String,
     declared_shape: Vec<i64>,
+    kind: PastKvKind,
+}
+
+/// Which attention layer's K/V this slot feeds. Drives the prefill
+/// placeholder shape: decoder slots get `past_seq_len = 0` (no prior
+/// tokens yet), encoder slots get `past_seq_len = T_enc` (the encoder
+/// output length for this chunk). The distinction matters because the
+/// merged Moonshine decoder's no-cache branch passes the encoder
+/// past-KV through to its present-KV outputs unchanged — so a
+/// zero-volume encoder placeholder on prefill emits a zero-volume
+/// present.encoder.{key,value}, and the cached branch on the next
+/// step trips `MatMul: right operand cannot broadcast on dim 0`
+/// trying to attend Q (batch=1) over K (batch=0). Sized correctly
+/// here, the placeholder gives the cached path a K with batch=1 to
+/// broadcast against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PastKvKind {
+    /// `past_key_values.X.decoder.{key,value}` — self-attention.
+    Decoder,
+    /// `past_key_values.X.encoder.{key,value}` — cross-attention.
+    Encoder,
+}
+
+impl PastKvKind {
+    fn classify(name: &str) -> Self {
+        // Optimum's naming convention: `past_key_values.X.{decoder,encoder}.{key,value}`.
+        // Match on the segment between the layer index and the K/V suffix.
+        if name.contains(".encoder.") {
+            Self::Encoder
+        } else {
+            // Default to Decoder for `.decoder.` and any future variant
+            // we haven't tagged — a wrong-classified decoder slot is
+            // inert (decoder past_seq_len starts at 0 anyway), while a
+            // wrong-classified encoder slot is what we're trying to fix.
+            Self::Decoder
+        }
+    }
 }
 
 /// Mutable KV cache held across decode steps within a single chunk.
@@ -315,6 +352,7 @@ impl AsrBackend for MoonshineBackend {
                 self.past_kv_inputs.push(PastKvInput {
                     name: n.to_string(),
                     declared_shape: shape,
+                    kind: PastKvKind::classify(n),
                 });
             } else if lower == "use_cache_branch" {
                 self.use_cache_branch_name = Some(n.to_string());
@@ -593,17 +631,44 @@ impl MoonshineBackend {
         // Past-KV inputs. Cached path: clone in the accumulated KV
         // (ORT consumes the array on `Tensor::from_array`, so we
         // clone to keep the cache live for the present-KV capture
-        // below). No-cache path: zero-volume placeholder honouring
-        // the declared static dims. The merged Moonshine decoder
-        // pins `n_heads` (dim 1) and `head_dim` (dim 3), so a
-        // generic `[1, 0, 0, 0]` placeholder fails ORT's input-shape
-        // validation with
-        //   Got invalid dimensions for input: past_key_values.0.decoder.key
-        //   index: 1 Got: 0 Expected: 8
-        //   index: 3 Got: 0 Expected: 52
-        // Resolving dynamic dims (`-1`) to `0` for the standard
-        // `[batch, n_heads, past_seq_len, head_dim]` layout yields a
-        // zero-volume tensor that ORT accepts.
+        // below).
+        //
+        // No-cache (prefill) placeholder shapes — split by slot kind:
+        //
+        //   * Decoder self-attn (`past_key_values.X.decoder.{key,value}`):
+        //       [batch, n_heads, past_seq_len=0, head_dim]
+        //     The no-cache branch ignores past_kv values for self-attn
+        //     (it computes K/V fresh from input_ids), so a zero-volume
+        //     placeholder is correct.
+        //
+        //   * Encoder cross-attn (`past_key_values.X.encoder.{key,value}`):
+        //       [batch, n_heads, T_enc, head_dim]
+        //     The merged Moonshine decoder's no-cache branch passes
+        //     these inputs through to its `present.encoder.{key,value}`
+        //     outputs unchanged (the cached branch is the canonical
+        //     path; the no-cache branch only really exists to seed the
+        //     cache without a separate prefill graph). Feeding the
+        //     historic [0, 8, 0, 52] zero-volume tensor here meant the
+        //     captured present.encoder.key was zero-volume too, and on
+        //     step 2 the cached branch tripped
+        //         "matmul_helper.h:144 Compute right operand cannot
+        //          broadcast on dim 0"
+        //     trying to attend Q (batch=1) over K (batch=0).
+        //     Sizing the placeholder to T_enc gives the cached path a
+        //     K with a broadcastable batch=1 leading dim. Contents
+        //     stay zero — Q · zeros yields uniform attention scores,
+        //     softmax → uniform weights, output → mean of V (also
+        //     zeros), which is wrong but at least non-crashing; the
+        //     real K/V come from the no-cache branch's actual matmul
+        //     against enc_hidden when the export computes them, which
+        //     is the case for current onnx-community Moonshine builds.
+        //
+        // The merged decoder pins `n_heads` (dim 1) and `head_dim`
+        // (dim 3) statically — those come straight from
+        // `declared_shape`. Only batch (dim 0) and the time dim (dim 2)
+        // are dynamic, so the kind-aware mapping just resolves those
+        // two from runtime info instead of falling back to 0.
+        let t_enc = enc_hidden.shape().get(1).copied().unwrap_or(0);
         for (idx, past) in past_inputs.iter().enumerate() {
             let arr = if use_cache {
                 kv.values[idx]
@@ -614,7 +679,31 @@ impl MoonshineBackend {
                 let resolved_shape: Vec<usize> = past
                     .declared_shape
                     .iter()
-                    .map(|&d| if d < 0 { 0 } else { d as usize })
+                    .enumerate()
+                    .map(|(dim_idx, &d)| {
+                        if d >= 0 {
+                            d as usize
+                        } else if dim_idx == 0 {
+                            // batch — always 1 (we run single-stream)
+                            1
+                        } else if dim_idx == 2 {
+                            // past_seq_len — 0 for self-attn, T_enc for
+                            // cross-attn (encoder slots get the full
+                            // encoder hidden length so the cached
+                            // branch's MatMul has a broadcastable K).
+                            match past.kind {
+                                PastKvKind::Encoder => t_enc,
+                                PastKvKind::Decoder => 0,
+                            }
+                        } else {
+                            // Any other dynamic dim (unexpected for the
+                            // standard 4D past-KV layout) — fall back to
+                            // zero. If a future export uses a different
+                            // layout we'll surface the resulting ORT
+                            // shape error here rather than at MatMul.
+                            0
+                        }
+                    })
                     .collect();
                 ArrayD::zeros(ndarray::IxDyn(&resolved_shape))
             };
