@@ -322,6 +322,10 @@
       // requests originating from the Tauri WebView (`http://tauri.localhost`)
       // with HTTP 403 even after the model is downloaded. reqwest from Rust
       // doesn't set Origin, so the daemon accepts the call.
+      // Bump the persistent "chats sent" counter that the Usage tab
+      // surfaces. Best-effort; failures are non-fatal so we don't block
+      // the actual generation on stats bookkeeping.
+      void invoke("usage_record_chat_sent").catch(() => {});
       await invoke("ollama_chat_stream", {
         streamId,
         model: activeModel,

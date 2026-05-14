@@ -4,6 +4,7 @@
   import ModelsSection from "./settings/ModelsSection.svelte";
   import StorageSection from "./settings/StorageSection.svelte";
   import HardwareSection from "./settings/HardwareSection.svelte";
+  import UsageSection from "./settings/UsageSection.svelte";
   import UpdatesSection from "./settings/UpdatesSection.svelte";
   import RemoteSection from "./settings/RemoteSection.svelte";
   import { updateUi } from "../update-state.svelte";
@@ -14,6 +15,7 @@
     | "models"
     | "storage"
     | "hardware"
+    | "usage"
     | "remote"
     | "updates"
     // Legacy values that still appear in old `initialTab` deep-links
@@ -46,6 +48,7 @@
     { id: "models", label: "Models" },
     { id: "storage", label: "Storage" },
     { id: "hardware", label: "Hardware" },
+    { id: "usage", label: "Usage" },
     { id: "remote", label: "Remote" },
     { id: "updates", label: "Updates" },
   ];
@@ -92,6 +95,8 @@
         <StorageSection setActive={(t) => (active = t)} />
       {:else if active === "hardware"}
         <HardwareSection setActive={(t) => (active = t)} />
+      {:else if active === "usage"}
+        <UsageSection />
       {:else if active === "remote"}
         <RemoteSection />
       {:else if active === "updates"}

@@ -512,6 +512,10 @@ pub fn start(
     let sink: Arc<dyn FrameSink> = Arc::new(window);
     thread::spawn(move || {
         let event = format!("myownllm://transcribe-stream/{stream_id_for_thread}");
+        // Wall-clock start so the Usage tab can report lifetime
+        // transcription seconds. Includes paused intervals — pausing
+        // is rare and the count is only ever shown as a friendly total.
+        let session_start = std::time::Instant::now();
         let res = run_session(
             &event,
             &stream_id_for_thread,
@@ -523,6 +527,7 @@ pub fn start(
             paused_for_thread,
             &sink,
         );
+        crate::usage::record_transcribe_seconds(session_start.elapsed().as_secs());
         sessions().remove(&stream_id_for_thread);
         let final_frame = match res {
             Ok(()) => TranscribeFrame {

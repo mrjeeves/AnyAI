@@ -679,6 +679,7 @@ pub async fn pull_model(
     match &result {
         Ok(PullModelOutcome::Completed) => {
             eprintln!("[models] pull_model done: name='{name}' completed");
+            crate::usage::record_model_pulled();
         }
         Ok(PullModelOutcome::Cancelled) => {
             eprintln!("[models] pull_model done: name='{name}' cancelled");
