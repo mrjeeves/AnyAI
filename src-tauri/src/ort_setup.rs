@@ -187,11 +187,18 @@ fn run_init() -> (OrtStatus, String) {
 }
 
 /// Where to look for `libonnxruntime.{dylib,so,dll}`, in priority order.
-fn candidate_paths() -> Vec<PathBuf> {
+/// `env_override` is the `ORT_DYLIB_PATH` env var the public wrapper reads;
+/// passing it in (rather than reading the env directly) keeps the unit
+/// tests below independent of process-global state — `cargo test` runs
+/// tests in parallel, and env-var poking from one test races with another
+/// reading the env from a different thread. (Symptom: intermittent
+/// `candidate_paths_includes_env_override` failures on Windows CI where
+/// thread scheduling exposes the race that Linux/macOS happen to avoid.)
+fn candidate_paths_with(env_override: Option<&str>) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
 
     // 1. Explicit override.
-    if let Ok(p) = std::env::var("ORT_DYLIB_PATH") {
+    if let Some(p) = env_override {
         if !p.is_empty() {
             out.push(PathBuf::from(p));
         }
@@ -227,6 +234,13 @@ fn candidate_paths() -> Vec<PathBuf> {
     }
 
     out
+}
+
+/// Public wrapper used at runtime: read the env var off the process and
+/// hand it to the testable inner function.
+fn candidate_paths() -> Vec<PathBuf> {
+    let env = std::env::var("ORT_DYLIB_PATH").ok();
+    candidate_paths_with(env.as_deref())
 }
 
 #[cfg(target_os = "macos")]
@@ -301,9 +315,11 @@ mod tests {
 
     #[test]
     fn candidate_paths_includes_env_override() {
-        std::env::set_var("ORT_DYLIB_PATH", "/tmp/fake_libonnxruntime.dylib");
-        let paths = candidate_paths();
-        std::env::remove_var("ORT_DYLIB_PATH");
+        // Hand the override in directly so the test doesn't poke
+        // process-global env state (parallel `cargo test` would race
+        // with `candidate_paths_lists_platform_system_dirs` below
+        // otherwise — observed as intermittent Windows CI failures).
+        let paths = candidate_paths_with(Some("/tmp/fake_libonnxruntime.dylib"));
         assert!(paths
             .iter()
             .any(|p| p.to_string_lossy().contains("fake_libonnxruntime")));
@@ -311,8 +327,7 @@ mod tests {
 
     #[test]
     fn candidate_paths_lists_platform_system_dirs() {
-        std::env::remove_var("ORT_DYLIB_PATH");
-        let paths = candidate_paths();
+        let paths = candidate_paths_with(None);
         assert!(!paths.is_empty(), "expected at least one candidate path");
         #[cfg(target_os = "macos")]
         assert!(paths
@@ -323,6 +338,10 @@ mod tests {
         assert!(paths
             .iter()
             .any(|p| p.to_string_lossy().contains("/usr/lib")));
+        #[cfg(target_os = "windows")]
+        assert!(paths
+            .iter()
+            .any(|p| p.to_string_lossy().contains("onnxruntime")));
     }
 
     #[test]
