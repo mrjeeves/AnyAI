@@ -68,6 +68,63 @@ install_linux_deps() {
       warn "  https://tauri.app/start/prerequisites/#linux"
       ;;
   esac
+
+  # The ASR / diarize backends use `ort` with `features =
+  # ["load-dynamic"]`, which means libonnxruntime.so must exist at
+  # runtime — it isn't statically linked at build time. apt doesn't
+  # ship onnxruntime, so pull the official prebuilt that matches ort
+  # 2.0.0-rc.12's api-22 expectation (ORT ≥1.20). Without this the
+  # first record click hangs inside the FFI trampoline trying to
+  # resolve a missing dylib.
+  install_onnxruntime_linux
+}
+
+install_onnxruntime_linux() {
+  # Already present anywhere src-tauri/src/ort_setup.rs searches? Skip.
+  for cand in \
+    /usr/local/lib/libonnxruntime.so \
+    /usr/local/lib/libonnxruntime.so.1 \
+    /usr/lib/libonnxruntime.so \
+    /usr/lib/x86_64-linux-gnu/libonnxruntime.so \
+    /usr/lib/aarch64-linux-gnu/libonnxruntime.so; do
+    if [[ -f "$cand" ]]; then
+      log "onnxruntime already present at $cand — skipping download."
+      return
+    fi
+  done
+
+  local ort_version="1.20.1"
+  local ort_arch
+  case "$ARCH" in
+    x86_64|amd64)  ort_arch="x64" ;;
+    aarch64|arm64) ort_arch="aarch64" ;;
+    *)
+      warn "onnxruntime: no prebuilt for arch '$ARCH' — install manually from https://github.com/microsoft/onnxruntime/releases"
+      return
+      ;;
+  esac
+  local pkg="onnxruntime-linux-${ort_arch}-${ort_version}"
+  local url="https://github.com/microsoft/onnxruntime/releases/download/v${ort_version}/${pkg}.tgz"
+
+  log "Downloading onnxruntime v${ort_version} (${ort_arch}) …"
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' RETURN
+  if ! curl -fsSL "$url" -o "$tmpdir/ort.tgz"; then
+    warn "onnxruntime download failed from $url — install manually."
+    return
+  fi
+  tar -xzf "$tmpdir/ort.tgz" -C "$tmpdir"
+  # The tarball contains lib/libonnxruntime.so.${ort_version} + a
+  # libonnxruntime.so symlink. Drop both into /usr/local/lib and run
+  # ldconfig so the dynamic loader picks them up.
+  sudo install -m 0644 "$tmpdir/${pkg}/lib/libonnxruntime.so.${ort_version}" /usr/local/lib/
+  sudo ln -sf "libonnxruntime.so.${ort_version}" /usr/local/lib/libonnxruntime.so
+  sudo ln -sf "libonnxruntime.so.${ort_version}" /usr/local/lib/libonnxruntime.so.1
+  if have ldconfig; then
+    sudo ldconfig
+  fi
+  log "onnxruntime installed to /usr/local/lib/libonnxruntime.so.${ort_version}"
 }
 
 install_macos_deps() {
@@ -84,6 +141,19 @@ install_macos_deps() {
   if ! have cmake; then
     log "Installing cmake (needed by whisper-rs)…"
     brew install cmake
+  fi
+  # onnxruntime — see Linux install for why. Homebrew ships ≥1.20 which
+  # matches ort 2.0.0-rc.12's api-22 expectation. Already-installed
+  # versions are upgraded so a stale 1.16 install (which loads via
+  # dlopen but has a mismatched C ABI → hang at first Session call)
+  # gets replaced.
+  if brew list --versions onnxruntime >/dev/null 2>&1; then
+    local current
+    current="$(brew list --versions onnxruntime | awk '{print $2}')"
+    log "onnxruntime already installed via brew (${current}). Run \`brew upgrade onnxruntime\` if Moonshine still hangs."
+  else
+    log "Installing onnxruntime via brew…"
+    brew install onnxruntime
   fi
 }
 

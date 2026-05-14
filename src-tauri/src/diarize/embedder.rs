@@ -16,6 +16,7 @@ use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Tensor;
 
 use crate::models::{model_dir, ModelKind};
+use crate::ort_setup;
 
 /// Minimum slice length we'll embed. Below this, embedders' output
 /// is dominated by their input-normalization pad and clusters poorly.
@@ -55,15 +56,24 @@ impl Embedder {
         if !path.exists() {
             return Err(anyhow!("embedder ONNX missing: {}", path.display()));
         }
-        let session = Session::builder()
-            .map_err(|e| anyhow!("ort builder: {e}"))?
-            .with_optimization_level(GraphOptimizationLevel::Level1)
-            .map_err(|e| anyhow!("ort opt level: {e}"))?
-            .with_intra_threads(intra_threads())
-            .map_err(|e| anyhow!("ort threads: {e}"))?
-            .commit_from_file(&path)
-            .map_err(|e| anyhow!("loading {}: {e}", path.display()))
-            .with_context(|| format!("warm_up embedder {}", self.model_name))?;
+        // `Level3` restored — see segmenter.rs for the rationale (the
+        // diarize Level1 drop in PR #115 was a workaround for the
+        // Moonshine load-hang investigation; the real fix lives in
+        // `ort_setup` so this can go back to the crate default).
+        let path_owned = path.clone();
+        let model_name_owned = self.model_name.clone();
+        let threads = intra_threads();
+        let session = ort_setup::load_session("speaker embedder", 90, move || {
+            Session::builder()
+                .map_err(|e| anyhow!("ort builder: {e}"))?
+                .with_optimization_level(GraphOptimizationLevel::Level3)
+                .map_err(|e| anyhow!("ort opt level: {e}"))?
+                .with_intra_threads(threads)
+                .map_err(|e| anyhow!("ort threads: {e}"))?
+                .commit_from_file(&path_owned)
+                .map_err(|e| anyhow!("loading {}: {e}", path_owned.display()))
+                .with_context(|| format!("warm_up embedder {model_name_owned}"))
+        })?;
 
         // Sniff I/O names. wespeaker / 3D-Speaker exports vary; we
         // accept any input whose name looks like audio / feats /
