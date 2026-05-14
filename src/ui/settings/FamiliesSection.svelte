@@ -234,8 +234,11 @@
   function smartnessLabel(index: number, total: number): {
     label: string;
     rank: 1 | 2 | 3 | 4 | 5;
-  } {
-    if (total <= 1) return { label: "Only option", rank: 3 };
+  } | null {
+    // Single-tier ladders (e.g. the shared transcribe block) don't need a
+    // rank badge — there's nothing to compare against, so calling it
+    // "Only option" just adds noise. Consumers skip the badge on null.
+    if (total <= 1) return null;
     if (index === 0) return { label: "Most capable", rank: 5 };
     if (index === total - 1) return { label: "Lightest", rank: 1 };
     const ratio = index / (total - 1);
@@ -993,9 +996,11 @@
                   >
                     <div class="tier-main">
                       <div class="tier-row1">
-                        <span class="tier-rank rank-{smart.rank}" title="Relative capability inside the {picked.family.label} family. Top of the ladder = most capable; bottom = lightest and fastest.">
-                          {smart.label}
-                        </span>
+                        {#if smart}
+                          <span class="tier-rank rank-{smart.rank}" title="Relative capability inside the {picked.family.label} family. Top of the ladder = most capable; bottom = lightest and fastest.">
+                            {smart.label}
+                          </span>
+                        {/if}
                         {#if switched}
                           <span class="tier-badge switched-badge" title="You picked this option for this family.">✓ Switched to</span>
                         {:else if recommended && current && sz.installed}
