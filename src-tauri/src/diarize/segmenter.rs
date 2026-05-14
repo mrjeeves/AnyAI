@@ -22,9 +22,9 @@
 //! Reference: <https://huggingface.co/pyannote/segmentation-3.0>.
 
 use anyhow::{anyhow, Context, Result};
-use ndarray::Array2;
+use ndarray::{ArrayD, IxDyn};
 use ort::session::{builder::GraphOptimizationLevel, Session};
-use ort::value::Tensor;
+use ort::value::{Tensor, ValueType};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::models::{model_dir, ModelKind};
@@ -70,6 +70,16 @@ pub struct Segmenter {
     /// Sniffed at warm-up.
     input_name: String,
     output_name: String,
+    /// Sniffed at warm-up. Pyannote-seg-3.0 ONNX exports vary in input
+    /// rank: the sherpa-onnx canonical export uses rank-2
+    /// `[batch, samples]` (`waveform` → `logits`), while a direct
+    /// `torch.onnx.export` of the upstream PyTorch model emits rank-3
+    /// `[batch, channels=1, samples]` (`x` → `y`). The mirror at
+    /// `csukuangfj/sherpa-onnx-pyannote-segmentation-3-0` is the
+    /// latter — feeding it rank-2 fails with `Invalid rank for input
+    /// x: Got 2 Expected 3`. We pick the right shape at run time so
+    /// either export Just Works.
+    input_rank: usize,
 }
 
 impl Segmenter {
@@ -79,6 +89,7 @@ impl Segmenter {
             session: None,
             input_name: "waveform".to_string(),
             output_name: "logits".to_string(),
+            input_rank: 2,
         })
     }
 
@@ -140,9 +151,30 @@ impl Segmenter {
         self.output_name = output_match
             .or_else(|| session.outputs().first().map(|o| o.name().to_string()))
             .unwrap_or_else(|| "logits".to_string());
+
+        // Sniff input rank off the chosen input so we know whether to
+        // build a rank-2 or rank-3 waveform tensor in `segment`. Dynamic
+        // dims come through as `-1`; we only care about the rank.
+        self.input_rank = session
+            .inputs()
+            .iter()
+            .find(|i| i.name() == self.input_name)
+            .and_then(|i| match i.dtype() {
+                ValueType::Tensor { shape, .. } => Some(shape.len()),
+                _ => None,
+            })
+            .unwrap_or(2);
+        if !(2..=3).contains(&self.input_rank) {
+            return Err(anyhow!(
+                "segmenter input '{}' has unexpected rank {} (want 2 or 3)",
+                self.input_name,
+                self.input_rank,
+            ));
+        }
+
         eprintln!(
-            "[diarize] segmenter {}: in={} out={}",
-            self.model_name, self.input_name, self.output_name,
+            "[diarize] segmenter {}: in={}({}D) out={}",
+            self.model_name, self.input_name, self.input_rank, self.output_name,
         );
         self.session = Some(session);
         Ok(())
@@ -170,7 +202,15 @@ impl Segmenter {
             .as_mut()
             .ok_or_else(|| anyhow!("segmenter not warmed up"))?;
 
-        let input: Array2<f32> = Array2::from_shape_vec((1, window.len()), window.to_vec())
+        // Sherpa-onnx export: `[1, N]`. Direct PyTorch export of
+        // pyannote-seg-3.0: `[1, 1, N]` (mono channel axis). Pick by
+        // sniffed rank — neither shape is wrong, just dependent on
+        // which export was downloaded.
+        let input_shape: Vec<usize> = match self.input_rank {
+            3 => vec![1, 1, window.len()],
+            _ => vec![1, window.len()],
+        };
+        let input = ArrayD::<f32>::from_shape_vec(IxDyn(&input_shape), window.to_vec())
             .map_err(|e| anyhow!("shape input: {e}"))?;
         let tensor = Tensor::from_array(input).map_err(|e| anyhow!("ort tensor: {e}"))?;
         let outputs = session
