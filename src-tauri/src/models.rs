@@ -23,9 +23,32 @@
 use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 use tauri::{Emitter, WebviewWindow};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::{Mutex, Notify};
+
+static PULL_CANCELS: OnceLock<Mutex<HashMap<String, Arc<Notify>>>> = OnceLock::new();
+
+fn pull_cancels() -> &'static Mutex<HashMap<String, Arc<Notify>>> {
+    PULL_CANCELS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cancel_key(kind: ModelKind, name: &str) -> String {
+    format!("{}/{}", kind.as_str(), name)
+}
+
+/// Signal an in-flight `pull_model` to abort. No-op if no pull is registered.
+/// The in-flight `.partial` file gets cleaned up when the streaming loop sees
+/// the cancel and returns; subsequent retries start fresh.
+pub async fn cancel_pull(kind: ModelKind, name: &str) {
+    let key = cancel_key(kind, name);
+    if let Some(notify) = pull_cancels().lock().await.get(&key).cloned() {
+        notify.notify_waiters();
+    }
+}
 
 /// Where this binary stores all downloaded model artifacts. Stable on
 /// every platform via `dirs::home_dir()`, matching the existing
@@ -464,6 +487,11 @@ pub struct ModelPullProgress {
     pub artifact_count: usize,
     pub done: bool,
     pub error: Option<String>,
+    /// True on the final frame if the caller invoked `cancel_pull` mid-stream.
+    /// Lets the UI distinguish "completed" from "stopped" without inspecting
+    /// the status string.
+    #[serde(default)]
+    pub cancelled: bool,
 }
 
 fn emit_progress(window: &WebviewWindow, spec: &ModelSpec, frame: ModelPullProgress) {
@@ -471,17 +499,81 @@ fn emit_progress(window: &WebviewWindow, spec: &ModelSpec, frame: ModelPullProgr
     let _ = window.emit(&event, frame);
 }
 
+/// Outcome of a `pull_model` call.
+pub enum PullModelOutcome {
+    Completed,
+    Cancelled,
+}
+
 /// Pull every artifact of a logical model. Idempotent: each artifact
 /// streams to `{filename}.partial` then atomically renames into place.
 /// If a file already exists at acceptable size, the pull is skipped.
 /// Returns the model's on-disk directory once every artifact is in
-/// place.
-pub async fn pull_model(name: String, kind: ModelKind, window: WebviewWindow) -> Result<PathBuf> {
+/// place, or `Cancelled` if `cancel_pull(kind, name)` fired mid-stream.
+pub async fn pull_model(
+    name: String,
+    kind: ModelKind,
+    window: WebviewWindow,
+) -> Result<PullModelOutcome> {
     let spec =
         find(&name, kind).ok_or_else(|| anyhow!("unknown {} model: {}", kind.as_str(), name))?;
     let dir = model_dir(kind, &name)?;
     std::fs::create_dir_all(&dir)?;
 
+    // Register the cancel notifier BEFORE the network call so a cancel
+    // racing with an early-arriving first byte still wins. Same pattern
+    // as `ollama::pull_with`.
+    let key = cancel_key(kind, &name);
+    let notify = Arc::new(Notify::new());
+    pull_cancels()
+        .lock()
+        .await
+        .insert(key.clone(), notify.clone());
+
+    let result = pull_model_inner(spec, &dir, &window, notify.clone()).await;
+    pull_cancels().lock().await.remove(&key);
+
+    // Final frame so the UI can leave its "pulling" state even when the
+    // last byte-counter emit was throttled out.
+    let final_idx = spec.artifacts.len().saturating_sub(1);
+    match &result {
+        Ok(PullModelOutcome::Cancelled) => {
+            // Drop any partial .partial files so a retry starts clean.
+            // The streaming loop itself also cleans up the tmp it was
+            // writing to, but earlier artifacts in a multi-file pull
+            // could have left stale partials behind.
+            for artifact in spec.artifacts {
+                let tmp = dir.join(format!("{}.partial", artifact.filename));
+                let _ = std::fs::remove_file(&tmp);
+            }
+            emit_progress(
+                &window,
+                spec,
+                ModelPullProgress {
+                    name: spec.name.to_string(),
+                    kind: spec.kind.as_str().to_string(),
+                    bytes: 0,
+                    total: 0,
+                    artifact_index: final_idx,
+                    artifact_count: spec.artifacts.len(),
+                    done: true,
+                    error: None,
+                    cancelled: true,
+                },
+            );
+        }
+        Ok(PullModelOutcome::Completed) => {}
+        Err(_) => {}
+    }
+    result
+}
+
+async fn pull_model_inner(
+    spec: &ModelSpec,
+    dir: &std::path::Path,
+    window: &WebviewWindow,
+    notify: Arc<Notify>,
+) -> Result<PullModelOutcome> {
     // Build a fresh client per pull so the User-Agent header is set
     // (HF LFS occasionally serves HTML to UA-less requests with a 200
     // status; the size check below catches it but the UA dodges most
@@ -503,7 +595,7 @@ pub async fn pull_model(name: String, kind: ModelKind, window: WebviewWindow) ->
         if let Ok(meta) = std::fs::metadata(&final_path) {
             if meta.len() >= artifact.min_bytes {
                 emit_progress(
-                    &window,
+                    window,
                     spec,
                     ModelPullProgress {
                         name: spec.name.to_string(),
@@ -514,6 +606,7 @@ pub async fn pull_model(name: String, kind: ModelKind, window: WebviewWindow) ->
                         artifact_count,
                         done: idx + 1 == artifact_count,
                         error: None,
+                        cancelled: false,
                     },
                 );
                 continue;
@@ -525,11 +618,16 @@ pub async fn pull_model(name: String, kind: ModelKind, window: WebviewWindow) ->
         let tmp = dir.join(format!("{}.partial", artifact.filename));
         let _ = std::fs::remove_file(&tmp);
 
-        let resp = client.get(artifact.url).send().await?;
+        let send_fut = client.get(artifact.url).send();
+        let resp = tokio::select! {
+            biased;
+            _ = notify.notified() => return Ok(PullModelOutcome::Cancelled),
+            r = send_fut => r?,
+        };
         if !resp.status().is_success() {
             let err = format!("HTTP {} fetching {}", resp.status(), artifact.url);
             emit_progress(
-                &window,
+                window,
                 spec,
                 ModelPullProgress {
                     name: spec.name.to_string(),
@@ -540,6 +638,7 @@ pub async fn pull_model(name: String, kind: ModelKind, window: WebviewWindow) ->
                     artifact_count,
                     done: true,
                     error: Some(err.clone()),
+                    cancelled: false,
                 },
             );
             return Err(anyhow!(err));
@@ -550,8 +649,19 @@ pub async fn pull_model(name: String, kind: ModelKind, window: WebviewWindow) ->
         let mut stream = resp.bytes_stream();
         let mut downloaded: u64 = 0;
         let mut last_emit_bytes: u64 = 0;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
+        loop {
+            let chunk = tokio::select! {
+                biased;
+                _ = notify.notified() => {
+                    drop(file);
+                    let _ = tokio::fs::remove_file(&tmp).await;
+                    return Ok(PullModelOutcome::Cancelled);
+                },
+                next = stream.next() => match next {
+                    Some(c) => c?,
+                    None => break,
+                },
+            };
             file.write_all(&chunk).await?;
             downloaded += chunk.len() as u64;
             // Throttle progress emits to keep IPC traffic sane: at
@@ -559,7 +669,7 @@ pub async fn pull_model(name: String, kind: ModelKind, window: WebviewWindow) ->
             if downloaded - last_emit_bytes > 1_048_576 {
                 last_emit_bytes = downloaded;
                 emit_progress(
-                    &window,
+                    window,
                     spec,
                     ModelPullProgress {
                         name: spec.name.to_string(),
@@ -570,6 +680,7 @@ pub async fn pull_model(name: String, kind: ModelKind, window: WebviewWindow) ->
                         artifact_count,
                         done: false,
                         error: None,
+                        cancelled: false,
                     },
                 );
             }
@@ -585,7 +696,7 @@ pub async fn pull_model(name: String, kind: ModelKind, window: WebviewWindow) ->
                 spec.name, artifact.filename, idx, artifact.min_bytes,
             );
             emit_progress(
-                &window,
+                window,
                 spec,
                 ModelPullProgress {
                     name: spec.name.to_string(),
@@ -596,6 +707,7 @@ pub async fn pull_model(name: String, kind: ModelKind, window: WebviewWindow) ->
                     artifact_count,
                     done: true,
                     error: Some(err.clone()),
+                    cancelled: false,
                 },
             );
             return Err(anyhow!(err));
@@ -603,7 +715,7 @@ pub async fn pull_model(name: String, kind: ModelKind, window: WebviewWindow) ->
 
         tokio::fs::rename(&tmp, &final_path).await?;
         emit_progress(
-            &window,
+            window,
             spec,
             ModelPullProgress {
                 name: spec.name.to_string(),
@@ -614,11 +726,12 @@ pub async fn pull_model(name: String, kind: ModelKind, window: WebviewWindow) ->
                 artifact_count,
                 done: idx + 1 == artifact_count,
                 error: None,
+                cancelled: false,
             },
         );
     }
 
-    Ok(dir)
+    Ok(PullModelOutcome::Completed)
 }
 
 /// Pull every component of a composite diarize name (e.g.
@@ -632,7 +745,12 @@ pub async fn pull_composite(
 ) -> Result<()> {
     let specs = find_composite(&composite, kind)?;
     for spec in specs {
-        pull_model(spec.name.to_string(), kind, window.clone()).await?;
+        match pull_model(spec.name.to_string(), kind, window.clone()).await? {
+            PullModelOutcome::Completed => {}
+            // One component cancelled — stop the chain so the user isn't
+            // left waiting on the rest.
+            PullModelOutcome::Cancelled => return Ok(()),
+        }
     }
     Ok(())
 }

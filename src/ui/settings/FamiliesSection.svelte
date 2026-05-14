@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getActiveManifest, getActiveProvider, setActiveFamily } from "../../providers";
   import { resolveModel, modeFor, defaultRuntimeFor, tierRuntime } from "../../manifest";
   import { loadConfig, saveConfig, invalidateConfigCache } from "../../config";
@@ -78,13 +79,50 @@
   // svelte-ignore state_referenced_locally
   let detailFamily = $state<string | null>(initialDetailFamily ?? null);
 
-  /** Tag → in-flight download. Per-tag rather than per-tier so the same
-   *  tag appearing in multiple modes / tier ladders shows a spinner
-   *  wherever the user can see it. */
-  let downloading = $state<Set<string>>(new Set());
+  /** Per-tag download state. Persists for the full life of the
+   *  download so the row can render an inline progress bar plus a
+   *  Cancel button that swaps to Delete on completion. Per-tag rather
+   *  than per-tier so the same tag appearing in multiple modes / tier
+   *  ladders shows a unified state wherever the user can see it. */
+  interface DownloadState {
+    /** Set when the user clicked Cancel; the backend's final frame
+     *  will clear the whole entry. Used to disable the Cancel button
+     *  so the user isn't tempted to click it twice. */
+    cancelling: boolean;
+    /** Set when this pull was kicked off by a Switch click. Drives
+     *  the override-revert behavior on cancel. */
+    switchInitiated: boolean;
+    /** "ollama" routes through ollama_pull / ollama_pull_cancel;
+     *  "asr" / "moonshine" / "parakeet" through asr_model_pull /
+     *  asr_model_pull_cancel. */
+    runtime: ModelRuntime;
+    /** Current human-readable phase ("Installing Ollama…",
+     *  "Fetching manifest", "Downloading", …). */
+    status: string;
+    /** 0.0–1.0 once the backend reports bytes; null while the bar
+     *  should render as indeterminate (waiting on manifest / verify
+     *  steps). */
+    percent: number | null;
+    bytesDone: number;
+    bytesTotal: number;
+    /** Throttled-sample bytes/s estimate; null until two samples
+     *  have arrived. */
+    rate: number | null;
+    /** When the rate sampler last refreshed (ms since epoch). */
+    lastSampleAt: number;
+    lastSampleBytes: number;
+    /** For multi-artifact (ASR) pulls. 0/0 when single-file. */
+    artifactIndex: number;
+    artifactCount: number;
+  }
+  let downloads = $state<Record<string, DownloadState>>({});
   /** Tag → last error from a failed pull. Cleared when a retry starts. */
   let downloadError = $state<Record<string, string>>({});
-  /** Tag → in-flight delete. Mirrors `downloading` so the row can show a
+  /** Tag → unlisten fn for the per-tag progress channel. Kept here so a
+   *  cancel/cleanup can stop listening even if the awaited pull invoke
+   *  is still resolving. */
+  let progressUnlisten: Record<string, UnlistenFn> = {};
+  /** Tag → in-flight delete. Mirrors `downloads` so the row can show a
    *  spinner / disabled state while the Tauri delete call is running. */
   let deleting = $state<Set<string>>(new Set());
   /** Tag → last error from a failed delete. Cleared when a retry starts. */
@@ -122,6 +160,12 @@
   } | null>(null);
 
   onMount(load);
+  onDestroy(() => {
+    for (const fn of Object.values(progressUnlisten)) {
+      try { fn(); } catch {}
+    }
+    progressUnlisten = {};
+  });
 
   async function load() {
     loading = true;
@@ -295,31 +339,239 @@
     return tierRuntime(tier, modeSpec, modeName);
   }
 
-  /** Pull a single tier's model (no override mutation — just the
-   *  download). Routes by runtime so Ollama tags go through
-   *  `ollama_pull` and local-runtime ASR models go through
+  /** Mirrors PullEvent in src-tauri/src/ollama.rs. */
+  interface OllamaPullEvent {
+    status: string;
+    total?: number;
+    completed?: number;
+    percent?: number;
+    done?: boolean;
+    cancelled?: boolean;
+  }
+  /** Mirrors ModelPullProgress in src-tauri/src/models.rs. */
+  interface ModelPullEvent {
+    name: string;
+    kind: string;
+    bytes: number;
+    total: number;
+    artifact_index: number;
+    artifact_count: number;
+    done: boolean;
+    error: string | null;
+    cancelled?: boolean;
+  }
+
+  function formatOllamaStatus(s: string): string {
+    if (!s) return "Downloading";
+    if (/^pulling [0-9a-f]{6,}/i.test(s)) return "Downloading";
+    if (/^pulling manifest$/i.test(s)) return "Fetching manifest";
+    if (/^verifying/i.test(s)) return "Verifying";
+    if (/^writing manifest$/i.test(s)) return "Finalizing";
+    if (/^removing/i.test(s)) return "Cleaning up";
+    if (/^success$/i.test(s)) return "Done";
+    if (/^cancelled$/i.test(s)) return "Cancelled";
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+
+  /** Throttled bytes/s sampler shared by both ollama + asr applyEvent
+   *  helpers. Mutates the passed state in place. */
+  function sampleRate(d: DownloadState, bytes: number, now: number): void {
+    if (d.lastSampleAt && bytes >= d.lastSampleBytes) {
+      const dt = (now - d.lastSampleAt) / 1000;
+      if (dt >= 0.5) {
+        d.rate = (bytes - d.lastSampleBytes) / dt;
+        d.lastSampleAt = now;
+        d.lastSampleBytes = bytes;
+      }
+    } else {
+      d.lastSampleAt = now;
+      d.lastSampleBytes = bytes;
+    }
+  }
+
+  function applyOllamaEvent(model: string, evt: OllamaPullEvent): void {
+    const d = downloads[model];
+    if (!d) return;
+    const status = formatOllamaStatus(evt.status || "");
+    if (evt.total && evt.total > 0) {
+      const completed = evt.completed ?? 0;
+      const p = evt.percent ?? completed / evt.total;
+      sampleRate(d, completed, Date.now());
+      d.status = status;
+      d.percent = Math.max(0, Math.min(1, p));
+      d.bytesDone = completed;
+      d.bytesTotal = evt.total;
+    } else {
+      d.status = status;
+      d.percent = null;
+      d.bytesDone = 0;
+      d.bytesTotal = 0;
+      d.rate = null;
+    }
+    // Trigger reactivity — $state proxies the leaf assignments above
+    // already but reassigning the wrapper makes the {#each} re-render.
+    downloads = { ...downloads, [model]: d };
+  }
+
+  function applyAsrEvent(model: string, evt: ModelPullEvent): void {
+    const d = downloads[model];
+    if (!d) return;
+    if (evt.artifact_index !== d.artifactIndex) {
+      d.lastSampleAt = 0;
+      d.lastSampleBytes = 0;
+    }
+    d.artifactIndex = evt.artifact_index;
+    d.artifactCount = evt.artifact_count;
+    sampleRate(d, evt.bytes, Date.now());
+    const suffix =
+      evt.artifact_count > 1
+        ? ` (file ${evt.artifact_index + 1} of ${evt.artifact_count})`
+        : "";
+    d.status = evt.cancelled
+      ? "Cancelled"
+      : evt.error
+        ? `Failed: ${evt.error}`
+        : evt.done
+          ? "Done"
+          : `Downloading${suffix}`;
+    if (evt.total > 0) {
+      d.percent = evt.bytes / evt.total;
+      d.bytesDone = evt.bytes;
+      d.bytesTotal = evt.total;
+    } else {
+      d.percent = null;
+      d.bytesDone = 0;
+      d.bytesTotal = 0;
+    }
+    downloads = { ...downloads, [model]: d };
+  }
+
+  function clearDownload(model: string): void {
+    const fn = progressUnlisten[model];
+    if (fn) {
+      try { fn(); } catch {}
+      delete progressUnlisten[model];
+    }
+    const next = { ...downloads };
+    delete next[model];
+    downloads = next;
+  }
+
+  /** Pull a single tier's model. Routes by runtime so Ollama tags go
+   *  through `ollama_pull` and local-runtime ASR models go through
    *  `asr_model_pull`. Diarize / sortformer don't have a per-family
-   *  pull path yet; the button is hidden for those (see template). */
-  async function downloadTier(runtime: ModelRuntime, model: string) {
-    if (downloading.has(model)) return;
+   *  pull path yet; the button is hidden for those (see template).
+   *
+   *  `switchInitiated` flags pulls kicked off by a Switch click — if
+   *  the user later cancels, we revert the family override so the
+   *  resolver doesn't keep pointing at a tag that isn't on disk. */
+  async function downloadTier(
+    runtime: ModelRuntime,
+    model: string,
+    options: {
+      switchInitiated?: boolean;
+      familyName?: string;
+      mode?: Mode;
+    } = {},
+  ): Promise<void> {
+    if (downloads[model]) return;
     downloadError = { ...downloadError, [model]: "" };
-    downloading = new Set([...downloading, model]);
+    const initial: DownloadState = {
+      cancelling: false,
+      switchInitiated: !!options.switchInitiated,
+      runtime,
+      status:
+        runtime === "ollama" ? "Starting…" : "Connecting to HuggingFace…",
+      percent: null,
+      bytesDone: 0,
+      bytesTotal: 0,
+      rate: null,
+      lastSampleAt: 0,
+      lastSampleBytes: 0,
+      artifactIndex: 0,
+      artifactCount: 0,
+    };
+    downloads = { ...downloads, [model]: initial };
+
     try {
       if (runtime === "ollama") {
+        // FamiliesSection used to call ollama_pull directly. If ollama
+        // wasn't installed, ollama_pull errored out before pulling
+        // anything — the row briefly showed a spinner and then went
+        // back to Download, which read as "the button just refreshes
+        // the view." Mirror DownloadOverlay's pre-install flow so the
+        // very first download on a clean machine still works.
+        const installed = await invoke<boolean>("ollama_installed");
+        if (!installed) {
+          downloads[model].status = "Installing Ollama…";
+          downloads = { ...downloads, [model]: downloads[model] };
+          await invoke("ollama_install");
+        }
+        downloads[model].status = "Connecting to Ollama…";
+        downloads = { ...downloads, [model]: downloads[model] };
+        const chan = `myownllm://ollama-pull/${model}`;
+        progressUnlisten[model] = await listen<OllamaPullEvent>(chan, (e) => {
+          applyOllamaEvent(model, e.payload);
+        });
         await invoke("ollama_pull", { model });
+        await invoke("ollama_ensure_running").catch(() => {});
       } else if (runtime === "moonshine" || runtime === "parakeet") {
+        const chan = `myownllm://model-pull/asr/${model}`;
+        progressUnlisten[model] = await listen<ModelPullEvent>(chan, (e) => {
+          applyAsrEvent(model, e.payload);
+        });
         await invoke("asr_model_pull", { name: model });
       } else {
         throw new Error(`Downloads for runtime "${runtime}" are managed elsewhere.`);
       }
+      const wasCancelled = downloads[model]?.cancelling ?? false;
+      clearDownload(model);
+      if (wasCancelled && options.switchInitiated && options.familyName && options.mode) {
+        // User cancelled a switch-initiated pull; back out of the
+        // override so the family stops pointing at an uninstalled tag.
+        await writeFamilyOverride(options.familyName, options.mode, null);
+      }
       await load();
     } catch (e) {
       downloadError = { ...downloadError, [model]: String(e) };
-    } finally {
-      const next = new Set(downloading);
-      next.delete(model);
-      downloading = next;
+      clearDownload(model);
     }
+  }
+
+  /** Send the cancel signal for an in-flight pull. The backend
+   *  resolves the awaited pull invoke as Ok(()) with a final frame
+   *  that carries `cancelled: true`; downloadTier picks that up,
+   *  clears the entry, and (when switch-initiated) reverts the
+   *  override. */
+  async function cancelDownload(model: string): Promise<void> {
+    const d = downloads[model];
+    if (!d || d.cancelling) return;
+    downloads = {
+      ...downloads,
+      [model]: { ...d, cancelling: true, status: "Cancelling…" },
+    };
+    try {
+      if (d.runtime === "ollama") {
+        await invoke("ollama_pull_cancel", { model });
+      } else {
+        await invoke("asr_model_pull_cancel", { name: model });
+      }
+    } catch {
+      // Best-effort — even if the cancel signal failed, the final
+      // frame from the pull itself will land and clear state.
+    }
+  }
+
+  function formatBytes(n: number): string {
+    if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(2)} GB`;
+    if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+    if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`;
+    return `${n} B`;
+  }
+
+  function formatRate(bps: number | null): string {
+    if (bps == null || bps <= 0) return "";
+    return `${formatBytes(bps)}/s`;
   }
 
   /** Opens the delete-confirm modal for a tier. Callers gate this on
@@ -436,7 +688,9 @@
   /** Persist the resolved override change. If the requested target is
    *  the hardware pick we clear the override instead of writing it —
    *  storing the recommended tag would prevent future hardware
-   *  upgrades from re-picking a different rung. */
+   *  upgrades from re-picking a different rung. When the chosen tier
+   *  isn't on disk, kick off the download in the background so the
+   *  user gets an inline progress bar without an extra click. */
   async function applyTierSwitch(
     familyName: string,
     mode: Mode,
@@ -449,9 +703,28 @@
     const rec = recommendedTagFor(familyName, mode);
     if (toModel === rec) {
       await writeFamilyOverride(familyName, mode, null);
-      return;
+    } else {
+      await writeFamilyOverride(familyName, mode, toModel);
     }
-    await writeFamilyOverride(familyName, mode, toModel);
+    // After the override lands, check whether the now-effective tier
+    // is actually on disk. If not, fire-and-forget a switch-initiated
+    // download so the row shows progress + Cancel inline.
+    if (!manifest) return;
+    const family = manifest.families?.[familyName];
+    if (!family) return;
+    const modeSpec = modeFor(manifest, family, mode);
+    if (!modeSpec) return;
+    const tier = modeSpec.tiers.find((t) => t.model === toModel);
+    if (!tier) return;
+    const rt = runtimeOfTier(modeSpec, mode, tier);
+    if (rt !== "ollama" && rt !== "moonshine" && rt !== "parakeet") return;
+    if (tierInstalled(rt, toModel)) return;
+    if (downloads[toModel]) return;
+    downloadTier(rt, toModel, {
+      switchInitiated: true,
+      familyName,
+      mode,
+    });
   }
 
   async function confirmSwitchPlain() {
@@ -670,7 +943,8 @@
                   {@const tierRt = runtimeOfTier(modeSpec, modeName, tier)}
                   {@const sz = tierSize(modeSpec, tier.model, tier.disk_mb)}
                   {@const downloadable = tierRt === "ollama" || tierRt === "moonshine" || tierRt === "parakeet"}
-                  {@const isDownloading = downloading.has(tier.model)}
+                  {@const dl = downloads[tier.model]}
+                  {@const isDownloading = !!dl}
                   {@const isDeleting = deleting.has(tier.model)}
                   {@const dlErr = downloadError[tier.model]}
                   {@const delErr = deleteError[tier.model]}
@@ -683,6 +957,7 @@
                     class:switched
                     class:recommended={recommended && !current}
                     class:hit-active={current && isActiveCell}
+                    class:tier-downloading={isDownloading}
                   >
                     <div class="tier-main">
                       <div class="tier-row1">
@@ -714,7 +989,24 @@
                         </span>
                         <span class="tier-model-tag" title="Internal model tag — for reference only">{tier.model}</span>
                       </div>
-                      {#if dlErr}
+                      {#if dl}
+                        <div class="tier-progress" aria-label="Download progress for {tier.model}">
+                          <div class="tier-bar" class:indeterminate={dl.percent === null && !dl.cancelling}>
+                            {#if dl.percent !== null}
+                              <div class="tier-bar-fill" style="width: {(dl.percent * 100).toFixed(1)}%"></div>
+                            {/if}
+                          </div>
+                          <div class="tier-progress-meta">
+                            <span class="tier-progress-status">{dl.status || "…"}</span>
+                            {#if dl.bytesTotal > 0}
+                              <span class="tier-progress-bytes">
+                                {formatBytes(dl.bytesDone)} / {formatBytes(dl.bytesTotal)}{#if dl.percent !== null} · {(dl.percent * 100).toFixed(1)}%{/if}{#if dl.rate} · {formatRate(dl.rate)}{/if}
+                              </span>
+                            {/if}
+                          </div>
+                        </div>
+                      {/if}
+                      {#if dlErr && !dl}
                         <div class="tier-err">Download failed: {dlErr}</div>
                       {/if}
                       {#if delErr}
@@ -722,7 +1014,17 @@
                       {/if}
                     </div>
                     <div class="tier-actions">
-                      {#if canDelete}
+                      {#if dl}
+                        <button
+                          class="tier-btn cancel-btn"
+                          disabled={dl.cancelling}
+                          onclick={() => cancelDownload(tier.model)}
+                          title="Stop the download. Partial files are cleaned up automatically."
+                          aria-label="Cancel download of {tier.model}"
+                        >
+                          {dl.cancelling ? "Cancelling…" : "✕ Cancel"}
+                        </button>
+                      {:else if canDelete}
                         <button
                           class="tier-btn delete-btn"
                           disabled={isDeleting}
@@ -742,15 +1044,14 @@
                       {:else if downloadable && !sz.installed}
                         <button
                           class="tier-btn"
-                          disabled={isDownloading}
                           onclick={() => downloadTier(tierRt, tier.model)}
                           title="Pull this model without switching to it."
                           aria-label="Download {tier.model}"
                         >
-                          {#if isDownloading}…{:else}↓ Download{/if}
+                          ↓ Download
                         </button>
                       {/if}
-                      {#if switched}
+                      {#if !dl && switched}
                         <button
                           class="tier-btn unswitch-btn"
                           onclick={() =>
@@ -765,7 +1066,7 @@
                         >
                           ↺ Un-switch
                         </button>
-                      {:else if !current}
+                      {:else if !dl && !current}
                         <button
                           class="tier-btn switch-btn"
                           onclick={() =>
@@ -778,11 +1079,13 @@
                             )}
                           title={recommended
                             ? "Switch back to the hardware-recommended tier."
-                            : "Use this tier instead of the recommended one for this family + mode."}
+                            : sz.installed
+                              ? "Use this tier instead of the recommended one for this family + mode."
+                              : "Switch to this tier and download it now."}
                         >
                           ⇄ Switch to
                         </button>
-                      {:else if current && sz.installed}
+                      {:else if !dl && current && sz.installed}
                         <!-- Steady state: this is the resolver's pick AND
                              on disk. Without this stub the action area
                              went empty after a successful Download —
@@ -1165,6 +1468,58 @@
     border: 1px solid transparent;
     white-space: nowrap;
   }
+  .cancel-btn { color: #d4a64a; border-color: #3a2f1a; }
+  .cancel-btn:hover:not(:disabled) { color: #e6c068; background: #1f1812; border-color: #4a3a1a; }
+
+  .tier.tier-downloading {
+    /* Subtle accent so the eye lands on whichever row is mid-pull,
+     * even when scrolled past the .tier-actions column. */
+    background: linear-gradient(90deg, #16162a 0%, #15151c 60%);
+  }
+
+  .tier-progress {
+    margin-top: .35rem;
+    display: flex;
+    flex-direction: column;
+    gap: .25rem;
+  }
+  .tier-bar {
+    width: 100%;
+    height: 6px;
+    background: #1a1a26;
+    border-radius: 3px;
+    overflow: hidden;
+    position: relative;
+  }
+  .tier-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #6e6ef7, #8a8af7);
+    transition: width 0.25s ease;
+  }
+  .tier-bar.indeterminate::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: -40%;
+    width: 40%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, #6e6ef7, transparent);
+    animation: tier-slide 1.4s infinite ease-in-out;
+  }
+  @keyframes tier-slide {
+    0% { left: -40%; }
+    100% { left: 100%; }
+  }
+  .tier-progress-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .35rem;
+    font-size: .7rem;
+    color: #888;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .tier-progress-status { color: #b0b0c4; }
+  .tier-progress-bytes { color: #6a6a85; }
 
   .detail-footer {
     flex-shrink: 0;
