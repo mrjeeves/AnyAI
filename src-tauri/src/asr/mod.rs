@@ -8,11 +8,11 @@
 //!
 //! Chunk size is **backend-specific**, surfaced via [`AsrCaps`]. The
 //! ingest thread reads `caps.chunk_seconds` at session start and slices
-//! the f32 stream accordingly — Moonshine wants short chunks
-//! (~0.5–1 s) to keep its streaming encoder fed; Parakeet runs against
-//! ~1 s feeds with a small look-back for emission stability. The
-//! on-disk shard format (`{seq:010}.f32`, raw f32 LE) is unchanged
-//! regardless.
+//! the f32 stream accordingly — Moonshine wants phrase-length chunks
+//! (~8 s) so its encoder-decoder sees coherent linguistic context;
+//! Parakeet runs against ~1 s feeds with a small look-back for
+//! emission stability. The on-disk shard format (`{seq:010}.f32`, raw
+//! f32 LE) is unchanged regardless.
 //!
 //! The factory [`make_backend`] dispatches on the `runtime` string the
 //! resolver returns: `"moonshine"`, `"parakeet"`, or future ones.
@@ -48,10 +48,10 @@ pub struct AsrCaps {
     /// fall back to a monolingual model.
     pub multilingual: bool,
     /// `true` if the backend can take overlapping windows of audio and
-    /// maintain decoder state across them. Whisper-style models are
-    /// `false` (each chunk is independent); Moonshine / Parakeet are
-    /// `true`. Currently informational — the worker doesn't take
-    /// advantage of state continuity yet.
+    /// maintain decoder state across them. Whisper-style and current
+    /// Moonshine (no-cache decode path) are `false` (each chunk is
+    /// independent); Parakeet is `true`. Currently informational —
+    /// the worker doesn't take advantage of state continuity yet.
     pub streaming: bool,
     /// How many successful chunks between forced internal-state resets,
     /// to bound long-recording memory growth. 0 disables the recycle.

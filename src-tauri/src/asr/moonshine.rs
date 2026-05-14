@@ -15,10 +15,10 @@
 //! past-KV inputs whose dimensions are model-specific (n_heads /
 //! head_dim) and which I can't introspect at runtime without
 //! actually loading the model. The no-cache path is simpler at the
-//! cost of O(n²) decoder forwards per chunk; with `n ≤ 30` tokens
-//! per 1 s chunk that's tractable (≤ ~50 ms even on Pi 5). Pick
-//! correctness + simplicity here; the cached path is a follow-up
-//! optimisation when there's a measured latency win to chase.
+//! cost of O(n²) decoder forwards per chunk; with `n ≤ ~50` tokens
+//! per 8 s chunk that's still tractable. Pick correctness +
+//! simplicity here; the cached path is a follow-up optimisation
+//! when there's a measured latency win to chase.
 //!
 //! Tokenizer is HuggingFace `tokenizer.json` (BPE). We decode token
 //! IDs → text via the `tokenizers` crate with its pure-Rust
@@ -44,9 +44,11 @@ const START_TOKEN: i64 = 1;
 const EOS_TOKEN: i64 = 2;
 
 /// Cap on decoded tokens per chunk. Defends against pathological
-/// decoder loops on noisy / out-of-distribution audio — a 1 s chunk
-/// realistically produces ≤ 30 tokens.
-const MAX_DECODE_STEPS: usize = 64;
+/// decoder loops on noisy / out-of-distribution audio. At ~6 BPE
+/// tokens per second of speech an 8 s chunk produces ≤ ~50 tokens
+/// in normal use; 256 gives plenty of headroom for dense speech
+/// while still bounding the worst-case forward count.
+const MAX_DECODE_STEPS: usize = 256;
 
 /// One past-KV input the decoder graph declares, plus the model's
 /// static-vs-dynamic dim layout for it. `-1` means "this dim is
@@ -113,12 +115,32 @@ impl MoonshineBackend {
 
 impl AsrBackend for MoonshineBackend {
     fn caps(&self) -> AsrCaps {
+        // Moonshine is an encoder-decoder seq2seq model, not a true
+        // streaming encoder. Each `process_chunk` decodes from
+        // `START_TOKEN` with no context carried from the previous
+        // chunk, so the chunk size sets the unit of linguistic
+        // context the decoder ever sees. The original 1 s cadence was
+        // inherited from the whisper-rs pipeline (PR #57) and not
+        // revisited when the engine was swapped in PR #101: at 1 s
+        // words get severed at chunk boundaries and accuracy
+        // collapses regardless of quantisation (q8 vs fp32).
+        //
+        // 8 s lets the decoder see whole phrases. It also widens the
+        // diarize segmenter's window (it pre-pends up to 5 s of tail
+        // before running pyannote-segmentation-3.0; 5 + 8 = 13 s is
+        // safely above the 10 s window the segmenter was trained on,
+        // so it actually emits voiced slices instead of the
+        // `voiced_slices=0` steady state PR #136 surfaced).
+        //
+        // The trade is latency: transcripts land ~8 s after the
+        // utterance instead of ~1 s. Quality first, since at 1 s
+        // there's nothing legible to be quick about.
         AsrCaps {
             label: "Moonshine Small",
-            chunk_seconds: 1.0,
-            min_tail_seconds: 0.3,
+            chunk_seconds: 8.0,
+            min_tail_seconds: 1.0,
             multilingual: false,
-            streaming: true,
+            streaming: false,
             state_reset_chunks: 0,
         }
     }
