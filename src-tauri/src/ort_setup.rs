@@ -229,49 +229,41 @@ fn candidate_paths() -> Vec<PathBuf> {
     out
 }
 
+#[cfg(target_os = "macos")]
+const DYLIB_FILENAMES: &[&str] = &["libonnxruntime.dylib", "libonnxruntime.1.dylib"];
+#[cfg(target_os = "linux")]
+const DYLIB_FILENAMES: &[&str] = &["libonnxruntime.so", "libonnxruntime.so.1"];
+#[cfg(target_os = "windows")]
+const DYLIB_FILENAMES: &[&str] = &["onnxruntime.dll"];
+
+#[cfg(target_os = "macos")]
+const SYSTEM_LIB_DIRS: &[&str] = &[
+    // Homebrew on Apple Silicon.
+    "/opt/homebrew/lib",
+    "/opt/homebrew/opt/onnxruntime/lib",
+    // Homebrew on Intel.
+    "/usr/local/lib",
+    "/usr/local/opt/onnxruntime/lib",
+];
+#[cfg(target_os = "linux")]
+const SYSTEM_LIB_DIRS: &[&str] = &[
+    "/usr/lib",
+    "/usr/local/lib",
+    "/usr/lib/x86_64-linux-gnu",
+    "/usr/lib/aarch64-linux-gnu",
+];
+#[cfg(target_os = "windows")]
+const SYSTEM_LIB_DIRS: &[&str] = &[
+    "C:\\Program Files\\onnxruntime\\bin",
+    "C:\\Program Files\\onnxruntime\\lib",
+];
+
 fn dylib_filenames() -> &'static [&'static str] {
-    #[cfg(target_os = "macos")]
-    {
-        &["libonnxruntime.dylib", "libonnxruntime.1.dylib"]
-    }
-    #[cfg(target_os = "linux")]
-    {
-        &["libonnxruntime.so", "libonnxruntime.so.1"]
-    }
-    #[cfg(target_os = "windows")]
-    {
-        &["onnxruntime.dll"]
-    }
+    DYLIB_FILENAMES
 }
 
 fn system_lib_dirs() -> &'static [&'static str] {
-    #[cfg(target_os = "macos")]
-    {
-        &[
-            // Homebrew on Apple Silicon.
-            "/opt/homebrew/lib",
-            "/opt/homebrew/opt/onnxruntime/lib",
-            // Homebrew on Intel.
-            "/usr/local/lib",
-            "/usr/local/opt/onnxruntime/lib",
-        ]
-    }
-    #[cfg(target_os = "linux")]
-    {
-        &[
-            "/usr/lib",
-            "/usr/local/lib",
-            "/usr/lib/x86_64-linux-gnu",
-            "/usr/lib/aarch64-linux-gnu",
-        ]
-    }
-    #[cfg(target_os = "windows")]
-    {
-        &[
-            "C:\\Program Files\\onnxruntime\\bin",
-            "C:\\Program Files\\onnxruntime\\lib",
-        ]
-    }
+    SYSTEM_LIB_DIRS
 }
 
 /// Run an ORT session-load closure on a worker thread with a hard

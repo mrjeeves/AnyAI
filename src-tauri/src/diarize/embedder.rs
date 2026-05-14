@@ -56,13 +56,17 @@ impl Embedder {
         if !path.exists() {
             return Err(anyhow!("embedder ONNX missing: {}", path.display()));
         }
+        // `Level3` restored — see segmenter.rs for the rationale (the
+        // diarize Level1 drop in PR #115 was a workaround for the
+        // Moonshine load-hang investigation; the real fix lives in
+        // `ort_setup` so this can go back to the crate default).
         let path_owned = path.clone();
         let model_name_owned = self.model_name.clone();
         let threads = intra_threads();
         let session = ort_setup::load_session("speaker embedder", 90, move || {
             Session::builder()
                 .map_err(|e| anyhow!("ort builder: {e}"))?
-                .with_optimization_level(GraphOptimizationLevel::Level1)
+                .with_optimization_level(GraphOptimizationLevel::Level3)
                 .map_err(|e| anyhow!("ort opt level: {e}"))?
                 .with_intra_threads(threads)
                 .map_err(|e| anyhow!("ort threads: {e}"))?

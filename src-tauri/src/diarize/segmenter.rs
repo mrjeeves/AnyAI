@@ -87,13 +87,20 @@ impl Segmenter {
         if !path.exists() {
             return Err(anyhow!("segmenter ONNX missing: {}", path.display()));
         }
+        // Optimisation level restored to `Level3` (the crate default).
+        // PR #115 walked this down to `Level1` while debugging the
+        // Moonshine "Loading…" hang under the assumption that the
+        // diarize warm-up was also stuck in the same way; with the
+        // dylib-init fix in `ort_setup` the real cause is addressed
+        // upstream, and there's no reason to leave whole-graph
+        // optimisation off.
         let path_owned = path.clone();
         let model_name_owned = self.model_name.clone();
         let threads = intra_threads();
         let session = ort_setup::load_session("speaker segmenter", 90, move || {
             Session::builder()
                 .map_err(|e| anyhow!("ort builder: {e}"))?
-                .with_optimization_level(GraphOptimizationLevel::Level1)
+                .with_optimization_level(GraphOptimizationLevel::Level3)
                 .map_err(|e| anyhow!("ort opt level: {e}"))?
                 .with_intra_threads(threads)
                 .map_err(|e| anyhow!("ort threads: {e}"))?

@@ -125,31 +125,28 @@ impl AsrBackend for MoonshineBackend {
             return Err(anyhow!("Moonshine warm-up cancelled"));
         }
 
-        // ORT graph optimization is set to `Disable` (was Level1 in
-        // #113, originally Level3 before that). Even Level1's
-        // constant-folding pass can stall for minutes inside
-        // `commit_from_file` on the quantized merged-decoder ONNX
-        // when run on memory-constrained Apple Silicon (reported on
-        // an M-series 8 GB laptop). The model is already INT8 from
-        // the upstream export, so the runtime wins from graph
-        // optimization are minimal anyway. `with_intra_threads(1)`
-        // for the same reason — the ORT thread-pool init was
-        // hypothesised as a second source of stalls under memory
-        // pressure; single-thread is the safest baseline. We can
-        // walk these back up tier-by-tier if perf becomes a
-        // problem, but correctness ("Record actually works") wins
-        // over a marginal latency improvement here.
+        // ORT graph optimization back at `Level3` (the crate default)
+        // now that the real cause of the "Loading encoder… forever"
+        // hang is fixed in `ort_setup` (load-dynamic dylib was never
+        // explicitly resolved — ABI mismatches were surfacing as FFI
+        // hangs instead of clean errors). PRs #113 / #120 had walked
+        // this down to `Level1` and then `Disable` as a workaround,
+        // but the constant-folding + transpose-rewrite passes are a
+        // real speed win on the quantized merged-decoder ONNX, so
+        // there's no reason to leave them off once the dylib problem
+        // is actually fixed.
         on_stage(&format!(
             "Loading Moonshine encoder… ({})",
             ort_setup::status().diagnostic()
         ));
         let enc_path_owned = enc_path.clone();
+        let enc_threads = intra_threads();
         let encoder = ort_setup::load_session("Moonshine encoder", 90, move || {
             Session::builder()
                 .map_err(|e| anyhow!("ort builder: {e}"))?
-                .with_optimization_level(GraphOptimizationLevel::Disable)
+                .with_optimization_level(GraphOptimizationLevel::Level3)
                 .map_err(|e| anyhow!("ort opt level: {e}"))?
-                .with_intra_threads(1)
+                .with_intra_threads(enc_threads)
                 .map_err(|e| anyhow!("ort threads: {e}"))?
                 .commit_from_file(&enc_path_owned)
                 .map_err(|e| anyhow!("loading {}: {e}", enc_path_owned.display()))
@@ -161,12 +158,13 @@ impl AsrBackend for MoonshineBackend {
         }
         on_stage("Loading Moonshine decoder…");
         let dec_path_owned = dec_path.clone();
+        let dec_threads = intra_threads();
         let decoder = ort_setup::load_session("Moonshine decoder", 90, move || {
             Session::builder()
                 .map_err(|e| anyhow!("ort builder: {e}"))?
-                .with_optimization_level(GraphOptimizationLevel::Disable)
+                .with_optimization_level(GraphOptimizationLevel::Level3)
                 .map_err(|e| anyhow!("ort opt level: {e}"))?
-                .with_intra_threads(1)
+                .with_intra_threads(dec_threads)
                 .map_err(|e| anyhow!("ort threads: {e}"))?
                 .commit_from_file(&dec_path_owned)
                 .map_err(|e| anyhow!("loading {}: {e}", dec_path_owned.display()))
@@ -398,6 +396,17 @@ impl MoonshineBackend {
         }
         Ok(best_i as i64)
     }
+}
+
+/// Pick a sensible ORT intra-op thread count. The pyannote +
+/// parakeet backends share the same shape (`available_parallelism - 1`
+/// clamped to `[1, 6]`); duplicated here rather than threaded through
+/// a shared module to keep each backend file self-contained.
+fn intra_threads() -> usize {
+    let n = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2);
+    n.saturating_sub(1).clamp(1, 6)
 }
 
 /// Minimum plausible size for a fully-downloaded Moonshine encoder
