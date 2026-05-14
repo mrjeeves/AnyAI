@@ -13,6 +13,7 @@
   import { getAllManifests } from "../../providers";
   import { loadConfig } from "../../config";
   import { resolveModel, modeFor } from "../../manifest";
+  import { scrollAffordance } from "../scroll-affordance";
   import type { HardwareProfile, Mode } from "../../types";
 
   type ModelMeta = Awaited<ReturnType<typeof getModelStatusWithMeta>>[number];
@@ -353,7 +354,8 @@
     {:else if models.length === 0}
       <div class="empty">No models pulled yet.</div>
     {:else}
-      <div class="list scroll-fade">
+      <div class="scroll-affordance-wrap">
+      <div class="list scroll-fade" use:scrollAffordance>
         {#each models as m}
           {@const inActive = activeFamilyTags.has(m.name)}
           {@const fams = tagFamilies[m.name] ?? []}
@@ -439,6 +441,11 @@
             {/if}
           </div>
         {/each}
+      </div>
+      <div class="scroll-more-hint" aria-hidden="true">
+        <span class="scroll-more-chevron">⌄</span>
+        <span>more below</span>
+      </div>
       </div>
     {/if}
   {:else}

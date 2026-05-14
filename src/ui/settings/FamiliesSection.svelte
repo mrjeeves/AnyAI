@@ -856,17 +856,17 @@
       </p>
     </div>
 
-    <div class="list scroll-fade">
+    <div class="scroll-affordance-wrap">
+    <div class="list scroll-fade" use:scrollAffordance>
       {#each familyEntries(manifest) as [name, family]}
         {@const isActive = name === activeFamily}
-        {@const effective = effectiveTagFor(name, activeMode)}
-        {@const overridden = hasFamilyOverride(name, activeMode)}
         {@const activeModeSpec = modeFor(manifest, family, activeMode)}
-        {@const effectiveTier = activeModeSpec?.tiers.find((t) => t.model === effective)}
-        {@const effectiveIdx = activeModeSpec?.tiers.findIndex((t) => t.model === effective) ?? -1}
-        {@const effectiveSmart = activeModeSpec && effectiveIdx >= 0
-          ? smartnessLabel(effectiveIdx, activeModeSpec.tiers.length)
+        {@const activeEff = effectiveTagFor(name, activeMode)}
+        {@const activeIdx = activeModeSpec?.tiers.findIndex((t) => t.model === activeEff) ?? -1}
+        {@const activeSmart = activeModeSpec && activeIdx >= 0
+          ? smartnessLabel(activeIdx, activeModeSpec.tiers.length)
           : null}
+        {@const familyModes = modesIn(manifest, family)}
         <button class="row" class:active={isActive} onclick={() => (detailFamily = name)}>
           <div class="row-main">
             <div class="row-titles">
@@ -874,29 +874,35 @@
                 {#if isActive}<span class="check">✓</span>{/if}
                 {family.label}
               </span>
-              {#if effectiveSmart}
-                <span class="row-rank rank-{effectiveSmart.rank}">{effectiveSmart.label}</span>
+              {#if activeSmart}
+                <span class="row-rank rank-{activeSmart.rank}">{activeSmart.label}</span>
               {/if}
             </div>
             {#if family.description}
               <p class="row-desc">{family.description}</p>
             {/if}
-            {#if effective}
-              <p class="row-picked">
-                {#if overridden}
-                  <strong>Switched to</strong>
-                {:else}
-                  <strong>Recommended for your hardware</strong>
-                {/if}
-                {#if effectiveTier}
-                  · <span class="dim">{memoryHint(effectiveTier)}</span>
-                {/if}
-                {#if pulledSizes[effective] || localSizes[effective]}
-                  · <span class="dim">{gbLabel(pulledSizes[effective] ?? localSizes[effective])} on disk</span>
-                {:else if effectiveTier?.disk_mb}
-                  · <span class="dim">~{gbLabel(effectiveTier.disk_mb * 1024 * 1024)} to download</span>
-                {/if}
-              </p>
+            {#if familyModes.length > 0}
+              <ul class="row-modes">
+                {#each familyModes as modeName}
+                  {@const modeSpec = modeFor(manifest, family, modeName)!}
+                  {@const eff = effectiveTagFor(name, modeName)}
+                  {@const tier = modeSpec.tiers.find((t) => t.model === eff)}
+                  {@const installedBytes = pulledSizes[eff] ?? localSizes[eff]}
+                  {#if eff}
+                    <li class="row-mode">
+                      <span class="row-mode-label">{modeSpec.label || modeName}</span>
+                      <span class="row-mode-spec">
+                        {#if tier}{memoryHint(tier)}{:else}—{/if}
+                        {#if installedBytes}
+                          · <span class="row-mode-where">{gbLabel(installedBytes)} on disk</span>
+                        {:else if tier?.disk_mb}
+                          · <span class="row-mode-where dim">~{gbLabel(tier.disk_mb * 1024 * 1024)} to download</span>
+                        {/if}
+                      </span>
+                    </li>
+                  {/if}
+                {/each}
+              </ul>
             {/if}
           </div>
           <span class="chevron" aria-hidden="true">›</span>
@@ -905,6 +911,11 @@
       {#if familyEntries(manifest).length === 0}
         <p class="empty">This provider's manifest exposes no families.</p>
       {/if}
+    </div>
+    <div class="scroll-more-hint" aria-hidden="true">
+      <span class="scroll-more-chevron">⌄</span>
+      <span>more below</span>
+    </div>
     </div>
   {:else}
     <!-- DETAIL VIEW -->
@@ -1300,9 +1311,31 @@
   .rank-2 { color: #777; background: #14141a; border-color: #1d1d24; }
   .rank-1 { color: #666; background: #121218; border-color: #1a1a20; }
   .row-desc { font-size: .76rem; color: #888; line-height: 1.45; }
-  .row-picked { font-size: .73rem; color: #888; }
-  .row-picked strong { color: #aaa; font-weight: 500; }
-  .row-picked .dim { color: #666; }
+  .row-modes {
+    list-style: none;
+    margin: .2rem 0 0;
+    padding: 0;
+    display: flex; flex-direction: column; gap: .1rem;
+  }
+  .row-mode {
+    font-size: .73rem;
+    color: #888;
+    display: flex; align-items: baseline; gap: .5rem;
+    line-height: 1.45;
+  }
+  /* Fixed-width label column keeps the RAM / disk numbers aligned
+   * across modes so the user can compare cost-per-mode at a glance
+   * instead of re-scanning each line. */
+  .row-mode-label {
+    width: 5.5rem;
+    flex-shrink: 0;
+    color: #aaa;
+    text-transform: capitalize;
+    font-weight: 500;
+  }
+  .row-mode-spec { color: #888; }
+  .row-mode-where { color: #6c8a6c; }
+  .row-mode-where.dim { color: #666; }
   .chevron {
     color: #555;
     font-size: 1.2rem;
@@ -1331,7 +1364,8 @@
   .detail-key { font-family: monospace; font-size: .78rem; color: #666; }
   .detail-desc { font-size: .82rem; color: #999; line-height: 1.5; }
 
-  .detail-body-wrap {
+  .detail-body-wrap,
+  .scroll-affordance-wrap {
     position: relative;
     flex: 1;
     display: flex;
@@ -1363,8 +1397,9 @@
    * content sits below the fold. The attribute is set by the
    * scrollAffordance action at runtime, so Svelte's static CSS
    * analyzer can't prove the rule is reachable — wrap the whole
-   * selector in :global() to keep it. */
-  :global(.detail-body[data-overflow-down="true"] + .scroll-more-hint) {
+   * selector in :global() to keep it. Generic attribute match works
+   * for both the detail body and the list view. */
+  :global([data-overflow-down="true"] + .scroll-more-hint) {
     opacity: 1;
     animation: scroll-hint-bob 1.6s ease-in-out infinite;
   }

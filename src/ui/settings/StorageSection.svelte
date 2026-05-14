@@ -4,6 +4,7 @@
   import { mkdir, exists } from "@tauri-apps/plugin-fs";
   import { loadConfig, saveConfig } from "../../config";
   import { previewPruneTargets, pruneNow } from "../../model-lifecycle";
+  import { scrollAffordance } from "../scroll-affordance";
   import {
     listConversationOrphans,
     clearConversationOrphans,
@@ -388,7 +389,8 @@
   {#if loading}
     <p class="loading">Loading…</p>
   {:else}
-    <div class="cards scroll-fade">
+    <div class="scroll-affordance-wrap">
+    <div class="cards scroll-fade" use:scrollAffordance>
       <div class="card summary">
         <div class="card-row">
           <div class="card-info">
@@ -488,6 +490,11 @@
           {/if}
         </div>
       </div>
+    </div>
+    <div class="scroll-more-hint" aria-hidden="true">
+      <span class="scroll-more-chevron">⌄</span>
+      <span>more below</span>
+    </div>
     </div>
   {/if}
 
