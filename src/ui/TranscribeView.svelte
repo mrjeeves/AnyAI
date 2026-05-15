@@ -1051,6 +1051,8 @@
           {hardware}
           compact={true}
           onComplete={onTextDownloaded}
+          onHide={() => setTpPaneCollapsed(true)}
+          hideLabel="Hide pane"
         />
       {/if}
       <header class="pane-head">
