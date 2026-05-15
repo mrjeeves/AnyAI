@@ -1,0 +1,13 @@
+# Pin the Rust toolchain used by every cargo invocation under `src-tauri/`.
+#
+# This file is the single source of truth for the toolchain, replacing the
+# brittle CI dance where `dtolnay/rust-toolchain@1.88.0`'s `components:` step
+# silently no-op'd on the macOS-14 ARM runner and `cargo fmt --check` then
+# exited 1 because rustfmt wasn't actually installed for the active
+# toolchain. With this file, `rustup` auto-installs the right channel and
+# the listed components the first time any cargo command runs here — on the
+# runner image or a contributor's laptop, no extra steps required.
+[toolchain]
+channel = "1.88.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

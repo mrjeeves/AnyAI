@@ -1,20 +1,25 @@
 //! Speaker-embedding ONNX backend (wespeaker-r34 / 3D-Speaker CAM++).
 //!
-//! Both supported models take 16 kHz mono f32 audio (typically a
-//! 0.5–4 s slice of one voiced region) and emit a single fixed-size
-//! L2-normalized embedding. Output dim is **256** for
-//! wespeaker-voxceleb-resnet34-LM and **192** for CAM++ small.
+//! Both supported models take a **kaldi-compatible 80-dim log-mel
+//! filterbank** for a 0.5–4 s slice of one voiced region and emit a
+//! single fixed-size L2-normalized embedding. Output dim is **256**
+//! for wespeaker-voxceleb-resnet34-LM and **192** for CAM++ small.
 //!
-//! Both ONNX exports we ship take raw waveform input (the
-//! spectrogram front-end is baked into the graph). Input / output
-//! tensor names are sniffed at warm-up by suffix-match so a future
-//! re-export with renamed nodes still works.
+//! Neither ONNX export we ship bakes the spectrogram front-end into
+//! the graph — `embedder.onnx` for both starts with an `input_features`
+//! placeholder of shape `[B, T, 80]` (NTC) or `[B, 80, T]` (NCT,
+//! depending on export). We compute the front-end in Rust via
+//! `super::fbank::Fbank` and reshape to whichever layout the loaded
+//! graph declares. Input / output tensor names are sniffed at warm-up
+//! by suffix-match so a future re-export with renamed nodes still
+//! works.
 
 use anyhow::{anyhow, Context, Result};
-use ndarray::Array2;
+use ndarray::{Array2, ArrayD, IxDyn};
 use ort::session::{builder::GraphOptimizationLevel, Session};
-use ort::value::Tensor;
+use ort::value::{Tensor, ValueType};
 
+use super::fbank::{Fbank, NUM_MEL_BINS};
 use crate::models::{model_dir, ModelKind};
 use crate::ort_setup;
 
@@ -22,22 +27,38 @@ use crate::ort_setup;
 /// is dominated by their input-normalization pad and clusters poorly.
 const MIN_EMBED_SAMPLES: usize = 16_000 / 2; // 0.5 s
 
+/// Sniffed feature layout. wespeaker-r34's onnx-community export
+/// declares `[B, T, 80]`; some 3D-Speaker exports declare `[B, 80, T]`.
+/// We honour whichever the loaded graph asks for.
+#[derive(Debug, Clone, Copy)]
+enum FeatLayout {
+    /// `[batch, frames, mel_bins]` — wespeaker's native.
+    Ntc,
+    /// `[batch, mel_bins, frames]` — some CAM++ exports.
+    Nct,
+}
+
 pub struct Embedder {
     model_name: String,
     /// Lazily-loaded ORT session. `warm_up` populates it; `embed`
     /// borrows it mutably (ORT's `run` requires `&mut self` on the
     /// session because output buffers are owned by the session arena).
     session: Option<Session>,
-    /// Sniffed at warm-up: name of the audio / waveform input tensor.
+    /// Sniffed at warm-up: name of the features input tensor.
     input_name: String,
     /// Sniffed at warm-up: name of the embedding output tensor.
     output_name: String,
+    /// Sniffed at warm-up: feature axis ordering the model expects.
+    feat_layout: FeatLayout,
     /// Cached output dimensionality once we've seen one forward pass.
     /// Currently informational; callers don't read it yet, but having
     /// it on the struct keeps the clusterer's pre-allocation path
     /// straightforward to wire up later.
     #[allow(dead_code)]
     dim: Option<usize>,
+    /// Cached fbank front-end (mel filterbank + Povey window + FFT
+    /// plan). Construction is non-trivial; reuse across calls.
+    fbank: Fbank,
 }
 
 impl Embedder {
@@ -45,9 +66,11 @@ impl Embedder {
         Ok(Self {
             model_name: name.to_string(),
             session: None,
-            input_name: "feats".to_string(),
+            input_name: "input_features".to_string(),
             output_name: "embedding".to_string(),
+            feat_layout: FeatLayout::Ntc,
             dim: None,
+            fbank: Fbank::new(),
         })
     }
 
@@ -76,15 +99,20 @@ impl Embedder {
         })?;
 
         // Sniff I/O names. wespeaker / 3D-Speaker exports vary; we
-        // accept any input whose name looks like audio / feats /
-        // waveform and any output whose name looks like an
+        // accept any input whose name looks like features / fbank /
+        // audio / waveform and any output whose name looks like an
         // embedding. Fall back to whatever the graph declares so a
         // re-export under a different naming convention doesn't blow
         // up at first inference.
         let mut input_match: Option<String> = None;
         for input in session.inputs() {
             let n = input.name().to_lowercase();
-            if n.contains("feat") || n.contains("audio") || n.contains("wave") || n == "input" {
+            if n.contains("feat")
+                || n.contains("fbank")
+                || n.contains("audio")
+                || n.contains("wave")
+                || n == "input"
+            {
                 input_match = Some(input.name().to_string());
                 break;
             }
@@ -104,6 +132,33 @@ impl Embedder {
         self.output_name = output_match
             .or_else(|| session.outputs().first().map(|o| o.name().to_string()))
             .unwrap_or_else(|| self.output_name.clone());
+
+        // Sniff the feature layout off the chosen input. The 80-dim
+        // axis pinpoints NTC vs NCT: if dim 1 == 80 we're NCT, else
+        // we assume NTC (the more common layout). Dynamic dims come
+        // through as `-1`; we treat anything ≠ 80 on a fixed axis as
+        // the "time" axis.
+        self.feat_layout = session
+            .inputs()
+            .iter()
+            .find(|i| i.name() == self.input_name)
+            .and_then(|i| match i.dtype() {
+                ValueType::Tensor { shape, .. } if shape.len() == 3 => {
+                    let mid = shape.get(1).copied().unwrap_or(-1);
+                    Some(if mid == NUM_MEL_BINS as i64 {
+                        FeatLayout::Nct
+                    } else {
+                        FeatLayout::Ntc
+                    })
+                }
+                _ => None,
+            })
+            .unwrap_or(FeatLayout::Ntc);
+
+        eprintln!(
+            "[diarize] embedder {}: in={} out={} layout={:?}",
+            self.model_name, self.input_name, self.output_name, self.feat_layout,
+        );
         self.session = Some(session);
         Ok(())
     }
@@ -123,19 +178,43 @@ impl Embedder {
         if slice_pcm.len() < MIN_EMBED_SAMPLES {
             return Ok(Vec::new());
         }
+        // Pull fbank out before borrowing `self.session` mutably — ORT's
+        // `run` needs `&mut Session`, and we can't hold a `&self` borrow
+        // through `fbank.compute` while doing that.
+        let feats: Array2<f32> = self.fbank.compute(slice_pcm);
+        if feats.shape()[0] == 0 {
+            return Ok(Vec::new());
+        }
+
+        let layout = self.feat_layout;
         let session = self
             .session
             .as_mut()
             .ok_or_else(|| anyhow!("embedder not warmed up"))?;
 
-        // Build the `[1, N]` f32 input. `Array2::from_shape_vec`
-        // takes ownership and matches ORT's canonical 2-D shape for
-        // raw-waveform embedder exports. We pass it to ORT by value
-        // via `Tensor::from_array`; the alternative
-        // `TensorRef::from_array_view(&arr)` has a generics-inference
-        // gotcha (`T` doesn't propagate through the borrow) that
-        // requires turbofish to disambiguate — by-value is cleaner.
-        let input: Array2<f32> = Array2::from_shape_vec((1, slice_pcm.len()), slice_pcm.to_vec())
+        // Reshape `[T, 80]` to whatever the loaded graph expects. We
+        // always carry a leading batch axis of 1.
+        let (rows, cols) = (feats.shape()[0], feats.shape()[1]);
+        let mut flat = feats.into_raw_vec_and_offset().0;
+        let shape: Vec<usize> = match layout {
+            FeatLayout::Ntc => vec![1, rows, cols],
+            FeatLayout::Nct => {
+                // Transpose `[T, 80]` → `[80, T]` in place so we can
+                // hand ORT the same backing buffer with the swapped
+                // shape. A scratch Vec is the simplest correct way;
+                // T·80 elements is small (≤ a few thousand) so the
+                // copy isn't a hot-path concern.
+                let mut t = vec![0.0f32; rows * cols];
+                for r in 0..rows {
+                    for c in 0..cols {
+                        t[c * rows + r] = flat[r * cols + c];
+                    }
+                }
+                flat = t;
+                vec![1, cols, rows]
+            }
+        };
+        let input = ArrayD::<f32>::from_shape_vec(IxDyn(&shape), flat)
             .map_err(|e| anyhow!("shape input: {e}"))?;
         let tensor = Tensor::from_array(input).map_err(|e| anyhow!("ort tensor: {e}"))?;
 

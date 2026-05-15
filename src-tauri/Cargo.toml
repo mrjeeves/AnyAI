@@ -81,6 +81,13 @@ tokenizers = { version = "0.20", default-features = false, features = ["unstable
 # m4a out of the box — enough for the realistic set of files a user is
 # likely to drop in.
 symphonia = { version = "0.5", default-features = false, features = ["wav", "flac", "mp3", "aac", "isomp4", "ogg", "vorbis"] }
+# Real-input FFT for the diarize embedder's kaldi-compatible 80-dim
+# fbank front-end. wespeaker-r34 and CAM++ both consume `[B, T, 80]`
+# log-mel filterbank features rather than raw audio (the ONNX exports
+# don't bake the spectrogram in despite past comments to the contrary);
+# `realfft` is half the work of a generic complex FFT for our real
+# 512-point frames and keeps the dep surface narrow.
+realfft = "3"
 
 [profile.release]
 panic = "abort"
