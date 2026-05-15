@@ -36,13 +36,19 @@ export type ModelRuntime =
   | "sortformer";
 
 export interface ManifestTier {
-  /** Discrete-GPU path: matches when `vram_gb >= min_vram_gb`. Meaningless
-   *  on unified-memory hosts (Apple, no-GPU SBCs); use `min_unified_ram_gb`
+  /** Discrete-GPU path: matches when `vram_gb >= min_vram_gb`. Includes
+   *  KV-cache / activation overhead and any VRAM the paired transcribe
+   *  runtime would also claim, so the resolver and the displayed
+   *  "Needs ~X GB VRAM" hint can use the same number. Meaningless on
+   *  unified-memory hosts (Apple, no-GPU SBCs); use `min_unified_ram_gb`
    *  there. */
   min_vram_gb: number;
-  /** Discrete-GPU CPU-fallback path: matches when system RAM is at least
-   *  this big *after* the manifest's per-GPU-class `headroom_gb` is
-   *  subtracted, letting the model run on CPU when VRAM is too small. */
+  /** Discrete-GPU CPU-fallback path: only consulted when the VRAM walk
+   *  produced no hit at all (e.g. a 2 GB GPU staring at a ladder whose
+   *  bottom rung wants 4 GB). Matches when system RAM is at least this
+   *  big *after* the manifest's per-GPU-class `headroom_gb` is
+   *  subtracted. Last-resort path — every shipped family ends in a
+   *  min_vram_gb=0 rung so the VRAM walk almost always matches first. */
   min_ram_gb?: number;
   /** Unified-memory path (Apple Silicon, integrated GPUs, CPU-only SBCs):
    *  the raw total RAM the host must have for this tier to fit alongside

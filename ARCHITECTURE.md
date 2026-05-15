@@ -62,9 +62,11 @@ That per-file TTL is also how publishers express rate-limit expectations: a mani
 
 A tier carries three RAM/VRAM thresholds because Apple Silicon and discrete GPUs behave differently:
 
-- `min_vram_gb` — discrete GPU path. Matches when VRAM is large enough to host the model on the card.
-- `min_ram_gb` — discrete GPU CPU-fallback path. Matches when `ram_gb - headroom_gb[gpu_type]` clears the bar; the model runs on CPU because VRAM didn't fit.
+- `min_vram_gb` — primary discrete-GPU path. Matches when `vram_gb >= min_vram_gb`. The number already includes KV-cache / activation overhead and any VRAM the paired transcribe runtime would also claim, so the resolver and the displayed "Needs ~X GB VRAM" hint use exactly the same number.
+- `min_ram_gb` — last-resort CPU-fallback path on discrete GPU. Only consulted when the primary VRAM walk produced no hit at all (e.g. a 2 GB GPU staring at a ladder whose bottom rung needs 4 GB). Matches when `ram_gb - headroom_gb[gpu_type]` clears the bar; the model lives in system RAM and inference runs on CPU. Rare in practice — every shipped family ladder ends in a `min_vram_gb=0` rung, so the VRAM walk almost always matches first.
 - `min_unified_ram_gb` — unified-memory path (Apple, integrated GPUs, CPU-only SBCs). Matches against raw RAM. The publisher has already factored in OS headroom and the paired transcribe model, so a single number captures "this machine can host text + audio together". Omitted on legacy tiers, in which case the resolver synthesises `min_ram_gb + headroom_gb[gpu_type]` so older manifests keep working.
+
+**Two-pass walk (schema v19).** The resolver walks the ladder twice on discrete GPU: first for VRAM-fitting tiers (primary), then — only if nothing matched — for CPU-fittable tiers. The previous OR-fallback would silently promote a 24 GB 3090 to a 28 GB tier via system RAM, then display "Needs ~28 GB VRAM" the GPU couldn't deliver. The two-pass walk keeps the displayed hint honest: the recommended tier is always one the GPU can actually host, with CPU fallback called out explicitly in the Family detail header when it triggers.
 
 `headroom_gb` is a manifest-level map (`apple`/`none`/`nvidia`/`amd` → GB) that reserves system overhead for the OS, WebView, ollama daemon, and the paired ASR model (Moonshine ~150 MB resident on Pi-class, Parakeet ~700 MB on capable hardware). Compiled-in defaults: `apple: 5, none: 2, nvidia: 1, amd: 1`. Apple is highest because macOS + browser tabs share the LLM pool; discrete-GPU hosts are lowest because the LLM lives on the card and system RAM only hosts the client. When diarization is enabled, the resolver subtracts an additional ~0.5 GB for the pyannote pipeline.
 

@@ -129,6 +129,14 @@
     if (tier.min_vram_gb > 0) {
       return `Needs ~${tier.min_vram_gb} GB VRAM`;
     }
+    // min_vram=0 rungs (transcribe / diarize / tiny LLMs) live in
+    // system RAM. min_ram_gb here is a tier-selection threshold, not
+    // the model's footprint — surface the on-disk size when known so
+    // a 290 MB Moonshine ONNX doesn't read as "Needs ~6 GB RAM".
+    if (tier.disk_mb && tier.disk_mb > 0) {
+      const mb = tier.disk_mb;
+      return mb < 1024 ? `~${mb} MB on disk` : `~${(mb / 1024).toFixed(1)} GB on disk`;
+    }
     return tier.min_ram_gb ? `Needs ~${tier.min_ram_gb} GB RAM` : "Runs on tiny machines";
   }
 
