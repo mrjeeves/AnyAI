@@ -225,13 +225,37 @@ pub fn resolve_full(
     let unified = is_unified_memory(hw);
     let headroom = headroom_gb(manifest, &hw.gpu_type);
 
+    // Pass 1: VRAM walk on discrete GPU, or unified-pool walk on
+    // Apple / no-GPU. This is the path that produces the displayed
+    // "Needs ~X GB VRAM" recommendation, so it has to be the one the
+    // resolver actually uses to pick a tier; otherwise the UI would
+    // promise hardware the GPU can't deliver.
     for tier in tiers {
-        if tier_matches(tier, hw, unified, headroom) {
+        if tier_matches_primary(tier, hw, unified, headroom) {
             if let Some(model) = tier["model"].as_str() {
                 return Ok((
                     model.to_string(),
                     tier_runtime(Some(tier), exact_spec, mode),
                 ));
+            }
+        }
+    }
+
+    // Pass 2 (discrete GPU only): CPU-RAM fallback. Only reached when
+    // the VRAM walk produced nothing — e.g. a 2 GB GPU staring at a
+    // ladder whose bottom rung wants 4 GB. Every shipped family ends
+    // in a min_vram_gb=0 rung so this path is rarely taken; it exists
+    // so the rare "GPU smaller than the smallest rung" host still
+    // produces a runnable model on CPU.
+    if !unified {
+        for tier in tiers {
+            if tier_matches_cpu_fallback(tier, hw, headroom) {
+                if let Some(model) = tier["model"].as_str() {
+                    return Ok((
+                        model.to_string(),
+                        tier_runtime(Some(tier), exact_spec, mode),
+                    ));
+                }
             }
         }
     }
@@ -287,8 +311,15 @@ pub fn mode_runtime_with_hw(
         let unified = is_unified_memory(hw);
         let headroom = headroom_gb(manifest, &hw.gpu_type);
         for tier in tiers {
-            if tier_matches(tier, hw, unified, headroom) {
+            if tier_matches_primary(tier, hw, unified, headroom) {
                 return Some(tier_runtime(Some(tier), mode_spec, mode));
+            }
+        }
+        if !unified {
+            for tier in tiers {
+                if tier_matches_cpu_fallback(tier, hw, headroom) {
+                    return Some(tier_runtime(Some(tier), mode_spec, mode));
+                }
             }
         }
         // No tier matched — runtime of the last rung (fallback target).
@@ -351,21 +382,28 @@ fn unified_threshold_gb(tier: &Value, headroom: f64) -> f64 {
     tier["min_ram_gb"].as_f64().unwrap_or(0.0) + headroom
 }
 
-fn tier_matches(tier: &Value, hw: &HardwareProfile, unified: bool, headroom: f64) -> bool {
+/// Primary tier-match pass — the one the displayed "Needs ~X GB VRAM"
+/// hint corresponds to. Discrete GPU checks raw VRAM; unified memory
+/// checks raw RAM against the unified threshold (which already includes
+/// OS + paired-transcribe overhead in the manifest). The CPU-fallback
+/// path is broken out separately so `resolve_full` can defer it until
+/// the VRAM pass has had a chance to match a smaller tier.
+fn tier_matches_primary(tier: &Value, hw: &HardwareProfile, unified: bool, headroom: f64) -> bool {
     if unified {
-        // Single shared pool — VRAM column is the same bytes as RAM, so the
-        // only meaningful check is whether raw RAM is large enough to host
-        // the OS, the LLM, and the paired transcribe model.
         return hw.ram_gb >= unified_threshold_gb(tier, headroom);
     }
-    // Discrete GPU: either the GPU is big enough for the model to live on
-    // it entirely, or system RAM (after headroom) is enough for CPU
-    // inference. Either path qualifies the tier.
     let min_vram = tier["min_vram_gb"].as_f64().unwrap_or(0.0);
     let vram = hw.vram_gb.unwrap_or(0.0);
-    if vram >= min_vram {
-        return true;
-    }
+    vram >= min_vram
+}
+
+/// CPU-RAM fallback used only after the VRAM walk produced no hit. A
+/// discrete-GPU host whose GPU is smaller than every rung still
+/// deserves a runnable model; we honour `min_ram_gb` (after the
+/// manifest's per-GPU headroom) so the model can live in system RAM
+/// and inference can plod along on CPU. Rare in practice — every
+/// shipped family ladder ends in a min_vram_gb=0 rung.
+fn tier_matches_cpu_fallback(tier: &Value, hw: &HardwareProfile, headroom: f64) -> bool {
     let min_ram = tier["min_ram_gb"].as_f64().unwrap_or(0.0);
     let cpu_budget = (hw.ram_gb - headroom).max(0.0);
     cpu_budget >= min_ram
@@ -971,13 +1009,84 @@ mod tests {
     }
 
     #[test]
-    fn discrete_nvidia_cpu_fallback_subtracts_headroom() {
-        // 4 GB GPU + 16 GB RAM: VRAM misses `mid` (needs 12 GB), but
-        // 16 - 1 = 15 GB CPU budget clears `mid`'s min_ram_gb=12 — so
-        // we run on CPU rather than overshooting.
+    fn discrete_nvidia_picks_largest_vram_fitting_tier() {
+        // 4 GB GPU + 16 GB RAM: walks down to the largest tier that
+        // FITS in VRAM — `e2b` (min_vram=4). The old resolver had an
+        // OR-fallback that hopped to `mid:12b` via CPU RAM and then
+        // displayed "Needs ~12 GB VRAM" the host couldn't deliver;
+        // that's the bug this regression test guards against. The
+        // user with a 4 GB GPU wants their GPU used, not a 12 B model
+        // grinding on CPU while the UI lies about the requirement.
         let pc = hw(GpuType::Nvidia, Some(4.0), 16.0);
         assert_eq!(
             resolve_in_manifest(&manifest(), &pc, "text", "test").unwrap(),
+            "e2b"
+        );
+    }
+
+    #[test]
+    fn discrete_nvidia_rtx3090_skips_oversized_tier_no_cpu_fallback() {
+        // Regression test for the original report: a 24 GB 3090 + 32
+        // GB RAM was landing on a 28-GB-VRAM Qwen tier via the OR-
+        // fallback (vram < 28 → fail, ram - 1 = 31 >= 28 → pass), then
+        // the UI displayed "Needs ~28 GB VRAM" — hardware the host
+        // couldn't deliver. Two-pass walk: VRAM 24 misses 28, walks
+        // down to mid:20 → 24 >= 20 → match. CPU pass never reached.
+        let ladder = serde_json::json!({
+            "default_family": "qwen",
+            "headroom_gb": { "nvidia": 1 },
+            "families": {
+                "qwen": {
+                    "default_mode": "text",
+                    "modes": {
+                        "text": {
+                            "tiers": [
+                                { "min_vram_gb": 28, "min_ram_gb": 28, "model": "qwen:35b" },
+                                { "min_vram_gb": 20, "min_ram_gb": 20, "model": "qwen:27b" },
+                                { "min_vram_gb":  8, "min_ram_gb":  9, "model": "qwen:9b"  },
+                                { "min_vram_gb":  0, "min_ram_gb":  0, "model": "qwen:1b"  }
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+        let rtx3090 = hw(GpuType::Nvidia, Some(24.0), 32.0);
+        assert_eq!(
+            resolve_in_manifest(&ladder, &rtx3090, "text", "qwen").unwrap(),
+            "qwen:27b"
+        );
+    }
+
+    #[test]
+    fn discrete_nvidia_tiny_gpu_falls_back_to_cpu_when_no_vram_rung_fits() {
+        // 2 GB GPU + 16 GB RAM against a ladder whose smallest rung
+        // needs 4 GB VRAM: the VRAM walk produces no hit, so the
+        // CPU-RAM fallback kicks in. With 16 - 1 = 15 GB CPU budget,
+        // `mid:12b` (min_ram=12) is the largest tier the host can
+        // host on CPU. Pre-fix this was the OR-fallback path; now it's
+        // a documented last-resort.
+        let ladder = serde_json::json!({
+            "default_family": "test",
+            "headroom_gb": { "nvidia": 1 },
+            "families": {
+                "test": {
+                    "default_mode": "text",
+                    "modes": {
+                        "text": {
+                            "tiers": [
+                                { "min_vram_gb": 24, "min_ram_gb": 24, "model": "big:31b" },
+                                { "min_vram_gb": 12, "min_ram_gb": 12, "model": "mid:12b" },
+                                { "min_vram_gb":  4, "min_ram_gb":  4, "model": "e2b"     }
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+        let pc = hw(GpuType::Nvidia, Some(2.0), 16.0);
+        assert_eq!(
+            resolve_in_manifest(&ladder, &pc, "text", "test").unwrap(),
             "mid:12b"
         );
     }

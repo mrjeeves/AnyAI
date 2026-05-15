@@ -200,6 +200,50 @@ export interface ResolvedModel {
   /** Whether the model came from `mode_overrides` rather than the
    *  hardware-walked tier ladder. */
   override: boolean;
+  /** Set when a discrete-GPU host fell off the VRAM ladder entirely and
+   *  the resolver only matched this tier via the CPU-RAM fallback path.
+   *  The model lives in system RAM and inference runs on CPU — much
+   *  slower, but better than nothing on a host whose GPU is too small
+   *  for any rung. Always false on unified-memory hosts (their single
+   *  pool covers both paths) and on hosts where the VRAM walk picked
+   *  the tier directly. */
+  cpuFallback: boolean;
+}
+
+/** Breakdown of how the resolver arrived at a tier — surfaced in the
+ *  Family detail header so the user can see the math instead of being
+ *  surprised by a recommendation that doesn't match their hardware.
+ *  All fields are in GB; `null` means "not applicable" (e.g. `vramGb`
+ *  on a no-GPU SBC). */
+export interface MemoryBudget {
+  /** True when the host shares VRAM and RAM in one pool (Apple Silicon
+   *  or no-GPU). Unified hosts ignore `vramGb` and budget purely off
+   *  total RAM. */
+  unified: boolean;
+  /** Raw VRAM the GPU reports, or `null` on unified hosts. */
+  vramGb: number | null;
+  /** Raw system RAM detected. */
+  ramGb: number;
+  /** OS / WebView / ollama daemon overhead the resolver subtracts
+   *  before crediting memory toward a tier. Pulled from
+   *  `manifest.headroom_gb[gpu_type]` with a compiled-in default. */
+  reservedGb: number;
+  /** Memory left for the LLM after subtracting `reservedGb`. On
+   *  discrete GPU this is the effective VRAM budget. On unified it's
+   *  the effective RAM budget (and also covers the paired transcribe
+   *  model). */
+  availableGb: number;
+  /** Threshold the picked tier asks the host to meet — `min_vram_gb`
+   *  on discrete GPU, `min_unified_ram_gb` (or synthesised) on unified.
+   *  `null` when no tier matched at all. */
+  pickedThresholdGb: number | null;
+  /** The tier the resolver matched. `null` only when the family has
+   *  no tiers configured for this mode. */
+  pickedTier: ManifestTier | null;
+  /** True iff the picked tier only matched via the discrete-GPU
+   *  CPU-RAM fallback — useful so the UI can warn "this will run on
+   *  CPU and be slow" instead of pretending the GPU fits the model. */
+  cpuFallback: boolean;
 }
 
 /** Default runtime for a mode when neither the tier nor the mode block
@@ -273,12 +317,12 @@ export function resolveModelEx(
   const famKey = picked?.name ?? familyName;
   const famOverride = famKey ? familyOverrides?.[famKey]?.[mode] : null;
   if (famOverride) {
-    return { model: famOverride, runtime: modeLevelRuntime, tier: null, override: true };
+    return { model: famOverride, runtime: modeLevelRuntime, tier: null, override: true, cpuFallback: false };
   }
 
   const override = modeOverrides?.[mode];
   if (override) {
-    return { model: override, runtime: modeLevelRuntime, tier: null, override: true };
+    return { model: override, runtime: modeLevelRuntime, tier: null, override: true, cpuFallback: false };
   }
 
   // No exact OR shared block AND we're on a non-Ollama runtime — fall
@@ -286,27 +330,51 @@ export function resolveModelEx(
   // with text mode (which would surface nonsense and trip the wrong
   // backend at load time).
   if (!exactSpec && modeLevelRuntime !== "ollama") {
-    return { model: safeFallbackFor(modeLevelRuntime), runtime: modeLevelRuntime, tier: null, override: false };
+    return { model: safeFallbackFor(modeLevelRuntime), runtime: modeLevelRuntime, tier: null, override: false, cpuFallback: false };
   }
 
   const tierSpec = exactSpec
     ?? (family ? family.modes[family.default_mode] : null);
 
   if (!tierSpec) {
-    return { model: "tinyllama", runtime: modeLevelRuntime, tier: null, override: false };
+    return { model: "tinyllama", runtime: modeLevelRuntime, tier: null, override: false, cpuFallback: false };
   }
 
   const unified = isUnifiedMemory(hardware);
   const headroom = headroomGb(manifest, hardware.gpu_type);
 
+  // Pass 1: walk for a VRAM-fitting tier (discrete GPU) or unified-pool
+  // tier (Apple / no-GPU). This is the path that produces the displayed
+  // "Needs ~X GB VRAM" recommendation, so we want it to actually pick
+  // tiers the GPU can host.
   for (const tier of tierSpec.tiers) {
-    if (tierMatches(tier, hardware, manifest, unified, headroom)) {
+    if (tierMatchesPrimary(tier, hardware, unified, headroom)) {
       return {
         model: tier.model,
         runtime: tierRuntime(tier, exactSpec, mode),
         tier,
         override: false,
+        cpuFallback: false,
       };
+    }
+  }
+  // Pass 2 (discrete GPU only): if no rung fit in VRAM at all — e.g.
+  // a 2 GB GPU staring at a ladder whose bottom rung wants 4 GB — fall
+  // back to CPU inference. This is a last-resort path; nearly every
+  // family's tier ladder ends in a min_vram_gb=0 rung so the VRAM walk
+  // will have already matched. Kept so the rare "GPU smaller than the
+  // smallest rung" case still produces a runnable model.
+  if (!unified) {
+    for (const tier of tierSpec.tiers) {
+      if (tierMatchesCpuFallback(tier, hardware, headroom)) {
+        return {
+          model: tier.model,
+          runtime: tierRuntime(tier, exactSpec, mode),
+          tier,
+          override: false,
+          cpuFallback: true,
+        };
+      }
     }
   }
   const last = tierSpec.tiers.at(-1) ?? null;
@@ -315,6 +383,84 @@ export function resolveModelEx(
     runtime: tierRuntime(last, exactSpec, mode),
     tier: last,
     override: false,
+    cpuFallback: false,
+  };
+}
+
+/** Recompute the resolver's budget math without re-running tier
+ *  selection — used by the Family detail header to surface the same
+ *  numbers the resolver actually checked against. Mirror of the
+ *  internal walk in `resolveModelEx`; deliberately returns the budget
+ *  even when the override paths were taken so the user can still see
+ *  what the hardware would have produced. */
+export function resolveBudget(
+  hardware: HardwareProfile,
+  manifest: Manifest,
+  mode: Mode,
+  familyName?: string,
+): MemoryBudget {
+  const picked = pickFamily(manifest, familyName);
+  const family = picked?.family;
+  const exactSpec = family ? modeFor(manifest, family, mode) : undefined;
+  const tierSpec =
+    exactSpec ?? (family ? family.modes[family.default_mode] : null);
+
+  const unified = isUnifiedMemory(hardware);
+  const reserved = headroomGb(manifest, hardware.gpu_type);
+  const vramGb = hardware.vram_gb ?? null;
+  const ramGb = hardware.ram_gb;
+  const availableGb = unified
+    ? Math.max(0, ramGb - reserved)
+    : Math.max(0, (vramGb ?? 0) - reserved);
+
+  const empty: MemoryBudget = {
+    unified,
+    vramGb: unified ? null : vramGb,
+    ramGb,
+    reservedGb: reserved,
+    availableGb,
+    pickedThresholdGb: null,
+    pickedTier: null,
+    cpuFallback: false,
+  };
+  if (!tierSpec) return empty;
+
+  // VRAM / unified pool pass — same loop as resolveModelEx so the two
+  // can never disagree on which tier "fits".
+  for (const tier of tierSpec.tiers) {
+    if (tierMatchesPrimary(tier, hardware, unified, reserved)) {
+      return {
+        ...empty,
+        pickedTier: tier,
+        pickedThresholdGb: unified
+          ? unifiedThresholdGb(tier, reserved)
+          : tier.min_vram_gb,
+      };
+    }
+  }
+  if (!unified) {
+    for (const tier of tierSpec.tiers) {
+      if (tierMatchesCpuFallback(tier, hardware, reserved)) {
+        return {
+          ...empty,
+          pickedTier: tier,
+          pickedThresholdGb: tier.min_ram_gb ?? 0,
+          cpuFallback: true,
+        };
+      }
+    }
+  }
+  // Nothing matched — surface the would-be fallback so the UI can
+  // still describe what's about to be loaded.
+  const last = tierSpec.tiers.at(-1) ?? null;
+  return {
+    ...empty,
+    pickedTier: last,
+    pickedThresholdGb: last
+      ? unified
+        ? unifiedThresholdGb(last, reserved)
+        : last.min_vram_gb
+      : null,
   };
 }
 
@@ -373,24 +519,35 @@ function unifiedThresholdGb(tier: ManifestTier, headroom: number): number {
   return (tier.min_ram_gb ?? 0) + headroom;
 }
 
-function tierMatches(
+/** Primary tier-match pass — the one the displayed "Needs ~X GB VRAM"
+ *  hint corresponds to. Discrete GPU checks raw VRAM; unified memory
+ *  checks raw RAM against the unified threshold (which already includes
+ *  OS + paired-transcribe overhead in the manifest). The CPU-fallback
+ *  path is broken out separately so resolveModelEx can defer it until
+ *  the VRAM pass has had a chance to match a smaller tier. */
+function tierMatchesPrimary(
   tier: ManifestTier,
   hw: HardwareProfile,
-  manifest: Manifest,
   unified: boolean,
   headroom: number,
 ): boolean {
   if (unified) {
-    // Single shared pool — VRAM column is the same bytes as RAM, so the
-    // only meaningful check is "is the raw RAM large enough to host the
-    // OS, the LLM, and the paired transcribe model".
     return hw.ram_gb >= unifiedThresholdGb(tier, headroom);
   }
-  // Discrete GPU: either the GPU is big enough to host the model
-  // entirely, or system RAM (after headroom) is enough for CPU
-  // inference. Either path qualifies the tier.
-  const vram = hw.vram_gb ?? 0;
-  if (vram >= tier.min_vram_gb) return true;
+  return (hw.vram_gb ?? 0) >= tier.min_vram_gb;
+}
+
+/** CPU-RAM fallback used only after the VRAM walk produced no hit. A
+ *  discrete-GPU host whose GPU is smaller than every rung still
+ *  deserves a runnable model; we honour `min_ram_gb` (after the
+ *  manifest's per-GPU headroom) so the model can live in system RAM
+ *  and inference can plod along on CPU. Rare in practice — every
+ *  shipped family ladder ends in a min_vram_gb=0 rung. */
+function tierMatchesCpuFallback(
+  tier: ManifestTier,
+  hw: HardwareProfile,
+  headroom: number,
+): boolean {
   const cpuBudget = Math.max(0, hw.ram_gb - headroom);
   return cpuBudget >= (tier.min_ram_gb ?? 0);
 }

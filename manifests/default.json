@@ -1,6 +1,6 @@
 {
   "name": "MyOwnLLM Default",
-  "version": "18",
+  "version": "19",
   "ttl_minutes": 360,
   "default_family": "gemma4",
   "headroom_gb": {

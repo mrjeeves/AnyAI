@@ -3,7 +3,13 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getActiveManifest, setActiveFamily } from "../../providers";
-  import { resolveModel, modeFor, defaultRuntimeFor, tierRuntime } from "../../manifest";
+  import {
+    resolveModel,
+    resolveBudget,
+    modeFor,
+    defaultRuntimeFor,
+    tierRuntime,
+  } from "../../manifest";
   import { loadConfig, saveConfig, invalidateConfigCache } from "../../config";
   import { scrollAffordance } from "../scroll-affordance";
   import type {
@@ -242,6 +248,12 @@
     amd: 1,
   };
 
+  /** Per-tier "this is what the model wants from the host". The same
+   *  number the resolver's primary pass checks against, so the row's
+   *  hint never disagrees with the recommended pick. Discrete-GPU rows
+   *  show the VRAM requirement (CPU fallback is a last resort, and is
+   *  called out separately in the budget header when it triggers).
+   *  Unified rows show the synthesised raw-RAM threshold. */
   function memoryHint(tier: ManifestTier): string {
     if (!hardware || !manifest) {
       const fallback = tier.min_unified_ram_gb ?? tier.min_ram_gb ?? tier.min_vram_gb ?? 0;
@@ -257,7 +269,66 @@
     if (tier.min_vram_gb > 0) {
       return `Needs ~${tier.min_vram_gb} GB VRAM`;
     }
+    // min_vram=0 rungs (transcribe / diarize / tiny LLMs) live in
+    // system RAM. min_ram_gb here is a tier-selection threshold, not
+    // the model's footprint — surface the on-disk size when known so
+    // a 290 MB Moonshine ONNX doesn't read as "Needs ~6 GB RAM".
+    if (tier.disk_mb && tier.disk_mb > 0) {
+      const mb = tier.disk_mb;
+      return mb < 1024 ? `~${mb} MB on disk` : `~${(mb / 1024).toFixed(1)} GB on disk`;
+    }
     return tier.min_ram_gb ? `Needs ~${tier.min_ram_gb} GB RAM` : "Runs on tiny machines";
+  }
+
+  /** Budget breakdown for the active family + mode — the same numbers
+   *  the resolver checked against. Drives the one-liner above each
+   *  mode block so the user can see why a particular tier got picked
+   *  (and why the bigger ones didn't). Returns null when we don't yet
+   *  have hardware / manifest data to compute against. */
+  function budgetFor(name: string, mode: Mode) {
+    if (!hardware || !manifest) return null;
+    return resolveBudget(hardware, manifest, mode, name);
+  }
+
+  function budgetSummary(b: ReturnType<typeof budgetFor>): string {
+    if (!b) return "";
+    const fmt = (n: number) => (Number.isInteger(n) ? `${n}` : n.toFixed(1));
+    const pickName = b.pickedTier?.model ?? "—";
+    const thr = b.pickedThresholdGb ?? 0;
+    const diskMb = b.pickedTier?.disk_mb ?? 0;
+    // Tiers with min_*_gb=0 are the "runs on anything" rungs — usually
+    // transcribe / diarize models living in system RAM via ONNX. "Needs
+    // 0 GB" reads as nonsense; surface the on-disk size instead so the
+    // user sees an actual number for what's about to be loaded.
+    const zeroThreshold = thr <= 0;
+    const sizeLabel = diskMb > 0
+      ? diskMb < 1024
+        ? `~${diskMb} MB`
+        : `~${(diskMb / 1024).toFixed(1)} GB`
+      : "tiny";
+
+    if (b.unified) {
+      // Apple Silicon / no-GPU: single pool. The threshold already
+      // includes OS + transcribe overhead, so the message reads as a
+      // direct fit check against raw RAM rather than a "after reserve"
+      // subtraction (which would double-count the headroom).
+      const total = fmt(b.ramGb);
+      if (zeroThreshold) {
+        return `${total} GB unified RAM → ${pickName} (${sizeLabel} on disk)`;
+      }
+      return `${total} GB unified RAM → ${pickName} (needs ${fmt(thr)} GB · includes ~${fmt(b.reservedGb)} GB OS + transcribe headroom)`;
+    }
+    if (b.cpuFallback) {
+      const vramLabel = b.vramGb != null ? `${fmt(b.vramGb)} GB VRAM` : "no GPU";
+      return `${vramLabel} too small for any rung → CPU fallback: ${pickName} (needs ${fmt(thr)} GB system RAM · ${fmt(b.ramGb)} GB available)`;
+    }
+    const vramLabel = b.vramGb != null ? `${fmt(b.vramGb)} GB VRAM` : "0 GB VRAM";
+    if (zeroThreshold) {
+      // Transcribe / diarize on discrete GPU: doesn't compete with the
+      // LLM's VRAM, so the message focuses on the model size.
+      return `${vramLabel} · ${pickName} runs on CPU (${sizeLabel} on disk)`;
+    }
+    return `${vramLabel} → ${pickName} (needs ${fmt(thr)} GB · ${fmt(b.reservedGb)} GB reserved for system)`;
   }
 
   async function activate(name: string) {
@@ -751,6 +822,7 @@
             {@const isActiveCell = isActive && modeName === activeMode}
             {@const modeRuntime = modeSpec.runtime ?? defaultRuntimeFor(modeName)}
             {@const shared = isShared(manifest, picked.family, modeName)}
+            {@const budget = budgetFor(picked.name, modeName)}
             <div class="mode-block">
               <div class="mode-head">
                 <span class="mode-name">{modeSpec.label || modeName}</span>
@@ -780,6 +852,15 @@
                   </button>
                 {/if}
               </div>
+              {#if budget}
+                <p
+                  class="mode-budget"
+                  class:cpu-fallback={budget.cpuFallback}
+                  title="How the resolver picked the recommended tier for this mode. The numbers here are the same ones the per-tier 'Needs ~X GB' hints below check against."
+                >
+                  {budgetSummary(budget)}
+                </p>
+              {/if}
               <div class="tier-list" aria-label="{picked.family.label} {modeName} tiers">
                 {#each modeSpec.tiers as tier, tierIdx}
                   {@const recommended = tier.model === recommendedModel}
@@ -1210,6 +1291,23 @@
     font-family: inherit;
   }
   .mode-revert:hover { background: #232333; border-color: #3a3a55; color: #c4c4ff; }
+
+  .mode-budget {
+    margin: 0;
+    padding: .35rem .85rem .4rem;
+    font-size: .72rem;
+    color: #aab;
+    line-height: 1.55;
+    background: #0c0c12;
+    border-bottom: 1px solid #18181f;
+    cursor: help;
+    font-variant-numeric: tabular-nums;
+  }
+  .mode-budget.cpu-fallback {
+    color: #d4a64a;
+    background: #16110a;
+    border-bottom-color: #2a2014;
+  }
 
   .tier-list { display: flex; flex-direction: column; }
   .tier {

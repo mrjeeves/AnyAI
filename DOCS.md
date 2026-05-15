@@ -772,8 +772,10 @@ A single manifest can expose multiple families — that's how you ship "use our 
             // Tiers are walked top-to-bottom. First match wins.
             // Unified-memory hosts (apple, none) match on `min_unified_ram_gb` — raw RAM that
             // must include OS headroom AND the paired transcribe model (large-v3-turbo, ~2 GB).
-            // Discrete GPUs (nvidia, amd) match if vram_gb >= min_vram_gb OR
-            // (ram_gb - headroom_gb[gpu]) >= min_ram_gb.
+            // Discrete GPUs (nvidia, amd) walk twice: first for vram_gb >= min_vram_gb (primary),
+            // then — only if nothing matched on VRAM — for (ram_gb - headroom_gb[gpu]) >= min_ram_gb
+            // (last-resort CPU fallback). The displayed "Needs ~X GB VRAM" hint always matches
+            // the primary pass.
             { "min_vram_gb": 24, "min_ram_gb": 24, "min_unified_ram_gb": 32, "model": "gemma4:31b",  "fallback": "gemma4:26b" },
             { "min_vram_gb": 12, "min_ram_gb": 12, "min_unified_ram_gb": 18, "model": "gemma4:12b",  "fallback": "gemma4:e4b" },
             { "min_vram_gb": 5,  "min_ram_gb": 6,  "min_unified_ram_gb": 10, "model": "gemma4:e4b",  "fallback": "gemma4:e2b" },
@@ -802,12 +804,12 @@ A single manifest can expose multiple families — that's how you ship "use our 
 
 **Pi 5 caveat:** Moonshine Small is English-only. If non-English transcription on Pi-class hardware is a hard requirement, override via `mode_overrides.transcribe` or wait for a future multilingual streaming model on the Pi tier.
 
-Discrete GPUs use `min_vram_gb` for the GPU-resident path (model lives on the card, system RAM only hosts the ASR worker + the ollama client), with a CPU-fallback path through `min_ram_gb`.
+Discrete GPUs use `min_vram_gb` for the GPU-resident path (model lives on the card, system RAM only hosts the ASR worker + the ollama client). A last-resort CPU-fallback path through `min_ram_gb` exists for the rare case where every rung wants more VRAM than the GPU has.
 
 **Rules:**
 - A family **must** define `default_mode` and at least one entry under `modes`.
 - **Unified-memory hosts** (`gpu_type` `apple` or `none`) match on `min_unified_ram_gb`. The threshold is raw total RAM — the publisher already factored in OS headroom and the paired transcribe model so a single machine can run text + audio together. When the field is omitted the resolver synthesises it as `min_ram_gb + headroom_gb[gpu_type]`, so legacy tiers keep working.
-- **Discrete-GPU hosts** (`nvidia`, `amd`) match if **either** `vram_gb >= min_vram_gb` (model lives on GPU) **or** `(ram_gb - headroom_gb[gpu_type]) >= min_ram_gb` (CPU fallback).
+- **Discrete-GPU hosts** (`nvidia`, `amd`) walk the ladder twice. **Primary pass:** match if `vram_gb >= min_vram_gb` (model lives on GPU). **Last-resort pass (only if nothing matched on VRAM):** match if `(ram_gb - headroom_gb[gpu_type]) >= min_ram_gb` (model lives in system RAM, inference runs on CPU). The displayed "Needs ~X GB VRAM" hint always matches the primary pass — never the fallback.
 - Tiers walked top-to-bottom; first match wins.
 - Last tier should always be a zero-threshold catch-all.
 - `fallback` is tried if the primary model fails to pull.
