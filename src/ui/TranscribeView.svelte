@@ -163,6 +163,57 @@
    *  this machine. Captured at load + used when the toggle flips on. */
   let defaultDiarizeModel = $state("pyannote-seg-3.0+wespeaker-r34");
 
+  /** Collapsed-state for the right-hand Talking Points pane. Persisted
+   *  in localStorage so the user's manual choice survives reloads;
+   *  `null` means undecided so the hardware-based default below can
+   *  apply. Low-resource hosts (no discrete GPU or <16 GB RAM) start
+   *  collapsed because TP wants the chat LLM in memory alongside the
+   *  ASR + diarize models, and that combination OOMs on tight boxes. */
+  const TP_PANE_STORAGE_KEY = "myownllm.tpPaneCollapsed";
+  function initialTpPaneCollapsed(): boolean | null {
+    try {
+      const v = localStorage.getItem(TP_PANE_STORAGE_KEY);
+      if (v === "1") return true;
+      if (v === "0") return false;
+    } catch {
+      // localStorage may be unavailable in some embedded webviews.
+    }
+    return null;
+  }
+  let tpPaneCollapsed = $state<boolean | null>(initialTpPaneCollapsed());
+
+  // Apply the hardware default the first time `hardware` is non-null,
+  // but only if the user hasn't already toggled the pane themselves
+  // (in which case localStorage has the answer and `tpPaneCollapsed`
+  // is non-null). Reading `tpPaneCollapsed` in the early-return gives
+  // the effect a dependency on it, so a later user-toggle won't
+  // retrigger and clobber the choice — the !== null check bails first.
+  $effect(() => {
+    if (tpPaneCollapsed !== null) return;
+    if (!hardware) return;
+    const lowResource =
+      hardware.gpu_type === "none" || hardware.ram_gb < 16;
+    tpPaneCollapsed = lowResource;
+  });
+
+  let isTpPaneCollapsed = $derived(tpPaneCollapsed === true);
+
+  function setTpPaneCollapsed(next: boolean) {
+    tpPaneCollapsed = next;
+    try {
+      localStorage.setItem(TP_PANE_STORAGE_KEY, next ? "1" : "0");
+    } catch {
+      // localStorage may be unavailable — fall back to in-memory only.
+    }
+  }
+
+  /** Any transcription session in flight (this view's or another's)
+   *  means the ASR + diarize models are resident. On low-resource
+   *  hosts we gate TP interactions on this so the user has to stop
+   *  recording first, letting those models unload before the chat LLM
+   *  loads in for talking-point summarisation. */
+  let tpGatedByTranscription = $derived(transcribeUi.active);
+
   /** Debounced live-transcript flush. Without this, the on-disk
    *  transcript only updates on start/stop/title-edit, so anything
    *  reading the conversation file during a session (notably the
@@ -963,6 +1014,33 @@
       </div>
     </section>
 
+    {#if isTpPaneCollapsed}
+      <aside
+        class="pane right-rail"
+        aria-label="Talking points (collapsed)"
+      >
+        <button
+          class="tp-rail-expand"
+          onclick={() => setTpPaneCollapsed(false)}
+          disabled={tpGatedByTranscription}
+          aria-label="Show talking points"
+          title={tpGatedByTranscription
+            ? "Stop the transcription session first — the ASR + diarize models need to unload before talking points can load the chat model."
+            : "Show talking points"}
+        >
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+            <path
+              fill="currentColor"
+              d="M14.7 6.3a1 1 0 0 1 0 1.4L10.4 12l4.3 4.3a1 1 0 1 1-1.4 1.4l-5-5a1 1 0 0 1 0-1.4l5-5a1 1 0 0 1 1.4 0z"
+            />
+          </svg>
+        </button>
+        <span class="tp-rail-label" aria-hidden="true">Talking points</span>
+        {#if isMyTalkingPoints}
+          <span class="tp-rail-dot" title="Talking points are live"></span>
+        {/if}
+      </aside>
+    {:else}
     <section class="pane right" aria-label="Talking points">
       {#if textModelMissing && textModel}
         <DownloadOverlay
@@ -976,6 +1054,19 @@
         />
       {/if}
       <header class="pane-head">
+        <button
+          class="tp-collapse"
+          onclick={() => setTpPaneCollapsed(true)}
+          aria-label="Hide talking points"
+          title="Hide talking points"
+        >
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+            <path
+              fill="currentColor"
+              d="M9.3 6.3a1 1 0 0 0 0 1.4L13.6 12l-4.3 4.3a1 1 0 1 0 1.4 1.4l5-5a1 1 0 0 0 0-1.4l-5-5a1 1 0 0 0-1.4 0z"
+            />
+          </svg>
+        </button>
         <span class="pane-title">Talking points</span>
         {#if isMyTalkingPoints}
           <span class="tp-running">
@@ -1073,6 +1164,7 @@
         {/if}
       </div>
     </section>
+    {/if}
   </div>
 
   <ModeBar
@@ -1221,6 +1313,79 @@
     position: relative;
   }
   .pane.left { border-right: 1px solid #1a1a1a; }
+  /* Collapsed Talking Points strip — a thin vertical rail with just an
+     expand button + a sideways label. Replaces the full right pane on
+     low-resource hosts so the left pane can take the whole width. */
+  .right-rail {
+    flex: 0 0 36px;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: .5rem;
+    padding: .5rem 0;
+    border-left: 1px solid #1a1a1a;
+    background: #0d0d0d;
+  }
+  .tp-rail-expand {
+    background: none;
+    border: 1px solid #2a2a3a;
+    color: #ccc;
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: border-color .12s, background .12s, color .12s;
+  }
+  .tp-rail-expand:hover:not(:disabled) {
+    border-color: #4a3a7a;
+    background: #1a1730;
+    color: #fff;
+  }
+  .tp-rail-expand:disabled {
+    opacity: .4;
+    cursor: not-allowed;
+  }
+  .tp-rail-label {
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    font-size: .68rem;
+    color: #777;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    font-weight: 600;
+    user-select: none;
+  }
+  .tp-rail-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #b899f7;
+    box-shadow: 0 0 6px #b899f7;
+    animation: rec-pulse 1.4s ease-in-out infinite;
+  }
+  .tp-collapse {
+    background: none;
+    border: 1px solid transparent;
+    color: #888;
+    width: 22px;
+    height: 22px;
+    border-radius: 5px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-right: .25rem;
+    transition: border-color .12s, background .12s, color .12s;
+  }
+  .tp-collapse:hover {
+    border-color: #2a2a3a;
+    background: #1a1a22;
+    color: #ddd;
+  }
   .pane-head {
     display: flex;
     align-items: center;
@@ -1671,6 +1836,19 @@
   @media (max-width: 700px) {
     .split { flex-direction: column; }
     .pane.left { border-right: none; border-bottom: 1px solid #1a1a1a; }
+    .right-rail {
+      flex: 0 0 auto;
+      flex-direction: row;
+      width: 100%;
+      border-left: none;
+      border-top: 1px solid #1a1a1a;
+      padding: .35rem .75rem;
+      gap: .65rem;
+    }
+    .tp-rail-label {
+      writing-mode: horizontal-tb;
+      transform: none;
+    }
     .input-row { flex-wrap: wrap; }
     .name-field { order: 3; flex-basis: 100%; }
   }
