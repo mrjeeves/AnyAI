@@ -1054,19 +1054,6 @@
         />
       {/if}
       <header class="pane-head">
-        <button
-          class="tp-collapse"
-          onclick={() => setTpPaneCollapsed(true)}
-          aria-label="Hide talking points"
-          title="Hide talking points"
-        >
-          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
-            <path
-              fill="currentColor"
-              d="M9.3 6.3a1 1 0 0 0 0 1.4L13.6 12l-4.3 4.3a1 1 0 1 0 1.4 1.4l5-5a1 1 0 0 0 0-1.4l-5-5a1 1 0 0 0-1.4 0z"
-            />
-          </svg>
-        </button>
         <span class="pane-title">Talking points</span>
         {#if isMyTalkingPoints}
           <span class="tp-running">
@@ -1107,6 +1094,19 @@
               Download
             </button>
           {/if}
+          <button
+            class="tp-tool tp-collapse"
+            onclick={() => setTpPaneCollapsed(true)}
+            aria-label="Collapse talking points"
+            title="Collapse talking points"
+          >
+            <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
+              <path
+                fill="currentColor"
+                d="M9.3 6.3a1 1 0 0 0 0 1.4L13.6 12l-4.3 4.3a1 1 0 1 0 1.4 1.4l5-5a1 1 0 0 0 0-1.4l-5-5a1 1 0 0 0-1.4 0z"
+              />
+            </svg>
+          </button>
         </span>
       </header>
       {#if tpActionStatus}
@@ -1367,24 +1367,13 @@
     box-shadow: 0 0 6px #b899f7;
     animation: rec-pulse 1.4s ease-in-out infinite;
   }
-  .tp-collapse {
-    background: none;
-    border: 1px solid transparent;
-    color: #888;
-    width: 22px;
-    height: 22px;
-    border-radius: 5px;
-    cursor: pointer;
+  /* Collapse chevron on the expanded TP pane — matches the .tp-tool
+     chip styling but square so the icon centres cleanly. */
+  .tp-tool.tp-collapse {
+    padding: .25rem .35rem;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    margin-right: .25rem;
-    transition: border-color .12s, background .12s, color .12s;
-  }
-  .tp-collapse:hover {
-    border-color: #2a2a3a;
-    background: #1a1a22;
-    color: #ddd;
   }
   .pane-head {
     display: flex;
