@@ -91,6 +91,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          # Scope the cache by the specific runner image. The default key
+          # only includes runner.os ("Linux"), so ubuntu-22.04 and
+          # ubuntu-latest (24.04) collide and a job restores a target/
+          # built against a different sysroot/glibc — yielding spurious
+          # "can't find crate for tauri" errors on the first build after
+          # changing runners (#159 fallout). Including matrix.platform.os
+          # gives each runner image its own cache namespace.
+          key: ${{ matrix.platform.os }}
 
       - uses: pnpm/action-setup@v4
         with:
