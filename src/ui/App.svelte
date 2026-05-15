@@ -397,6 +397,12 @@
       try {
         const ollamaInstalled = await invoke<boolean>("ollama_installed");
         if (ollamaInstalled) {
+          // /api/tags only reports what the daemon sees, so on a cold
+          // launch the daemon must be up before we trust the empty
+          // result — otherwise an already-pulled model reads as missing
+          // and TranscribeView/Chat flash a download overlay over a
+          // model that's actually on disk.
+          await invoke("ollama_ensure_running").catch(() => {});
           const pulled = await invoke<Array<{ name: string }>>("ollama_list_models");
           textPresent = pulled.some((m) => m.name === pendingTextModel);
         } else {

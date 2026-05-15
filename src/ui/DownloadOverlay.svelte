@@ -13,6 +13,8 @@
     description,
     hardware,
     onComplete,
+    onHide = null,
+    hideLabel = "Hide",
     compact = false,
     followUpDiarize = null,
   } = $props<{
@@ -33,6 +35,15 @@
     hardware: HardwareProfile | null;
     /** Fired once the model is on disk + (for text) Ollama is running. */
     onComplete: () => void;
+    /** When non-null, render a dismiss button alongside the action
+     *  buttons (idle / error / cancelled phases — never mid-pull, where
+     *  Cancel is the dismissal). The host decides what "hide" means;
+     *  TranscribeView wires this to collapsing the Talking Points pane
+     *  so the user can dismiss the overlay even when the text model
+     *  isn't downloaded. */
+    onHide?: (() => void) | null;
+    /** Label shown on the hide button. Defaults to "Hide". */
+    hideLabel?: string;
     /** Compact panes (transcribe split) use this to drop the hardware
      *  line and shrink type so the card fits two-up. */
     compact?: boolean;
@@ -424,6 +435,9 @@
           <span class="runtime-tag">{runtime}</span>
         {/if}
       </button>
+      {#if onHide}
+        <button class="secondary" onclick={() => onHide?.()}>{hideLabel}</button>
+      {/if}
     {:else if phase === "error"}
       <p class="desc error">Something went wrong:</p>
       <code class="error-text">
@@ -438,11 +452,17 @@
         {/each}
       </code>
       <button class="primary" onclick={start}>Retry</button>
+      {#if onHide}
+        <button class="secondary" onclick={() => onHide?.()}>{hideLabel}</button>
+      {/if}
     {:else if phase === "cancelled"}
       <p class="desc">
         Download cancelled. Partial files were cleaned up; click below to start again.
       </p>
       <button class="primary" onclick={start}>Retry</button>
+      {#if onHide}
+        <button class="secondary" onclick={() => onHide?.()}>{hideLabel}</button>
+      {/if}
     {:else}
       <div class="bar" class:indeterminate={percent === null && phase !== "done"}>
         {#if percent !== null}
@@ -578,7 +598,8 @@
   .primary:hover {
     background: #5a5ae0;
   }
-  .cancel {
+  .cancel,
+  .secondary {
     align-self: stretch;
     background: transparent;
     color: #aaa;
@@ -593,7 +614,8 @@
       color 0.12s,
       border-color 0.12s;
   }
-  .cancel:hover {
+  .cancel:hover,
+  .secondary:hover {
     background: #20202a;
     color: #fff;
     border-color: #3a3a55;
