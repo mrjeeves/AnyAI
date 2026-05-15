@@ -14,18 +14,27 @@
   import { loadConfig } from "../../config";
   import { resolveModel, modeFor } from "../../manifest";
   import { scrollAffordance } from "../scroll-affordance";
+  import FamilyDetail from "./FamilyDetail.svelte";
   import type { HardwareProfile, Mode } from "../../types";
 
   type ModelMeta = Awaited<ReturnType<typeof getModelStatusWithMeta>>[number];
 
-  let { onChanged }: { onChanged?: () => void } = $props();
+  let { onChanged, onClose }: { onChanged?: () => void; onClose: () => void } = $props();
 
   let models = $state<ModelMeta[]>([]);
   let loading = $state(true);
+  /** Tab strip: "installed" lists every pulled model in the library;
+   *  "overrides" delegates to FamilyDetail so the user can switch tiers
+   *  inside the active family without leaving the Models section. The
+   *  tab label is "Model Overrides" — same UI as the Family tab's
+   *  detail view, minus the Back button. */
   let tab = $state<"installed" | "overrides">("installed");
 
   let hardware = $state<HardwareProfile | null>(null);
   let activeMode = $state<Mode>("text");
+  /** Active family — used as the seed for the Model Overrides tab so it
+   *  always renders the family the user is actually chatting in. */
+  let activeFamily = $state<string>("");
   /** Every model tag listed in any tier (model or fallback) of the active
    *  family inside the active provider. These are the rows we lock from
    *  deletion: switching modes within the active family stays cheap because
@@ -40,13 +49,10 @@
    *  than the old "in N providers" which lost the family signal entirely. */
   let tagFamilies = $state<Record<string, Array<{ provider: string; familyName: string; familyLabel: string }>>>({});
 
-  let overridePicker = $state<{ mode: Mode; open: boolean } | null>(null);
   /** Per-row override popover. Anchored to the model row, lets the user
    *  pin this exact tag as the override for any mode, or revert all modes
-   *  it currently overrides. The Mode-overrides tab is the inverse view —
-   *  same config field, just keyed by mode rather than by tag. */
+   *  it currently overrides. */
   let rowOverridePicker = $state<{ tag: string; runtime: string } | null>(null);
-  let availableModels = $state<string[]>([]);
   let deleteTarget = $state<{
     name: string;
     size: number;
@@ -65,23 +71,9 @@
     try {
       const config = await loadConfig();
       activeMode = config.active_mode;
+      activeFamily = config.active_family;
     } catch {}
     await reload();
-    try {
-      const manifests = await getAllManifests();
-      const set = new Set<string>();
-      for (const { manifest } of manifests) {
-        for (const family of Object.values(manifest.families ?? {})) {
-          for (const modeSpec of Object.values(family.modes)) {
-            for (const tier of modeSpec.tiers) {
-              set.add(tier.model);
-              set.add(tier.fallback);
-            }
-          }
-        }
-      }
-      availableModels = [...set].sort();
-    } catch {}
   });
 
   async function reload() {
@@ -283,13 +275,6 @@
     );
   }
 
-  async function setOverride(mode: Mode, model: string | null) {
-    await setModeOverride(mode, model);
-    overridePicker = null;
-    await reload();
-    onChanged?.();
-  }
-
   /** Per-row override action. If `mode` is null, revert every mode that
    *  currently overrides to this tag (the Revert path). Otherwise pin
    *  this tag as the override for the picked mode (the Override path).
@@ -345,7 +330,7 @@
 <div class="section">
   <div class="h-tabs">
     <button class:active={tab === "installed"} onclick={() => (tab = "installed")}>Installed</button>
-    <button class:active={tab === "overrides"} onclick={() => (tab = "overrides")}>Mode overrides</button>
+    <button class:active={tab === "overrides"} onclick={() => (tab = "overrides")}>Model Overrides</button>
   </div>
 
   {#if tab === "installed"}
@@ -449,43 +434,21 @@
       </div>
     {/if}
   {:else}
-    <div class="overrides-section">
-      {#each modes as mode}
-        {#await loadConfig() then config}
-          {@const current = config.mode_overrides[mode] ?? null}
-          <div class="override-row">
-            <span class="mode-label">{mode}</span>
-            {#if current}
-              <span class="current-override">{current}</span>
-              <button class="clear-override" onclick={() => setOverride(mode, null)}>clear</button>
-            {:else}
-              <span class="using-provider">provider default</span>
-            {/if}
-            <button class="change-override" onclick={() => (overridePicker = { mode, open: true })}>
-              change
-            </button>
-          </div>
-        {/await}
-      {/each}
-    </div>
-  {/if}
-
-  {#if overridePicker}
-    <div class="picker-overlay" onclick={() => (overridePicker = null)} role="presentation"></div>
-    <div class="picker">
-      <div class="picker-header">
-        Override for <strong>{overridePicker.mode}</strong>
-        <button class="close" onclick={() => (overridePicker = null)}>✕</button>
-      </div>
-      <div class="picker-list">
-        {#each availableModels as tag}
-          <button onclick={() => setOverride(overridePicker!.mode, tag)}>{tag}</button>
-        {/each}
-        {#if availableModels.length === 0}
-          <p class="empty">No models from any provider yet.</p>
-        {/if}
-      </div>
-    </div>
+    <!-- Model Overrides — same UI as the Family tab's detail screen,
+         seeded with whichever family the user is currently chatting in.
+         Switching tiers here writes the same family_overrides config
+         entries the Family tab does, so the chat slot picks up the new
+         pick immediately. -->
+    {#if activeFamily}
+      <FamilyDetail
+        familyName={activeFamily}
+        showBack={false}
+        onChanged={onChanged ?? (() => {})}
+        {onClose}
+      />
+    {:else}
+      <div class="loading">Loading…</div>
+    {/if}
   {/if}
 
   {#if rowOverridePicker}
@@ -649,25 +612,6 @@
     color: #ffd166; opacity: 1; background: #2a2210;
   }
   .override-btn.active:hover { color: #ffe39a; background: #3a3014; }
-  .overrides-section {
-    padding: .75rem;
-    display: flex; flex-direction: column; gap: .5rem;
-    overflow-y: auto;
-  }
-  .override-row {
-    display: flex; align-items: center; gap: .5rem; font-size: .8rem;
-  }
-  .mode-label { width: 80px; color: #888; text-transform: capitalize; }
-  .current-override { flex: 1; font-family: monospace; font-size: .75rem; color: #9a7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .using-provider { flex: 1; color: #444; font-style: italic; }
-  .clear-override, .change-override {
-    background: none; border: none; font-size: .72rem;
-    cursor: pointer; border-radius: 4px; padding: .15rem .35rem;
-  }
-  .clear-override { color: #844; }
-  .clear-override:hover { background: #2a1a1a; color: #f66; }
-  .change-override { color: #557; }
-  .change-override:hover { background: #1a1a2a; color: #6e6ef7; }
   .picker-overlay {
     position: fixed; inset: 0; z-index: 20;
   }
@@ -682,17 +626,6 @@
   }
   .close { background: none; border: none; color: #666; font-size: 1rem; cursor: pointer; }
   .close:hover { color: #ccc; }
-  .picker-list {
-    overflow-y: auto; padding: .5rem;
-    display: flex; flex-direction: column; gap: .2rem;
-  }
-  .picker-list button {
-    text-align: left; background: none; border: none; color: #aaa;
-    font-size: .82rem; font-family: monospace; padding: .4rem .6rem;
-    border-radius: 5px; cursor: pointer;
-  }
-  .picker-list button:hover { background: #1e1e1e; color: #e8e8e8; }
-  .picker-list .empty { color: #555; text-align: center; padding: 1rem; font-style: italic; }
   .row-picker { width: 320px; max-height: 60vh; }
   .row-picker-body {
     padding: .5rem;
