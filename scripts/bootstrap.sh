@@ -109,7 +109,12 @@ install_onnxruntime_linux() {
   log "Downloading onnxruntime v${ort_version} (${ort_arch}) …"
   local tmpdir
   tmpdir="$(mktemp -d)"
-  trap 'rm -rf "$tmpdir"' RETURN
+  # Double-quote so $tmpdir expands now (the local goes out of scope when
+  # we return, and a deferred expansion under `set -u` would explode with
+  # "tmpdir: unbound variable"). Disarm the trap inside its own body so it
+  # doesn't re-fire when the *outer* caller (install_linux_deps) returns.
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmpdir'; trap - RETURN" RETURN
   if ! curl -fsSL "$url" -o "$tmpdir/ort.tgz"; then
     warn "onnxruntime download failed from $url — install manually."
     return
