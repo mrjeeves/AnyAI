@@ -2,7 +2,7 @@
 
 # MyOwnLLM
 
-### Local LLMs and real-time transcription, on your machine, in one binary.<br>The piece every &ldquo;bring your own LLM&rdquo; agent assumes you've already built.
+### Local LLMs and real-time transcription, on your machine.<br>The piece every &ldquo;bring your own LLM&rdquo; agent assumes you've already built.
 
 [**myownllm.net**](https://myownllm.net) — installers, screenshots, the pitch
 
@@ -24,14 +24,14 @@ You starred OpenClaw, or Continue, or Cline, or opencode, or Aider. You imagined
 
 In practice, "bring your own" quietly turns into "bring your own paid API key," and the bills add up faster than anyone budgeted for — every agent loop, every autocomplete burst, every transcript summary, charged by the token to a different vendor. The local-AI dream was supposed to cut that line, not refactor it.
 
-MyOwnLLM is what people thought was in the box. One binary that resolves *the right model for this machine* against a JSON manifest, serves it on OpenAI / Ollama / Anthropic ports, and ships the on-device real-time transcription pipeline that the rest of the ecosystem hand-waves as a solved problem. After 20 years writing AI software it still took a week of yak-shaving to wire all this up by hand — so if that's the floor for someone who does this for a living, nobody else stands a chance. Hence this.
+MyOwnLLM is what people thought was in the box. A `myownllm` CLI that resolves *the right model for this machine* against a JSON manifest, serves it on OpenAI / Ollama / Anthropic ports, and ships the on-device real-time transcription pipeline that the rest of the ecosystem hand-waves as a solved problem. After 20 years writing AI software it still took a week of yak-shaving to wire all this up by hand — so if that's the floor for someone who does this for a living, nobody else stands a chance. Hence this.
 
-**Two solved paths, one binary:**
+**Two solved paths:**
 
 |   |   |
 |---|---|
 | **A local LLM endpoint that just works** | OpenAI-compatible HTTP on `127.0.0.1:1473` (also Ollama, also Anthropic), serving whichever model fits the machine — picked by a JSON manifest you, your team, or someone you trust controls. Cursor, Continue, Aider, Cline, Zed, Open WebUI, opencode, **OpenClaw**, OpenClaude, and your own scripts target it on day one. No metered tokens, no vendor lock-in. |
-| **Real-time transcription that just works** | Mic-to-text in ~1 s on a Pi 5 (English) or 80–200 ms on capable hardware (25 languages), with optional speaker diarization that stays stable across the whole session and a Talking-Points summary that grows alongside the live transcript. No second daemon, no Python venv, no cloud round-trip. |
+| **Real-time transcription that just works** | Mic-to-text in ~1 s on a Pi 5 (English) or 80–200 ms on capable hardware (25 languages), with optional speaker diarization that stays stable across the whole session and a Talking-Points summary that grows alongside the live transcript. In-process — no Python venv, no whisper-server sidecar, no cloud round-trip. |
 
 ## Install
 
@@ -59,13 +59,13 @@ myownllm run      # terminal chat
 
 ## Live transcription, on your machine
 
-A first-class capture pipeline, not a sidebar feature. Mic in, segmented transcript out, with speakers attributed and a live summary growing alongside it — all on the same binary, all on-device.
+A first-class capture pipeline, not a sidebar feature. Mic in, segmented transcript out, with speakers attributed and a live summary growing alongside it — all in-process, all on-device.
 
 - **Streaming ASR.** Moonshine Small on a Pi 5 (English, ~500 ms), Parakeet TDT 0.6B v3 on capable hardware (25 languages, 80–200 ms). Streaming-native: one segment per audio chunk, no 5-second minimum.
 - **Speaker diarization.** Opt-in toggle. `pyannote-segmentation-3.0` plus a speaker embedder (`wespeaker-r34` on capable hardware, `campp-small` on the lower rung), with online agglomerative clustering on the Rust side — speaker IDs stay stable across the entire conversation, not just a single window. Click a speaker pill to rename them; the labels persist with the session.
 - **Talking Points.** A continuous LLM loop summarises the live transcript into a growing bullet list while you talk. The list updates as the conversation evolves, is persisted with the session, and can be paused, resumed, or stopped from the mode bar. It claims the chat-model slot while running so it can use whichever local model your hardware tier picked for text.
 - **Crash-resilient by design.** Audio chunks land on disk before the ASR backend sees them, so a force-quit can be drained on next launch. Transcripts, speaker labels, diarize state, and the talking-points list are all part of the conversation record.
-- **One binary.** No second daemon, no Python venv, no cloud round-trip. The same `myownllm` process hosts ASR, diarization, and the chat model used to summarise — coordinated through two singleton slots on the GUI's mode bar.
+- **In-process.** No Python venv, no whisper-server sidecar, no cloud round-trip. ASR, diarization, and the chat model used to summarise all run inside `myownllm` itself, coordinated through two singleton slots on the GUI's mode bar.
 
 Both paths — chat and transcription — are designed to be available on the GUI, the headless `serve` API, and the LAN remote view. The desktop GUI is the most complete today; full audio capture over `serve` / remote is on the near-term roadmap.
 
