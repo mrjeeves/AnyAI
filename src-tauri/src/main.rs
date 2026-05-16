@@ -663,9 +663,7 @@ fn main() {
     // pointer at the headless-friendly subcommands so the user knows what
     // to try next instead of staring at a silent prompt.
     #[cfg(target_os = "linux")]
-    if std::env::var_os("DISPLAY").is_none()
-        && std::env::var_os("WAYLAND_DISPLAY").is_none()
-    {
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
         eprintln!("myownllm: no DISPLAY or WAYLAND_DISPLAY — can't open the desktop GUI.");
         eprintln!();
         eprintln!("On a headless box, try one of these instead:");
