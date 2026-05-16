@@ -82,43 +82,70 @@ install_binary() {
 #   myownllm: error while loading shared libraries: libwebkit2gtk-4.1.so.0: …
 # Even `myownllm setup` can't recover from that — the binary never executes.
 # Install the runtime libs at install time so the first launch just works.
+#
+# Privilege-escalation rules:
+#   - Already root → run the package manager directly.
+#   - Non-root → just call `sudo …`. sudo prompts via /dev/tty (not stdin), so
+#     this works even under `curl … | sh` where the script's stdin is the pipe.
+#     If sudo can't get credentials (no tty, no askpass, no cached creds), the
+#     command exits non-zero and we surface a clear "run this yourself" error.
+#   - DEBIAN_FRONTEND=noninteractive + dpkg confdef/confold flags keep apt from
+#     stalling on a debconf prompt that nobody is around to answer.
+#
+# Previously the script tried to detect "sudo can't prompt" up-front (via
+# `sudo -n true || [ -t 0 ]`) and *skipped* the install with a warning when
+# it thought sudo wouldn't work — which silently left fresh boxes with a
+# binary that can't launch. Now: try once, fail loudly, return non-zero so
+# the caller aborts instead of pretending the install succeeded.
 install_linux_runtime_deps() {
   [ "$OS" = "linux" ] || return 0
   [ "$DRY_RUN" = "true" ] && { log "(dry-run) would install Linux runtime deps"; return 0; }
 
   if command -v apt-get >/dev/null 2>&1; then
-    log "Installing Linux runtime libraries (libwebkit2gtk-4.1, libayatana-appindicator3)…"
+    log "Installing Linux runtime libraries via apt (libwebkit2gtk-4.1, libayatana-appindicator3, librsvg2)…"
     pkgs="libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2"
+    apt_opts="-y --no-install-recommends -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
     if [ "$(id -u)" = "0" ]; then
-      apt-get update -qq && apt-get install -y --no-install-recommends $pkgs
-    elif sudo -n true 2>/dev/null || [ -t 0 ]; then
-      sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends $pkgs
+      env DEBIAN_FRONTEND=noninteractive apt-get update -qq \
+        && env DEBIAN_FRONTEND=noninteractive apt-get install $apt_opts $pkgs \
+        || { _runtime_dep_failure "apt-get" "$pkgs" "sudo apt-get install -y $pkgs"; return 1; }
     else
-      warn "Cannot run sudo non-interactively; skipping runtime-lib install."
-      warn "If 'myownllm' fails with 'libwebkit2gtk-4.1.so.0: cannot open shared object file', run:"
-      warn "  sudo apt-get install -y $pkgs"
+      sudo env DEBIAN_FRONTEND=noninteractive apt-get update -qq \
+        && sudo env DEBIAN_FRONTEND=noninteractive apt-get install $apt_opts $pkgs \
+        || { _runtime_dep_failure "sudo apt-get" "$pkgs" "sudo apt-get install -y $pkgs"; return 1; }
     fi
   elif command -v dnf >/dev/null 2>&1; then
     log "Installing Linux runtime libraries via dnf…"
     pkgs="webkit2gtk4.1 libappindicator-gtk3 librsvg2"
     if [ "$(id -u)" = "0" ]; then
-      dnf install -y $pkgs
+      dnf install -y $pkgs || { _runtime_dep_failure "dnf" "$pkgs" "sudo dnf install -y $pkgs"; return 1; }
     else
-      sudo dnf install -y $pkgs || warn "dnf install failed; install manually: sudo dnf install -y $pkgs"
+      sudo dnf install -y $pkgs || { _runtime_dep_failure "sudo dnf" "$pkgs" "sudo dnf install -y $pkgs"; return 1; }
     fi
   elif command -v pacman >/dev/null 2>&1; then
     log "Installing Linux runtime libraries via pacman…"
     pkgs="webkit2gtk-4.1 libappindicator-gtk3 librsvg"
     if [ "$(id -u)" = "0" ]; then
-      pacman -S --noconfirm --needed $pkgs
+      pacman -S --noconfirm --needed $pkgs || { _runtime_dep_failure "pacman" "$pkgs" "sudo pacman -S $pkgs"; return 1; }
     else
-      sudo pacman -S --noconfirm --needed $pkgs || warn "pacman install failed; install manually: sudo pacman -S $pkgs"
+      sudo pacman -S --noconfirm --needed $pkgs || { _runtime_dep_failure "sudo pacman" "$pkgs" "sudo pacman -S $pkgs"; return 1; }
     fi
   else
-    warn "Unrecognized Linux distro — cannot auto-install runtime libs."
-    warn "If 'myownllm' fails with 'libwebkit2gtk-4.1.so.0: cannot open shared object file',"
-    warn "install your distro's webkit2gtk-4.1, libayatana-appindicator3, and librsvg2 packages."
+    err "Unrecognized Linux distro — cannot auto-install Tauri runtime libs."
+    err "Install your distro's equivalents of webkit2gtk-4.1, libayatana-appindicator3,"
+    err "and librsvg2, then re-run this installer."
+    return 1
   fi
+
+  log "Runtime libraries installed."
+  return 0
+}
+
+_runtime_dep_failure() {
+  err "$1 failed to install the MyOwnLLM runtime libraries: $2"
+  err "MyOwnLLM cannot launch without these (the binary is dynamically linked"
+  err "against libwebkit2gtk-4.1.so.0). Install them yourself and re-run:"
+  err "  $3"
 }
 
 ensure_on_path() {
@@ -241,7 +268,14 @@ fi
 # Install runtime libs after the binary is in place. Doing it here (rather than
 # inside try_release / build_from_source) means we run it once even if we fall
 # back from a release download to a source build.
-install_linux_runtime_deps
+#
+# If this fails we exit non-zero: the binary is on disk, but it won't launch
+# until the libs are installed. Continuing silently was the old behaviour and
+# left users with a "myownllm: command does nothing" mystery on first run.
+if ! install_linux_runtime_deps; then
+  err "Aborting: $PREFIX_DIR/myownllm is on disk but cannot launch without the libs above."
+  exit 1
+fi
 
 if [ "$DRY_RUN" != "true" ]; then
   ensure_on_path
@@ -252,4 +286,10 @@ if [ "$RUN_AFTER" = "true" ] && [ "$DRY_RUN" != "true" ]; then
   exec "$PREFIX_DIR/myownllm" run
 fi
 
-log "Done. Try: myownllm run | myownllm serve | myownllm preload text vision"
+log "Done."
+log ""
+log "Quick start:"
+log "  myownllm serve    # OpenAI/Ollama/Anthropic-compatible API on :1473 (works headless)"
+log "  myownllm run      # terminal chat (works headless)"
+log "  myownllm status   # provider, hardware, daemon, update"
+log "  myownllm          # desktop GUI (needs a display — X11 or Wayland)"
