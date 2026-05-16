@@ -148,6 +148,115 @@ _runtime_dep_failure() {
   err "  $3"
 }
 
+# MyOwnLLM transcription requires onnxruntime ≥1.20 (ort 2.0.0-rc.12 +
+# api-22). It's not bundled in the release tarball — keeps the artifact
+# lean and lets us ship a single binary per platform — so we fetch
+# Microsoft's prebuilt and drop the dylib next to the binary at install
+# time. The app has an in-process fallback that fetches the same dylib
+# into ~/.myownllm/runtime/ on first launch if we miss it here, so
+# "warn and continue" is safe.
+install_onnxruntime() {
+  [ "$DRY_RUN" = "true" ] && { log "(dry-run) would fetch onnxruntime"; return 0; }
+
+  # Read the pinned version from the source we built/installed from.
+  # In the canonical curl|sh path the .ort-version file lives in the
+  # tagged repo, so fetch it over raw.githubusercontent. Fall back to
+  # a sensible default rather than failing if the network blip caught
+  # this specific request.
+  ort_version=""
+  if command -v curl >/dev/null 2>&1; then
+    ort_version="$(curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/.ort-version" 2>/dev/null | tr -d '[:space:]')"
+  fi
+  if [ -z "$ort_version" ] && [ -f .ort-version ]; then
+    ort_version="$(tr -d '[:space:]' < .ort-version)"
+  fi
+  if [ -z "$ort_version" ]; then
+    ort_version="1.20.1"
+    warn "couldn't read .ort-version; falling back to ${ort_version}"
+  fi
+
+  case "$OS-$ARCH" in
+    macos-aarch64) pkg="onnxruntime-osx-arm64-${ort_version}";   ext="tgz" ;;
+    macos-x86_64)  pkg="onnxruntime-osx-x86_64-${ort_version}";  ext="tgz" ;;
+    linux-x86_64)  pkg="onnxruntime-linux-x64-${ort_version}";   ext="tgz" ;;
+    linux-aarch64) pkg="onnxruntime-linux-aarch64-${ort_version}"; ext="tgz" ;;
+    *)
+      warn "onnxruntime: no prebuilt for ${OS}-${ARCH} — install manually from https://github.com/microsoft/onnxruntime/releases"
+      return 0
+      ;;
+  esac
+  url="https://github.com/microsoft/onnxruntime/releases/download/v${ort_version}/${pkg}.${ext}"
+
+  log "Downloading onnxruntime v${ort_version} (${OS}-${ARCH})…"
+  tmp="$(mktemp -d)"
+  if ! curl -fsSL "$url" -o "$tmp/ort.tgz"; then
+    warn "onnxruntime download failed from $url"
+    warn "Transcription will fail until you fix this. Recovery options:"
+    warn "  1. Re-run this installer when networking is back."
+    warn "  2. Run \`myownllm fetch-onnxruntime\` to retry from the app."
+    warn "  3. Place libonnxruntime manually under \$HOME/.myownllm/runtime/."
+    rm -rf "$tmp"
+    return 0
+  fi
+  if ! tar -xzf "$tmp/ort.tgz" -C "$tmp"; then
+    warn "onnxruntime archive extraction failed — try \`myownllm fetch-onnxruntime\`."
+    rm -rf "$tmp"
+    return 0
+  fi
+
+  # Where to place the dylib. PREFIX_DIR is the bin dir we just put
+  # myownllm in; the binary's `current_exe()/..` is the second entry
+  # in the search list (see src-tauri/src/ort_setup.rs), so putting
+  # the dylib alongside the binary just works. On Linux we keep both
+  # the versioned `.so.${V}` and an unversioned `.so` symlink so the
+  # ort_setup search finds the file under either name.
+  if [ "$OS" = "linux" ]; then
+    src="$tmp/${pkg}/lib/libonnxruntime.so.${ort_version}"
+    [ -f "$src" ] || src="$(find "$tmp/${pkg}/lib" -maxdepth 1 -name 'libonnxruntime.so*' -type f | head -n1)"
+    if [ -z "$src" ] || [ ! -f "$src" ]; then
+      warn "couldn't locate libonnxruntime.so in $tmp/${pkg}/lib"
+      rm -rf "$tmp"; return 0
+    fi
+    _install_with_sudo "$src" "$PREFIX_DIR/libonnxruntime.so.${ort_version}" 0644
+    _symlink_with_sudo "libonnxruntime.so.${ort_version}" "$PREFIX_DIR/libonnxruntime.so"
+    _symlink_with_sudo "libonnxruntime.so.${ort_version}" "$PREFIX_DIR/libonnxruntime.so.1"
+  elif [ "$OS" = "macos" ]; then
+    src="$tmp/${pkg}/lib/libonnxruntime.${ort_version}.dylib"
+    [ -f "$src" ] || src="$(find "$tmp/${pkg}/lib" -maxdepth 1 -name 'libonnxruntime*.dylib' -type f | head -n1)"
+    if [ -z "$src" ] || [ ! -f "$src" ]; then
+      warn "couldn't locate libonnxruntime.dylib in $tmp/${pkg}/lib"
+      rm -rf "$tmp"; return 0
+    fi
+    _install_with_sudo "$src" "$PREFIX_DIR/libonnxruntime.dylib" 0644
+  fi
+  rm -rf "$tmp"
+  log "onnxruntime v${ort_version} installed to $PREFIX_DIR/"
+}
+
+# Common install primitive: same sudo-fallback logic as install_binary,
+# parameterised so the ort install can reuse it without duplicating the
+# permission probe.
+_install_with_sudo() {
+  src="$1"; dst="$2"; mode="$3"
+  dst_dir="$(dirname "$dst")"
+  mkdir -p "$dst_dir" 2>/dev/null || sudo mkdir -p "$dst_dir"
+  if [ -w "$dst_dir" ]; then
+    install -m "$mode" "$src" "$dst"
+  else
+    sudo install -m "$mode" "$src" "$dst"
+  fi
+}
+
+_symlink_with_sudo() {
+  target="$1"; link="$2"
+  link_dir="$(dirname "$link")"
+  if [ -w "$link_dir" ]; then
+    ln -sf "$target" "$link"
+  else
+    sudo ln -sf "$target" "$link"
+  fi
+}
+
 ensure_on_path() {
   case ":$PATH:" in
     *":$PREFIX_DIR:"*) return 0 ;;
@@ -276,6 +385,13 @@ if ! install_linux_runtime_deps; then
   err "Aborting: $PREFIX_DIR/myownllm is on disk but cannot launch without the libs above."
   exit 1
 fi
+
+# Best-effort onnxruntime fetch. Failures fall through to the in-app
+# first-run fetcher (which writes to ~/.myownllm/runtime/ instead of
+# the install prefix), so we don't abort the install — the user can
+# still launch the GUI, chat, and use the API server without ORT, and
+# transcription will recover itself on first launch.
+install_onnxruntime || warn "onnxruntime install skipped — will fetch on first launch."
 
 if [ "$DRY_RUN" != "true" ]; then
   ensure_on_path

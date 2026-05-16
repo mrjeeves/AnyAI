@@ -33,7 +33,7 @@ axum = { version = "0.7", features = ["macros"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 hyper = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "blocking"] }
 futures-util = "0.3"
 bytes = "1"
 dashmap = "6"
@@ -41,12 +41,16 @@ sha2 = "0.10"
 hex = "0.4"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
-# Local transcription stack. ASR + diarization run as ONNX models via the
-# `ort` crate (onnxruntime). Loading is `load-dynamic` so onnxruntime is
-# resolved from a bundled binary next to the executable rather than
-# statically linked — keeps the build matrix simple, avoids ~100 MB of
-# static-link bloat per platform, and lets users disable ML features by
-# removing the runtime file.
+# Local transcription stack. ASR + diarization run as ONNX models via
+# the `ort` crate (onnxruntime). Loading is `load-dynamic` so the
+# onnxruntime dylib is resolved at runtime rather than statically
+# linked — keeps the build matrix simple, avoids ~100 MB of static-link
+# bloat per platform, and lets users disable ML features by removing
+# the runtime file. The dylib itself is delivered by `scripts/install.sh`
+# / `scripts/install.ps1` at install time, with an in-process first-run
+# fallback in `src/ort_install.rs` that downloads into
+# `~/.myownllm/runtime/` for users who installed via the Tauri
+# `.msi`/`.dmg`/`.deb` bundles directly.
 #
 # cpal handles cross-platform audio capture (CoreAudio / WASAPI / ALSA on
 # macOS / Windows / Linux). All audio + ASR + diarization work runs
@@ -88,6 +92,14 @@ symphonia = { version = "0.5", default-features = false, features = ["wav", "fla
 # `realfft` is half the work of a generic complex FFT for our real
 # 512-point frames and keeps the dep surface narrow.
 realfft = "3"
+# Archive extraction for the first-run onnxruntime fetcher (`ort_install`).
+# Microsoft ships onnxruntime as `.tgz` for macOS/Linux and `.zip` for
+# Windows, so we need both. `zip` is the only widely-used pure-Rust zip
+# reader; `flate2` + `tar` are the standard pair for `.tar.gz`. All three
+# are popular, audited crates with minimal transitive deps.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+flate2 = "1"
+tar = "0.4"
 
 [profile.release]
 panic = "abort"
