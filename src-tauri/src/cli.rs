@@ -1065,11 +1065,10 @@ async fn cmd_fetch_onnxruntime() -> Result<()> {
 
     // Synchronous; spawn_blocking keeps it off the async runtime's
     // worker pool. Mapping the JoinError → anyhow keeps the `?` chain.
-    let path = tokio::task::spawn_blocking(move || {
-        crate::ort_install::ensure_runtime_dylib(progress)
-    })
-    .await
-    .map_err(|e| anyhow!("spawn_blocking join failed: {e}"))??;
+    let path =
+        tokio::task::spawn_blocking(move || crate::ort_install::ensure_runtime_dylib(progress))
+            .await
+            .map_err(|e| anyhow!("spawn_blocking join failed: {e}"))??;
 
     eprintln!(); // terminate the carriage-return progress line
     println!("onnxruntime installed at {}", path.display());

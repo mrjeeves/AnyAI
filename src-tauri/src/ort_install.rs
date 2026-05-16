@@ -101,7 +101,10 @@ fn upstream_archive() -> Result<(String, ArchiveKind)> {
     } else if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
         (format!("onnxruntime-linux-x64-{v}.tgz"), ArchiveKind::Tgz)
     } else if cfg!(target_os = "linux") && cfg!(target_arch = "aarch64") {
-        (format!("onnxruntime-linux-aarch64-{v}.tgz"), ArchiveKind::Tgz)
+        (
+            format!("onnxruntime-linux-aarch64-{v}.tgz"),
+            ArchiveKind::Tgz,
+        )
     } else {
         bail!(
             "no prebuilt onnxruntime available for target_os={} / target_arch={} — \
@@ -206,9 +209,8 @@ pub fn ensure_runtime_dylib(mut on_progress: Box<ProgressFn>) -> Result<PathBuf>
     // dylib alone is well over 10 MB on every platform. Anything
     // smaller is almost certainly an HTML error page or a corrupted
     // download.
-    let meta = fs::metadata(&extracted_to).with_context(|| {
-        format!("statting extracted dylib at {}", extracted_to.display())
-    })?;
+    let meta = fs::metadata(&extracted_to)
+        .with_context(|| format!("statting extracted dylib at {}", extracted_to.display()))?;
     if meta.len() < 1_000_000 {
         let _ = fs::remove_file(&extracted_to);
         bail!(
@@ -245,7 +247,10 @@ fn extract_dylib_from_tgz(archive: &Path, dir: &Path, target_name: &str) -> Resu
 
     for entry in tar.entries().context("reading tar entries")? {
         let mut entry = entry.context("reading tar entry header")?;
-        let path = entry.path().context("decoding tar entry path")?.into_owned();
+        let path = entry
+            .path()
+            .context("decoding tar entry path")?
+            .into_owned();
         // We only want the actual shared library file, not its
         // versioned symlinks. tar `EntryType` distinguishes them; on
         // macOS/Linux the upstream tarball contains the real file as
@@ -258,8 +263,8 @@ fn extract_dylib_from_tgz(archive: &Path, dir: &Path, target_name: &str) -> Resu
         if !is_dylib_filename(&path) {
             continue;
         }
-        let mut out = fs::File::create(&tmp)
-            .with_context(|| format!("creating {}", tmp.display()))?;
+        let mut out =
+            fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
         std::io::copy(&mut entry, &mut out).context("copying dylib from tar")?;
         out.flush().ok();
         drop(out);
@@ -302,8 +307,8 @@ fn extract_dylib_from_zip(archive: &Path, dir: &Path, target_name: &str) -> Resu
         if !is_dylib_filename(Path::new(&name)) {
             continue;
         }
-        let mut out = fs::File::create(&tmp)
-            .with_context(|| format!("creating {}", tmp.display()))?;
+        let mut out =
+            fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
         std::io::copy(&mut entry, &mut out).context("copying dylib from zip")?;
         out.flush().ok();
         drop(out);
@@ -347,7 +352,10 @@ mod tests {
         let v = ort_version();
         assert!(!v.is_empty(), ".ort-version file is empty");
         // Sanity: looks like a semver-ish string with at least one dot.
-        assert!(v.contains('.'), ".ort-version doesn't look like a version: {v:?}");
+        assert!(
+            v.contains('.'),
+            ".ort-version doesn't look like a version: {v:?}"
+        );
         // Defence against stray whitespace in the file leaking into the URL.
         assert!(
             !v.contains(char::is_whitespace),
@@ -397,7 +405,9 @@ mod tests {
             assert!(is_dylib_filename(Path::new("lib/libonnxruntime.so")));
             assert!(!is_dylib_filename(Path::new("lib/libsomething.so")));
         } else if cfg!(target_os = "macos") {
-            assert!(is_dylib_filename(Path::new("lib/libonnxruntime.1.20.1.dylib")));
+            assert!(is_dylib_filename(Path::new(
+                "lib/libonnxruntime.1.20.1.dylib"
+            )));
             assert!(is_dylib_filename(Path::new("lib/libonnxruntime.dylib")));
         } else if cfg!(target_os = "windows") {
             assert!(is_dylib_filename(Path::new("lib/onnxruntime.dll")));

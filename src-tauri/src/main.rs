@@ -781,17 +781,18 @@ fn main() {
                     let ah = app_handle.clone();
                     tauri::async_runtime::spawn_blocking(move || {
                         use tauri::Emitter;
-                        let emit_progress = |stage: &str, bytes: u64, total: u64, error: Option<&str>| {
-                            let _ = ah.emit(
-                                "myownllm://ort-install-progress",
-                                serde_json::json!({
-                                    "stage": stage,
-                                    "bytes": bytes,
-                                    "total": total,
-                                    "error": error,
-                                }),
-                            );
-                        };
+                        let emit_progress =
+                            |stage: &str, bytes: u64, total: u64, error: Option<&str>| {
+                                let _ = ah.emit(
+                                    "myownllm://ort-install-progress",
+                                    serde_json::json!({
+                                        "stage": stage,
+                                        "bytes": bytes,
+                                        "total": total,
+                                        "error": error,
+                                    }),
+                                );
+                            };
                         emit_progress("downloading", 0, 0, None);
                         let ah_for_cb = ah.clone();
                         let progress_cb: Box<ort_install::ProgressFn> =
