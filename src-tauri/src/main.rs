@@ -656,6 +656,27 @@ fn main() {
         return;
     }
 
+    // Bare `myownllm` (no subcommand) opens the desktop GUI. On a headless
+    // Linux box — server, container, fresh VPS — Tauri's webview can't
+    // attach to a display and the process exits without printing anything,
+    // which looks identical to "the binary did nothing." Bail early with a
+    // pointer at the headless-friendly subcommands so the user knows what
+    // to try next instead of staring at a silent prompt.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_none()
+        && std::env::var_os("WAYLAND_DISPLAY").is_none()
+    {
+        eprintln!("myownllm: no DISPLAY or WAYLAND_DISPLAY — can't open the desktop GUI.");
+        eprintln!();
+        eprintln!("On a headless box, try one of these instead:");
+        eprintln!("  myownllm serve    # OpenAI/Ollama/Anthropic-compatible API on :1473");
+        eprintln!("  myownllm run      # terminal chat");
+        eprintln!("  myownllm status   # provider, hardware, daemon, update");
+        eprintln!();
+        eprintln!("On a desktop session, ensure DISPLAY (X11) or WAYLAND_DISPLAY is set.");
+        std::process::exit(1);
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
