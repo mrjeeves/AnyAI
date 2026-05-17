@@ -1111,7 +1111,23 @@ The `manifests/` cache stores one entry per URL. When a manifest reached via an 
 - [Node.js](https://nodejs.org) 18+
 - [pnpm](https://pnpm.io) 8+
 - [Tauri CLI v2](https://tauri.app): `cargo install tauri-cli`
-- A copy of `onnxruntime` for ASR + diarization (bundled with the binary in the release builds; for local `cargo run`, install via your package manager or download from <https://github.com/microsoft/onnxruntime/releases>)
+- A copy of `onnxruntime` ≥1.20 for ASR + diarization. The end-user install scripts (`install.sh` / `install.ps1`) fetch it automatically into the install prefix; if you install via the Tauri `.msi`/`.dmg`/`.deb` bundle directly, MyOwnLLM downloads it on first launch into `~/.myownllm/runtime/` and you'll see a one-time progress toast. For local `cargo run`, run `scripts/bootstrap.sh` (Linux/macOS) or `scripts/bootstrap.ps1` (Windows) — both honour `.ort-version` at the repo root.
+
+### Troubleshooting onnxruntime
+
+Transcription error "**onnxruntime isn't loaded**" means none of the search paths contained a usable `libonnxruntime`. The app searches, in order:
+
+1. `ORT_DYLIB_PATH` (env var — absolute path override)
+2. The directory containing the `myownllm` binary
+3. `~/.myownllm/runtime/` (where the first-run fetcher writes; also a safe place to drop a manual override)
+4. System install locations (`/usr/lib`, `/opt/homebrew/lib`, `C:\Program Files\onnxruntime\…`)
+
+Recovery, in order of effort:
+
+- **Run `myownllm fetch-onnxruntime`** from a terminal. Downloads the pinned version (see `.ort-version`) into `~/.myownllm/runtime/` and prints the destination path.
+- **Drop the file manually.** Download `onnxruntime-{win-x64,osx-arm64,osx-x86_64,linux-x64,linux-aarch64}-${VERSION}.{zip,tgz}` from <https://github.com/microsoft/onnxruntime/releases>, extract the `lib/onnxruntime.dll` / `libonnxruntime.{dylib,so.1}` file into `~/.myownllm/runtime/`, and restart.
+- **Set `ORT_DYLIB_PATH`** to the absolute path of the dylib if you want to point at a specific copy (debugging, side-by-side versions).
+- **Windows Defender** occasionally quarantines `onnxruntime.dll` after the install script extracts it. It's a Microsoft-signed binary; restore from quarantine and add an exclusion for the install dir.
 
 **Linux:** `sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev libasound2-dev`
 (`libasound2-dev` is the ALSA dev headers cpal links against for mic capture.)

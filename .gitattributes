@@ -1,0 +1,23 @@
+# Force LF line endings on files that have to be interpreted by a Unix
+# shell, regardless of git's autocrlf setting on the client. Without
+# this, a Windows clone with `core.autocrlf=true` (the default) gets
+# CRLF endings on `scripts/bootstrap.sh`, turning the
+# `#!/usr/bin/env bash` shebang into `env bash\r`, which the kernel
+# then can't resolve → `bash\r: No such file or directory`.
+#
+# Other text files (.md, .json, source code) are left to git's default
+# normalization — most editors handle either ending fine, and we don't
+# want to fight people's local editor settings on prose.
+*.sh   text eol=lf
+*.bash text eol=lf
+# `scripts/bootstrap.sh`, `scripts/install.sh` and friends without a
+# .sh suffix get the same treatment when added later. The leading
+# `scripts/` keeps the rule scoped — we don't want eol=lf on, say, a
+# Windows-only helper that ends up in this dir by mistake.
+scripts/*.sh text eol=lf
+
+# Conversely, PowerShell scripts should stay CRLF — that's what Windows
+# tooling (and pwsh on Windows) writes by default. Forcing CRLF
+# explicitly prevents a *nix contributor's editor from quietly rewriting
+# them to LF, which trips up some older PS hosts.
+*.ps1 text eol=crlf

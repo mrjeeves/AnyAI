@@ -93,6 +93,71 @@ function Try-Release {
     }
 }
 
+# MyOwnLLM transcription needs onnxruntime ≥1.20. It's not bundled in
+# the release zip — keeps the artifact lean and lets us ship one
+# binary per platform — so we fetch Microsoft's prebuilt and drop the
+# DLL next to myownllm.exe at install time. The app has an in-process
+# first-run fallback (~/.myownllm/runtime/) so "warn and continue" is
+# safe on download failure.
+function Install-OnnxRuntime {
+    if ($DryRun) { Log "(dry-run) would fetch onnxruntime"; return }
+
+    # Read the pinned version from the source we're installing from.
+    $ortVersion = ""
+    try {
+        $ortVersion = (Invoke-RestMethod -Uri "https://raw.githubusercontent.com/$Repo/main/.ort-version" -Headers @{ "User-Agent" = "myownllm-installer" }).Trim()
+    } catch {
+        if (Test-Path ".ort-version") { $ortVersion = (Get-Content ".ort-version" -Raw).Trim() }
+    }
+    if (-not $ortVersion) {
+        $ortVersion = "1.20.1"
+        Warn "couldn't read .ort-version; falling back to $ortVersion"
+    }
+
+    if ($arch -ne "x86_64") {
+        Warn "onnxruntime: no Microsoft prebuilt for arch '$arch' — install manually."
+        return
+    }
+    $pkg = "onnxruntime-win-x64-$ortVersion"
+    $url = "https://github.com/microsoft/onnxruntime/releases/download/v$ortVersion/$pkg.zip"
+
+    Log "Downloading onnxruntime v$ortVersion (windows-x64)…"
+    $tmp = New-Item -ItemType Directory -Force -Path (Join-Path $env:TEMP "myownllm-ort-$([guid]::NewGuid())")
+    try {
+        $zip = Join-Path $tmp "ort.zip"
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+        } catch {
+            Warn "onnxruntime download failed: $($_.Exception.Message)"
+            Warn "Transcription will fail until you fix this. Recovery options:"
+            Warn "  1. Re-run this installer when networking is back."
+            Warn "  2. Run 'myownllm fetch-onnxruntime' to retry from the app."
+            Warn "  3. Place onnxruntime.dll in $env:USERPROFILE\.myownllm\runtime\."
+            return
+        }
+        Expand-Archive -Path $zip -DestinationPath $tmp -Force
+        $dll = Get-ChildItem -Path (Join-Path $tmp $pkg) -Recurse -Filter "onnxruntime.dll" | Select-Object -First 1
+        if (-not $dll) {
+            Warn "onnxruntime.dll not found inside archive — upstream layout may have changed."
+            return
+        }
+        if (-not (Test-Path $Prefix)) {
+            New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
+        }
+        Copy-Item -Force $dll.FullName (Join-Path $Prefix "onnxruntime.dll")
+        Log "onnxruntime v$ortVersion installed to $Prefix\onnxruntime.dll"
+    } catch {
+        # Windows Defender will occasionally quarantine a freshly-
+        # extracted DLL during the Copy-Item. Surface the actual error
+        # so the user can act on it (whitelist + re-run) rather than
+        # guessing.
+        Warn "onnxruntime install failed: $($_.Exception.Message)"
+        Warn "If Defender flagged it, restore from quarantine and re-run."
+    } finally {
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
 function Build-FromSource {
     Log "Building from source…"
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
@@ -131,6 +196,15 @@ function Build-FromSource {
 
 if ($FromSource -or -not (Try-Release)) {
     Build-FromSource
+}
+
+# Best-effort onnxruntime fetch. Failures fall through to the in-app
+# first-run fetcher (which writes to ~/.myownllm/runtime/ instead of
+# the install prefix), so we don't abort the install.
+try {
+    Install-OnnxRuntime
+} catch {
+    Warn "onnxruntime install skipped: $($_.Exception.Message). Will fetch on first launch."
 }
 
 if ($Run -and -not $DryRun) {

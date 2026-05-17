@@ -39,7 +39,7 @@
 
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// Snapshot of what happened during [`initialize`]. Read by the
@@ -84,31 +84,51 @@ impl OrtStatus {
     }
 }
 
-static STATUS: OnceLock<OrtStatus> = OnceLock::new();
+// `Mutex<Option<OrtStatus>>` rather than `OnceLock<OrtStatus>` because
+// the first-run fetcher (see `ort_install`) needs to re-run init after
+// it drops a freshly-downloaded dylib into `~/.myownllm/runtime/`.
+// `ort::init` itself is one-shot (only the first commit takes effect),
+// so a second `initialize()` is a no-op at the ort level — but flipping
+// our snapshot to `initialized: true` is what `build_backends` checks
+// before letting a record click through.
+static STATUS: Mutex<Option<OrtStatus>> = Mutex::new(None);
 
 /// Process-global status. Returns a sentinel "not yet initialized"
 /// status if [`initialize`] hasn't been called — keeps callers from
 /// having to `Option::unwrap_or_else` on the path.
 pub fn status() -> OrtStatus {
-    STATUS.get().cloned().unwrap_or(OrtStatus {
-        initialized: false,
-        dylib_path: None,
-        searched: Vec::new(),
-        error: Some("ort_setup::initialize() has not been called".to_string()),
-    })
+    STATUS
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or(OrtStatus {
+            initialized: false,
+            dylib_path: None,
+            searched: Vec::new(),
+            error: Some("ort_setup::initialize() has not been called".to_string()),
+        })
 }
 
 /// Find + load the onnxruntime dylib and commit `ort::init`. Safe to
-/// call multiple times — only the first commit takes effect; later
-/// calls are no-ops. Should be called from `main` at process startup,
-/// before any backend tries to construct a `Session::builder`.
+/// call multiple times — once a successful load has been recorded we
+/// keep the result; otherwise we retry (the dylib may have been
+/// fetched after the first attempt). Should be called from `main` at
+/// process startup, before any backend tries to construct a
+/// `Session::builder`.
 pub fn initialize() {
-    if STATUS.get().is_some() {
-        return;
+    {
+        let g = STATUS.lock().expect("ort_setup STATUS poisoned");
+        if let Some(s) = g.as_ref() {
+            if s.initialized {
+                return;
+            }
+        }
     }
     let (status, log_line) = run_init();
     eprintln!("[ort_setup] {log_line}");
-    let _ = STATUS.set(status);
+    if let Ok(mut g) = STATUS.lock() {
+        *g = Some(status);
+    }
 }
 
 fn run_init() -> (OrtStatus, String) {
@@ -226,7 +246,19 @@ fn candidate_paths_with(env_override: Option<&str>) -> Vec<PathBuf> {
         }
     }
 
-    // 3. System install locations.
+    // 3. App-managed runtime dir — where the first-run fetcher drops
+    //    the dylib for installs that didn't get it from the install
+    //    script (e.g. .msi/.dmg/.deb, AV-quarantined system copies).
+    //    Also a stable spot for advanced users to manually drop a
+    //    libonnxruntime they want to override the system one.
+    if let Some(home) = dirs::home_dir() {
+        let runtime = home.join(".myownllm").join("runtime");
+        for name in dylib_filenames() {
+            out.push(runtime.join(name));
+        }
+    }
+
+    // 4. System install locations.
     for base in system_lib_dirs() {
         for name in dylib_filenames() {
             out.push(Path::new(base).join(name));
@@ -342,6 +374,23 @@ mod tests {
         assert!(paths
             .iter()
             .any(|p| p.to_string_lossy().contains("onnxruntime")));
+    }
+
+    #[test]
+    fn candidate_paths_includes_app_runtime_dir() {
+        // Where ort_install drops the dylib on first launch. Without
+        // this entry in the search list, the fetched dylib would be
+        // invisible to ort_setup and the next `initialize()` would
+        // still report "not loaded".
+        let paths = candidate_paths_with(None);
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.to_string_lossy().contains(".myownllm")
+                    && p.to_string_lossy().contains("runtime")),
+            "expected ~/.myownllm/runtime/ in candidate list, got: {:?}",
+            paths
+        );
     }
 
     #[test]

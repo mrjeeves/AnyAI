@@ -8,9 +8,22 @@ default: help
 help:
     @just --list
 
-# Install all dev prerequisites (Rust, Node, pnpm, Tauri CLI, Linux GTK deps).
+# Install all dev prerequisites (Rust, Node, pnpm, Tauri CLI, GTK / Windows SDK deps).
+# Platform-split — `[unix]` covers Linux + macOS, `[windows]` covers
+# Windows. `set shell` above forces every recipe through bash, so on
+# Windows the `[windows]` recipe still goes through git-bash — but git-
+# bash can exec native Windows binaries by name, so a `powershell ...`
+# line resolves to the real powershell.exe and the .ps1 bootstrap runs
+# in a proper PS host.
+[unix]
+[doc("Install all dev prerequisites (Rust, Node, pnpm, Tauri CLI, GTK deps).")]
 setup:
     @./scripts/bootstrap.sh
+
+[windows]
+[doc("Install all dev prerequisites (Rust, Node, pnpm, Tauri CLI, Windows SDK).")]
+setup:
+    @powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap.ps1
 
 # Run the GUI in dev mode with hot reload.
 dev:

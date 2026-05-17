@@ -765,9 +765,23 @@ fn build_backends(
     // onnxruntime is missing / incompatible and what to do about it.
     let ort_status = crate::ort_setup::status();
     if !ort_status.initialized {
+        // The first-run fetcher (`ort_install`) usually drops a dylib
+        // into `~/.myownllm/runtime/` automatically on launch; if
+        // we're still here the auto-fetch is either in flight (user
+        // clicked record before the download finished) or has failed
+        // (offline, AV interference, unsupported arch). Surface every
+        // one of the recovery paths so a non-Rust user can fix it
+        // without filing an issue.
+        let runtime_dir = crate::ort_install::runtime_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "~/.myownllm/runtime/".to_string());
         return Err(anyhow!(
             "onnxruntime isn't loaded — {}. \
-             Install onnxruntime \u{2265}1.20 (e.g. `brew install onnxruntime` on macOS), or set ORT_DYLIB_PATH to the libonnxruntime.{{dylib,so,dll}} you want to use, then restart MyOwnLLM.",
+             Recovery options, in order: \
+             (1) wait — MyOwnLLM downloads onnxruntime automatically on first launch (see the toast); \
+             (2) run `myownllm fetch-onnxruntime` from a terminal and restart; \
+             (3) drop a libonnxruntime.{{dll,dylib,so.1}} \u{2265}1.20 into {runtime_dir} and restart; \
+             (4) set ORT_DYLIB_PATH to the absolute path of the dylib and restart.",
             ort_status.diagnostic()
         ));
     }

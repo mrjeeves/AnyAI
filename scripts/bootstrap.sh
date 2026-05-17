@@ -93,7 +93,17 @@ install_onnxruntime_linux() {
     fi
   done
 
+  # Single source of truth — see /.ort-version in the repo root.
+  # `scripts/bootstrap.sh` lives one level down, so resolve relative
+  # to this script's location rather than $PWD (which varies between
+  # `./scripts/bootstrap.sh` and `bash scripts/bootstrap.sh` runs).
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local ort_version_file="${script_dir}/../.ort-version"
   local ort_version="1.20.1"
+  if [[ -f "$ort_version_file" ]]; then
+    ort_version="$(tr -d '[:space:]' < "$ort_version_file")"
+  fi
   local ort_arch
   case "$ARCH" in
     x86_64|amd64)  ort_arch="x64" ;;

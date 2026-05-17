@@ -15,6 +15,7 @@ pub async fn run(args: Vec<String>) -> Result<()> {
         Some("export") => cmd_export(&args[1..]).await,
         Some("purge") => cmd_purge(&args[1..]).await,
         Some("update") => crate::self_update::cmd_update(&args[1..]).await,
+        Some("fetch-onnxruntime") => cmd_fetch_onnxruntime().await,
         Some("help") | Some("--help") | Some("-h") => {
             print_help();
             Ok(())
@@ -56,6 +57,10 @@ COMMANDS:
                 Subcommands: models | conversations | data    (pass -f to skip prompt)
   update        Update to the latest release (one shot: check + download + apply)
                 Subcommands: status | check | apply | enable | disable
+  fetch-onnxruntime
+                Download the pinned onnxruntime release into ~/.myownllm/runtime/.
+                Use this if transcription fails with "onnxruntime isn't loaded"
+                and the install script didn't fetch it for you.
 
 FLAGS (run):
   --mode <text|transcribe>
@@ -1024,4 +1029,48 @@ fn base64_encode(s: &str) -> String {
         i += 3;
     }
     out
+}
+
+/// `myownllm fetch-onnxruntime` — explicit, sync alternative to the
+/// Tauri setup hook's auto-fetch. Useful for headless installs and as
+/// a recovery path the error message can point users at.
+async fn cmd_fetch_onnxruntime() -> Result<()> {
+    use std::io::Write;
+    let target = crate::ort_install::target_dylib_path()?;
+    if target.exists() {
+        println!("onnxruntime already present at {}", target.display());
+        return Ok(());
+    }
+    println!("Fetching onnxruntime → {} …", target.display());
+
+    // Carriage-return progress on a single stderr line. Stays
+    // readable in CI logs (each MiB sample is dropped onto its own
+    // line by most CI captures) but renders as a single updating bar
+    // in an interactive terminal.
+    let progress: Box<crate::ort_install::ProgressFn> = Box::new(|bytes, total| {
+        if total > 0 {
+            let pct = (bytes as f64 / total as f64 * 100.0) as u64;
+            let _ = write!(
+                std::io::stderr(),
+                "\r  {:>3}%  {:>10} / {:>10} bytes",
+                pct,
+                bytes,
+                total
+            );
+        } else {
+            let _ = write!(std::io::stderr(), "\r  {:>10} bytes", bytes);
+        }
+        let _ = std::io::stderr().flush();
+    });
+
+    // Synchronous; spawn_blocking keeps it off the async runtime's
+    // worker pool. Mapping the JoinError → anyhow keeps the `?` chain.
+    let path =
+        tokio::task::spawn_blocking(move || crate::ort_install::ensure_runtime_dylib(progress))
+            .await
+            .map_err(|e| anyhow!("spawn_blocking join failed: {e}"))??;
+
+    eprintln!(); // terminate the carriage-return progress line
+    println!("onnxruntime installed at {}", path.display());
+    Ok(())
 }
