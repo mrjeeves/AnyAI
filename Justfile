@@ -10,11 +10,12 @@ help:
 
 # Install all dev prerequisites (Rust, Node, pnpm, Tauri CLI, GTK / Windows SDK deps).
 # Platform-split — `[unix]` covers Linux + macOS, `[windows]` covers
-# Windows. `set shell` above forces every recipe through bash, so on
-# Windows the `[windows]` recipe still goes through git-bash — but git-
-# bash can exec native Windows binaries by name, so a `powershell ...`
-# line resolves to the real powershell.exe and the .ps1 bootstrap runs
-# in a proper PS host.
+# Windows. The `[script(...)]` attribute on the Windows recipe makes
+# `just` invoke PowerShell directly with the recipe body, bypassing
+# `set shell := bash` above — without this, a Windows clone that finds
+# bash on PATH (git-bash, WSL) would route through bash and fail to
+# locate `powershell` (WSL bash in particular doesn't expose Windows
+# binaries by their unqualified name).
 [unix]
 [doc("Install all dev prerequisites (Rust, Node, pnpm, Tauri CLI, GTK deps).")]
 setup:
@@ -22,8 +23,9 @@ setup:
 
 [windows]
 [doc("Install all dev prerequisites (Rust, Node, pnpm, Tauri CLI, Windows SDK).")]
+[script("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command")]
 setup:
-    @powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap.ps1
+    & .\scripts\bootstrap.ps1
 
 # Run the GUI in dev mode with hot reload.
 dev:
